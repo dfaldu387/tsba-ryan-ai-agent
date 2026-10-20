@@ -1,0 +1,28 @@
+{
+  "name": "tsba-ai-agent",
+  "private": true,
+  "version": "0.1.0",
+  "description": "TSBA Technical Support assistant — password-protected preview (Ask + Progress). React + Node + Postgres/pgvector + pg-boss.",
+  "workspaces": [
+    "packages/shared",
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "build:shared": "npm run build -w @tsba/shared",
+    "dev:backend": "npm run dev -w @tsba/backend",
+    "dev:frontend": "npm run dev -w @tsba/frontend",
+    "dev": "npm run build:shared && concurrently -n api,web -c yellow,cyan \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "build": "npm run build:shared && npm run build -w @tsba/backend && npm run build -w @tsba/frontend",
+    "migrate": "npm run migrate -w @tsba/backend",
+    "ingest": "npm run ingest -w @tsba/backend",
+    "start": "npm run start -w @tsba/backend",
+    "typecheck": "npm run typecheck -w @tsba/shared && npm run typecheck -w @tsba/backend && npm run typecheck -w @tsba/frontend"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

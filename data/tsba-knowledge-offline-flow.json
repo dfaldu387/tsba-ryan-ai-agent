@@ -1,0 +1,62 @@
+[
+  {
+    "id": "SOF-SAFE-1",
+    "kind": "rule",
+    "brand": "SOFAR",
+    "model": "SAR-100",
+    "topic": "System offline & reconnection",
+    "title": "Never tell a customer to press or hold the Reset button on a SOFAR SAR-100",
+    "text": "Never tell a customer to press or hold the Reset button on a SOFAR SAR-100 export-limit logger. Holding Reset for about 4 seconds restores factory settings, including the export (feed-in) limit settings. If a customer asks whether they should reset, hold the reset button, or press reset to fix Wi-Fi, the answer is no: a reset wipes the export settings and the system then has to be reconfigured. Tell them not to reset it and to contact TSBA, who will take it from there.",
+    "source": "SOFAR SAR-100 User Manual, 8.4 p. 34; 7.2 p. 19"
+  },
+  {
+    "id": "SOF-SAFE-2",
+    "kind": "rule",
+    "brand": "SOFAR",
+    "model": "SAR-100",
+    "topic": "System offline & reconnection",
+    "title": "Never tell a customer to change export, feed-in, CT, meter or inverter settings",
+    "text": "Never tell a SOFAR SAR-100 customer to change export, feed-in, CT, meter or inverter settings. The same configuration web page that sets the Wi-Fi also holds these settings, so a customer must not change anything on those pages. Only the Wi-Fi step is customer-safe; everything else is handled by TSBA or a licensed electrician.",
+    "source": "SOFAR SAR-100 User Manual, 7.3 pp. 21-22"
+  },
+  {
+    "id": "SOF-SAFE-3",
+    "kind": "rule",
+    "brand": "SOFAR",
+    "model": "SAR-100",
+    "topic": "System offline & reconnection",
+    "title": "Never ask a customer to open the SAR-100 enclosure, switchboard or inverter",
+    "text": "Never ask a SOFAR SAR-100 customer to open the SAR-100 enclosure, the switchboard or the inverter, or to look at internal lights. The logger and its lights sit inside the box. Electrical work must be done by a licensed electrician; a customer should never open any of these.",
+    "source": "SOFAR SAR-100 User Manual, 6.3 p. 10"
+  },
+  {
+    "id": "SOF-SAFE-4",
+    "kind": "rule",
+    "brand": "SOFAR",
+    "model": "SAR-100",
+    "topic": "System offline & reconnection",
+    "title": "If the logger login was changed or anything unexpected appears, hand over to the team",
+    "text": "If the SAR-100 logger login has been changed from the default, or anything unexpected appears during a Wi-Fi reconnection, stop and hand the system over to the TSBA team rather than guessing or trying further steps.",
+    "source": "SOFAR SAR-100 User Manual, 7.1-7.3 pp. 17-27"
+  },
+  {
+    "id": "SOF-SAFE-5",
+    "kind": "rule",
+    "brand": "SOFAR",
+    "model": "SAR-100",
+    "topic": "System offline & reconnection",
+    "title": "Never ask for or repeat a customer's Wi-Fi password in shared chat logs",
+    "text": "Never ask for or repeat a customer's Wi-Fi password in chat logs that are shared with others. The customer enters their own Wi-Fi password on their device during reconnection; it must not be collected or echoed back in a shared conversation.",
+    "source": "SOFAR SAR-100 User Manual, 7.3 pp. 21-24 (Wi-Fi configuration); TSBA offline-support flow v0.1 safety rule 5"
+  },
+  {
+    "id": "SOF-SAR100-RECONNECT",
+    "kind": "rule",
+    "brand": "SOFAR",
+    "model": "SAR-100",
+    "topic": "System offline & reconnection",
+    "title": "SOFAR SAR-100: customer-safe Wi-Fi reconnect steps after a home Wi-Fi change",
+    "text": "Use these customer-safe steps only when a SOFAR customer has an SAR-100 export-limit box and the house Wi-Fi changed. The Wi-Fi must be 2.4 GHz (the SAR-100 does not support 5 GHz only), and the Wi-Fi name and password must not contain ; , = or \" characters. Stand near the box with a phone. Steps: 1) On the phone, open Wi-Fi settings and connect to the network starting with AP_ followed by a serial number (the box's own Wi-Fi). 2) Open a browser and go to 10.10.100.254. 3) Log in with username admin and password admin (if installers changed it and it does not work, stop and contact TSBA). 4) If asked whether to encrypt the access point, choose Cancel. 5) Open the network settings and choose Wireless connection — do not change any export-limit, CT or meter settings on the way. 6) Select the home Wi-Fi network and enter its password. 7) Leave 'Automatically obtain IP address' set to Enable and click Next. 8) Click OK and wait for the box to restart. 9) Reconnect the phone to the home Wi-Fi and check the SOLARMAN app after about 10 minutes. If anything does not match these steps, or it is still offline after 10 minutes, do not try anything else — contact TSBA. Never advise opening the enclosure, resetting the box, or changing export settings.",
+    "source": "SOFAR SAR-100 User Manual, sections 7.1 and 7.3 (pp. 17-27)"
+  }
+]

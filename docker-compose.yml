@@ -1,0 +1,25 @@
+# Postgres 16 with the pgvector extension preinstalled.
+# Start it with:  docker compose up -d
+# (If you don't have Docker, point DATABASE_URL at any Postgres that has pgvector;
+#  see README → "Database without Docker".)
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: tsba-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tsba
+      POSTGRES_PASSWORD: tsba
+      POSTGRES_DB: tsba
+    ports:
+      - "5432:5432"
+    volumes:
+      - tsba-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tsba -d tsba"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  tsba-pgdata:
