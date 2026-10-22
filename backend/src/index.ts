@@ -34,6 +34,11 @@ async function main(): Promise<void> {
   // and the first request is fast. In memory mode this loads + embeds the KB.
   await getStorage();
 
+  // Seed the first admin account (from ADMIN_EMAIL / ADMIN_PASSWORD) if the
+  // user table is empty, so the panel is never locked out on a fresh install.
+  const { seedAdmin } = await import('./users.js');
+  await seedAdmin();
+
   // Postgres mode only: start the durable background queue (embedding jobs).
   if (env.storage === 'postgres') {
     try {

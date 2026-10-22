@@ -1,5 +1,5 @@
 import type { KnowledgeEntry } from '@tsba/shared';
-import { pool, query, toVectorLiteral } from '../db.js';
+import { pool, query } from '../db.js';
 import { embeddingProvider, entryEmbeddingText } from '../embeddings.js';
 import { enqueueEmbedJobs, stopQueue } from '../queue.js';
 import { loadKnowledgeEntries } from '../knowledge-data.js';
@@ -25,8 +25,8 @@ async function upsert(e: KnowledgeEntry): Promise<void> {
 async function embedInline(entries: KnowledgeEntry[]): Promise<void> {
   const vectors = await embeddingProvider.embed(entries.map((e) => entryEmbeddingText(e)));
   for (let i = 0; i < entries.length; i++) {
-    await query('UPDATE knowledge_entries SET embedding = $1::vector, embedded_at = now() WHERE id = $2', [
-      toVectorLiteral(vectors[i]),
+    await query('UPDATE knowledge_entries SET embedding = $1::real[], embedded_at = now() WHERE id = $2', [
+      vectors[i],
       entries[i].id,
     ]);
   }

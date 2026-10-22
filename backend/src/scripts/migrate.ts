@@ -4,18 +4,15 @@ import { dirname, resolve } from 'node:path';
 import { pool } from '../db.js';
 import { env } from '../env.js';
 
-// Applies db/schema.sql. The vector column dimension is fixed at 1024 in the
-// schema; if EMBEDDING_DIM is set to something else we rewrite it on the way in.
+// Applies db/schema.sql. Embeddings are a plain real[] column (cosine computed
+// in-app), so there is no fixed vector dimension to rewrite here.
 const here = dirname(fileURLToPath(import.meta.url));
 const schemaPath = resolve(here, '../../../db/schema.sql');
 
 async function main(): Promise<void> {
-  let sql = readFileSync(schemaPath, 'utf8');
-  if (env.embeddingDim !== 1024) {
-    sql = sql.replace(/vector\(1024\)/g, `vector(${env.embeddingDim})`);
-  }
+  const sql = readFileSync(schemaPath, 'utf8');
   await pool.query(sql);
-  console.log(`Schema applied (vector dim ${env.embeddingDim}).`);
+  console.log(`Schema applied (embedding dim ${env.embeddingDim}, stored as real[]).`);
   await pool.end();
 }
 

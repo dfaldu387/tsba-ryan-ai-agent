@@ -19,6 +19,7 @@ export function AskTab({ onAuthError }: { onAuthError: () => void }) {
   const [currentId, setCurrentId] = useState<number | null>(null);
   const [audience, setAudience] = useState<Audience>('installer');
   const [channel, setChannel] = useState<Channel>('chat');
+  const [recipient, setRecipient] = useState('');
   const [question, setQuestion] = useState('');
   const [loading, setLoading] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
@@ -51,7 +52,7 @@ export function AskTab({ onAuthError }: { onAuthError: () => void }) {
     setLoading(true);
     setCurrentId(null);
     try {
-      const draft = await createDraft({ question: q, audience, channel });
+      const draft = await createDraft({ question: q, audience, channel, recipient: recipient.trim() || null });
       setDrafts((prev) => [...prev, draft]);
       setCurrentId(draft.id);
       setQuestion('');
@@ -109,6 +110,16 @@ export function AskTab({ onAuthError }: { onAuthError: () => void }) {
                 ))}
               </div>
             </div>
+          </div>
+          <div className="field">
+            <label className="eyebrow" htmlFor="recipient">Send approved reply to <i>(optional)</i></label>
+            <input
+              id="recipient"
+              type="text"
+              value={recipient}
+              onChange={(e) => setRecipient(e.target.value)}
+              placeholder="e.g. customer@example.com or +61…"
+            />
           </div>
           <form className="field" style={{ gap: 10 }} onSubmit={submit}>
             <label className="eyebrow" htmlFor="q">Their message</label>

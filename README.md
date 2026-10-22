@@ -1,8 +1,20 @@
 # TSBA Assistant · Preview
 
-A password-protected web preview of the **TSBA Technical Support assistant**. One page, two tabs:
+A multi-user admin panel for the **TSBA Technical Support assistant**. Account-based sign-in with roles & permissions; one page, four tabs:
 
+**Accounts & roles.** Sign in with an email + password (no more shared password). Each account has one role:
+
+| Role | Can |
+| --- | --- |
+| **Admin** | Everything, incl. manage users, connections, knowledge sources and approvals |
+| **Manager** | Connect accounts, run Drive/Gmail scans, ask the agent, approve drafts |
+| **Viewer** | Read-only: dashboard, knowledge base and drafts |
+
+Routes and UI are gated on **permissions** (`manage_users`, `manage_connections`, `run_ingest`, `approve_drafts`, `ask`, `view`) derived from the role. The first admin is seeded from `ADMIN_EMAIL` / `ADMIN_PASSWORD` on first start; after that, Admins manage users in the panel. Passwords are hashed with scrypt; the session is a signed token re-validated against the live user on every request (so disabling a user or changing a role takes effect immediately).
+
+- **Admin** — the default landing panel: introduces the agent (what it is, what it can do, the guardrails it always follows) and shows a live overview — drafting engine / embeddings / storage status, knowledge-base totals (documents, chunks, folder sources, split by Drive vs. Email), draft activity, a connections summary, and — for Admins — a **Users & roles** manager (add users, change roles, enable/disable, delete, with last-admin lock-out protection). Backed by `GET /api/overview` and `GET/POST/PATCH/DELETE /api/users`.
 - **Ask** — pick who&rsquo;s asking (Customer / Installer / Sales rep) and the channel (Chat / Text / Email), type a question, and get a cited draft reply with **Approve & send / Edit / Reject**. Replies only move between the *Waiting / Handed to team / Sent* lists — nothing is sent to any real channel.
+- **Connections** — connect **Google Drive** (knowledge source) and **Gmail** (email channel) over Google OAuth 2.0. See [Connections](#connections-google-drive--gmail) below.
 - **Progress** — a glanceable checklist of what&rsquo;s done, in progress and next, plus a link to the shared sheet. Updated every few days.
 
 Built from the brief in `TEAM_PROMPT_TSBA_Preview.md`, the layout/prompt in `ask-tsba-reference.html`, the 75 knowledge entries in `tsba-knowledge-v0.1.json`, and the SOFAR offline flow in `TSBA_Offline_Flow_v0.1.md`.
@@ -58,18 +70,24 @@ Open <http://localhost:5173>, enter `APP_PASSWORD`, and you&rsquo;re in. In this
 loads straight from `data/*.json` on startup and the approval queue lives in memory (cleared on
 restart) — no `migrate`, no `ingest`, no Postgres.
 
-## Setup — with Postgres + pgvector (optional)
+## Setup — with Postgres (optional, no pgvector)
 
-Turn this on when you want durable storage and the background job queue. Set `STORAGE=postgres` in `.env`, then:
+Turn this on when you want durable storage (users, drafts, connections and knowledge survive restarts) and the background job queue. **No extensions required** — embeddings are stored as a `real[]` column and cosine similarity is computed in the app, so any stock PostgreSQL 12+ works (no pgvector to build on Windows).
 
 ```bash
-docker compose up -d          # or point DATABASE_URL at your own Postgres — see below
-npm run migrate               # create the schema
-npm run ingest -- --inline    # load knowledge + embeddings (omit --inline to use the background queue)
+# 1) Create the app role + database (needs a superuser — run once).
+#    On Windows the bundled client is at "C:\Program Files\PostgreSQL\18\bin\psql.exe".
+psql -U postgres -h localhost -f db/setup-postgres.sql
+
+# 2) Point DATABASE_URL in .env at it and switch STORAGE=postgres, then:
+npm run migrate               # create the schema (users, knowledge_entries, …)
+npm run ingest -- --inline    # load knowledge + embeddings (omit --inline to use the queue)
 npm run dev
 ```
 
-> **Background-jobs path:** run `npm run ingest` *without* `--inline` to enqueue durable `embed-entry` jobs. Start the backend (`npm run dev`) and its `pg-boss` worker processes them in the background. `--inline` is just a convenience for a one-shot setup with no server running.
+`db/setup-postgres.sql` creates the role/database named in your `DATABASE_URL` (default `tsba`/`tsba`). It's idempotent and keeps the password in sync with `.env`.
+
+> **Background-jobs path:** run `npm run ingest` *without* `--inline` to enqueue durable `embed-entry` jobs; the backend's `pg-boss` worker processes them. `--inline` is a convenience for a one-shot setup with no server running.
 >
 > Note: XAMPP ships MySQL, not Postgres — you still need a Postgres instance for this mode.
 
@@ -83,6 +101,116 @@ npm run dev
 | `npm run ingest [-- --inline]` | Load knowledge; enqueue (or inline) embeddings |
 | `npm start` | Run the built backend (serves the built SPA in production) |
 | `npm run typecheck` | Type-check everything |
+
+## Connections (Google Drive + Gmail)
+
+The **Connections** tab links the external accounts the assistant draws on — the first step of the
+blueprint&rsquo;s Lane 1 (Google Drive as a knowledge source) and the email channel (Gmail). Both use one
+Google OAuth 2.0 client but are modelled as **separate connectors** with least-privilege scopes:
+
+| Connector | Scopes requested | Used for |
+| --- | --- | --- |
+| Google Drive | `drive.readonly` | Ingesting product guides, warranties and data sheets |
+| Gmail | `gmail.readonly`, `gmail.send` | Receiving and sending support email (replies stay approval-gated) |
+
+Both also request `openid email profile` so the UI can show which account was connected.
+
+**Tokens are encrypted at rest** (AES-256-GCM, key derived from `SESSION_SECRET`) and never leave the
+server. In `memory` storage they live in-process (cleared on restart); in `postgres` they go in the
+`connections` table. The server auto-refreshes an access token when it is within 60s of expiry.
+
+If `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` are unset, the tab shows both connectors as **&ldquo;not
+configured&rdquo;** and the rest of the app runs unaffected.
+
+### One-time Google Cloud setup
+
+1. In the **Google Cloud console → APIs & Services**, enable the **Google Drive API** and **Gmail API**.
+2. **Create credentials → OAuth client ID**, application type **Web application**.
+3. Add the exact **Authorized redirect URI** (must match `GOOGLE_REDIRECT_URI`):
+   `http://localhost:8080/api/oauth/google/callback` (use your real domain in production).
+4. On the **OAuth consent screen**, add the Google account(s) you&rsquo;ll test with as **Test users** while
+   the app is unverified.
+5. Put the client ID/secret in `.env`:
+   ```
+   GOOGLE_CLIENT_ID=...apps.googleusercontent.com
+   GOOGLE_CLIENT_SECRET=...
+   GOOGLE_REDIRECT_URI=http://localhost:8080/api/oauth/google/callback
+   ```
+6. Restart the backend, open **Connections**, and click **Connect**.
+
+### Connection API
+
+| Method & path | Does |
+| --- | --- |
+| `GET /api/connections` | Status of every connector (configured / connected / account / scopes) |
+| `POST /api/connections/:provider/connect` | Returns the Google consent URL to redirect to |
+| `GET /api/oauth/google/callback` | OAuth redirect target; exchanges the code, stores tokens, bounces back to the UI |
+| `DELETE /api/connections/:provider` | Revokes upstream (best effort) and deletes the stored tokens |
+
+`:provider` is `google-drive` or `gmail`. Reading status needs `view`; connect/disconnect need
+`manage_connections`. The callback is guarded by a single-use `state` (no Bearer token).
+
+### Scan Gmail into the knowledge base
+
+Once **Gmail** is connected, users with `run_ingest` (Admin/Manager) see a **Scan email** panel on the Gmail
+card. Pick a **label** (e.g. *Support*) and a message cap, then **Scan label**: each message is fetched,
+its body extracted (plain text, or HTML stripped), chunked, embedded and added to the knowledge base — so
+the agent can learn from real support correspondence. Nothing is ever sent from the scan path (read-only).
+
+| Method & path | Does |
+| --- | --- |
+| `GET /api/gmail/labels` | List labels to choose a scan source (`view`) |
+| `POST /api/gmail/scan` | Scan a label's messages into the KB — `{labelId, max?}` (`run_ingest`) |
+
+Chunks are stored as `maker` entries with ids `gmail:<messageId>:<n>`; the message is catalogued in
+`documents` with `source='gmail'`, so it shows in the Ingested-documents list and removes cleanly.
+
+### Browse, select folders & ingest Drive files
+
+Once **Google Drive** is connected, the Drive connector card shows a **file browser**. Navigate folders
+from *My Drive*, then either:
+
+- **Select whole folders** as knowledge sources — the blueprint's Lane 1 "approved sources". Open a folder
+  (or use its `+ Add to KB` button) and choose **Add to knowledge base**. Every supported file in it is
+  ingested; with **Include subfolders** ticked it descends recursively (depth- and count-capped). The folder
+  is kept as a **knowledge-source folder** you can **Sync** (re-ingest, e.g. after a new catalogue lands) or
+  **Remove** (optionally purging its ingested documents).
+- **Tick individual files** and choose **Ingest selected**.
+
+Each ingested file is pulled from Drive, its text extracted, split into chunks, embedded, and added to the
+knowledge base so the **Ask** tab can cite it immediately. An **Ingested documents** list shows every loaded
+file, with a **Remove** that deletes the document and all its chunks.
+
+**Supported file types** (others are listed but greyed out as *not supported*):
+
+| Type | How it's read |
+| --- | --- |
+| PDF | `pdf-parse` text extraction |
+| Word `.docx` | `mammoth` raw-text extraction |
+| Google Docs / Sheets / Slides | Exported from Drive as text / CSV |
+| `.txt` / `.md` / `.csv` / `.json` | Read directly |
+| `.html` | Tags stripped to text |
+
+Chunks are stored as knowledge entries of kind `maker` with ids `drive:<fileId>:<n>`, so a document's
+chunks can be removed together. In `postgres` mode they also land in the `documents` catalogue table and
+`knowledge_entries`; in `memory` mode they live in-process (cleared on restart).
+
+| Method & path | Does |
+| --- | --- |
+| `GET /api/drive/files?folderId=&pageToken=` | List a folder's children (`root` by default), folders first |
+| `POST /api/drive/ingest` `{ fileIds: string[] }` | Ingest up to 50 files; returns a per-file result (`ingested` / `skipped` / `failed`) |
+| `GET /api/drive/documents` | The catalogue of ingested documents |
+| `DELETE /api/drive/documents/:id` | Remove a document and its knowledge chunks |
+| `GET /api/drive/folders` | List the selected knowledge-source folders |
+| `POST /api/drive/folders` `{ folderId, recursive }` | Select a folder as a source and ingest its contents now |
+| `POST /api/drive/folders/:id/sync` | Re-ingest a selected folder |
+| `DELETE /api/drive/folders/:id?purge=1` | Remove a folder source (with `purge=1`, also delete its ingested docs) |
+
+Selected folders are stored in the `drive_folders` table (`postgres`) or in-process (`memory`). Folder walks
+are capped at 500 files and 10 levels deep.
+
+> Live Drive calls need a real connected account; without one these endpoints return `409 drive_not_connected`
+> (and `ingest` reports each file as `failed` with that reason).
 
 ## Embeddings
 

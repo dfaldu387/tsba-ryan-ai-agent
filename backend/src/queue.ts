@@ -1,6 +1,6 @@
 import PgBoss from 'pg-boss';
 import { env } from './env.js';
-import { query, toVectorLiteral } from './db.js';
+import { query } from './db.js';
 import { embeddingProvider, entryEmbeddingText } from './embeddings.js';
 
 // Durable background jobs, backed by the same Postgres (pg-boss creates its own schema).
@@ -41,8 +41,8 @@ async function embedEntry(id: string): Promise<void> {
   if (!row) return;
 
   const [vec] = await embeddingProvider.embed([entryEmbeddingText({ ...row, text: row.body })]);
-  await query('UPDATE knowledge_entries SET embedding = $1::vector, embedded_at = now() WHERE id = $2', [
-    toVectorLiteral(vec),
+  await query('UPDATE knowledge_entries SET embedding = $1::real[], embedded_at = now() WHERE id = $2', [
+    vec,
     id,
   ]);
 }
