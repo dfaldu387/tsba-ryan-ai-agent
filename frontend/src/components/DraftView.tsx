@@ -121,6 +121,17 @@ export function DraftView({
           </span>
         )}
       </div>
+
+      {draft.delivery && (
+        <div className={`meta delivery delivery-${draft.delivery.status}`}>
+          {draft.delivery.status === 'delivered'
+            ? '✓ Delivered'
+            : draft.delivery.status === 'failed'
+              ? '✗ Delivery failed'
+              : 'Delivery skipped'}
+          {draft.recipient ? ` to ${draft.recipient}` : ''} · via {draft.delivery.channel} — {draft.delivery.detail}
+        </div>
+      )}
     </>
   );
 }

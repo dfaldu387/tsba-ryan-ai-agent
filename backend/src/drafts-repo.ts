@@ -1,4 +1,4 @@
-import type { Draft, DraftResult, SourceCard, Audience, Channel } from '@tsba/shared';
+import type { Draft, DraftDelivery, DraftResult, SourceCard, Audience, Channel } from '@tsba/shared';
 import { query } from './db.js';
 
 interface DraftRow {
@@ -14,12 +14,14 @@ interface DraftRow {
   team_handover: Draft['team_handover'];
   status: Draft['status'];
   edited: boolean;
+  recipient: string | null;
+  delivery: DraftDelivery | null;
   created_at: Date;
   decided_at: Date | null;
 }
 
 const SELECT =
-  'id, question, audience, channel, outcome, reply, reply_original, sources, note_for_ryan, team_handover, status, edited, created_at, decided_at';
+  'id, question, audience, channel, outcome, reply, reply_original, sources, note_for_ryan, team_handover, status, edited, recipient, delivery, created_at, decided_at';
 
 function toDraft(r: DraftRow): Draft {
   return {
@@ -35,6 +37,8 @@ function toDraft(r: DraftRow): Draft {
     team_handover: r.team_handover ?? null,
     status: r.status,
     edited: r.edited,
+    recipient: r.recipient ?? null,
+    delivery: r.delivery ?? null,
     created_at: r.created_at.toISOString(),
     decided_at: r.decided_at ? r.decided_at.toISOString() : null,
   };
@@ -46,12 +50,13 @@ export async function insertDraft(args: {
   channel: Channel;
   result: DraftResult;
   sources: SourceCard[];
+  recipient?: string | null;
 }): Promise<Draft> {
-  const { question, audience, channel, result, sources } = args;
+  const { question, audience, channel, result, sources, recipient } = args;
   const res = await query<DraftRow>(
     `INSERT INTO drafts
-       (question, audience, channel, outcome, reply, reply_original, sources, note_for_ryan, team_handover)
-     VALUES ($1,$2,$3,$4,$5,$5,$6::jsonb,$7,$8::jsonb)
+       (question, audience, channel, outcome, reply, reply_original, sources, note_for_ryan, team_handover, recipient)
+     VALUES ($1,$2,$3,$4,$5,$5,$6::jsonb,$7,$8::jsonb,$9)
      RETURNING ${SELECT}`,
     [
       question,
@@ -62,9 +67,19 @@ export async function insertDraft(args: {
       JSON.stringify(sources),
       result.note_for_ryan,
       result.team_handover ? JSON.stringify(result.team_handover) : null,
+      recipient ?? null,
     ],
   );
   return toDraft(res.rows[0]);
+}
+
+/** Record the outcome of dispatching an approved reply. */
+export async function recordDraftDelivery(id: number, delivery: DraftDelivery): Promise<Draft | null> {
+  const res = await query<DraftRow>(
+    `UPDATE drafts SET delivery = $1::jsonb WHERE id = $2 RETURNING ${SELECT}`,
+    [JSON.stringify(delivery), id],
+  );
+  return res.rows[0] ? toDraft(res.rows[0]) : null;
 }
 
 export async function listDrafts(): Promise<Draft[]> {

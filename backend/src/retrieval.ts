@@ -1,6 +1,13 @@
 import type { KnowledgeEntry } from '@tsba/shared';
-import { query, toVectorLiteral } from './db.js';
+import { query } from './db.js';
 import { embeddingProvider } from './embeddings.js';
+import { brandMatches } from './brand.js';
+
+// Added to a maker entry's cosine score when its brand matches the brand detected
+// for the question (or it's brand-agnostic). Big enough to float a same-brand
+// source above a slightly-more-similar wrong-brand one, small enough that a
+// clearly irrelevant same-brand entry still loses to a strong semantic match.
+const BRAND_BONUS = 0.15;
 
 interface Row {
   id: string;
@@ -12,6 +19,10 @@ interface Row {
   body: string;
   source: string;
   confidence: string | null;
+}
+
+interface MakerRow extends Row {
+  embedding: number[] | null;
 }
 
 function rowToEntry(r: Row): KnowledgeEntry {
@@ -28,17 +39,35 @@ function rowToEntry(r: Row): KnowledgeEntry {
   };
 }
 
+function cosine(a: number[], b: number[]): number {
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  return dot / (Math.sqrt(na) * Math.sqrt(nb) || 1);
+}
+
 const COLS = 'id, kind, brand, model, topic, title, body, source, confidence';
 
 /**
- * Retrieval strategy:
+ * Retrieval strategy (no pgvector — cosine is computed in Node):
  *  - ALL verified rules are always included (small set, compliance-critical — we
  *    never want RAG to drop a safety rule).
- *  - Manufacturer answers: top-K by pgvector cosine distance to the question.
- *  - If embeddings aren't populated yet, fall back to a keyword match so the
- *    pipeline still returns something useful.
+ *  - Manufacturer answers: fetch those with an embedding, rank by cosine to the
+ *    question vector, take top-K.
+ *  - If no embeddings are populated yet (or embedding fails), fall back to a
+ *    keyword match so the pipeline still returns something useful.
  */
-export async function retrieve(question: string, topK: number): Promise<KnowledgeEntry[]> {
+export async function retrieve(
+  question: string,
+  topK: number,
+  brand?: string | null,
+): Promise<KnowledgeEntry[]> {
   const rules = await query<Row>(`SELECT ${COLS} FROM knowledge_entries WHERE kind = 'rule' ORDER BY id`);
 
   let makers: Row[] = [];
@@ -46,15 +75,21 @@ export async function retrieve(question: string, topK: number): Promise<Knowledg
 
   try {
     const [qvec] = await embeddingProvider.embed([question]);
-    const res = await query<Row>(
-      `SELECT ${COLS}
+    // real[] comes back from node-pg already parsed into a number[].
+    const res = await query<MakerRow>(
+      `SELECT ${COLS}, embedding
          FROM knowledge_entries
-        WHERE kind = 'maker' AND embedding IS NOT NULL
-        ORDER BY embedding <=> $1::vector
-        LIMIT $2`,
-      [toVectorLiteral(qvec), topK],
+        WHERE kind = 'maker' AND embedding IS NOT NULL`,
     );
-    makers = res.rows;
+    makers = res.rows
+      .map((r) => ({
+        r,
+        // Brand-aware: boost the detected brand (and brand-agnostic) entries.
+        score: cosine(qvec, r.embedding ?? []) + (brandMatches(r.brand, brand) ? BRAND_BONUS : 0),
+      }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK)
+      .map((x) => x.r);
     usedVectorSearch = makers.length > 0;
   } catch (err) {
     console.warn('[retrieval] vector search failed, falling back to keyword:', (err as Error).message);
@@ -70,7 +105,10 @@ export async function retrieve(question: string, topK: number): Promise<Knowledg
           LIMIT $${terms.length + 1}`,
         [...terms.map((t) => `%${t}%`), topK],
       );
-      makers = res.rows;
+      // Brand-aware: surface matching-brand rows first in the keyword fallback.
+      makers = brand
+        ? res.rows.slice().sort((a, b) => Number(brandMatches(b.brand, brand)) - Number(brandMatches(a.brand, brand)))
+        : res.rows;
     }
   }
 
