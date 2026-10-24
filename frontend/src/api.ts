@@ -16,6 +16,7 @@ import type {
   IngestResult,
   IngestedDocument,
   Role,
+  SourceCard,
   User,
 } from '@tsba/shared';
 import type { ProgressBoard } from './types';
@@ -160,13 +161,37 @@ export interface VoiceChatMessage {
   content: string;
 }
 
+export interface VoiceAttachment {
+  /** image/png | image/jpeg | image/gif | image/webp | application/pdf */
+  mediaType: string;
+  /** Base64-encoded file bytes (no data: prefix). */
+  data: string;
+}
+
 export function voiceChat(
   messages: VoiceChatMessage[],
   audience: Audience,
-): Promise<{ reply: string }> {
-  return request<{ reply: string }>('/api/voice/chat', {
+  attachments: VoiceAttachment[] = [],
+): Promise<{ reply: string; sources: SourceCard[]; suggestions: string[] }> {
+  return request<{ reply: string; sources: SourceCard[]; suggestions: string[] }>('/api/voice/chat', {
     method: 'POST',
-    body: JSON.stringify({ messages, audience }),
+    body: JSON.stringify({ messages, audience, attachments }),
+  });
+}
+
+export function getVoiceStarters(): Promise<{ suggestions: string[] }> {
+  return request<{ suggestions: string[] }>('/api/voice/suggestions');
+}
+
+export function flagVoiceAnswer(
+  question: string,
+  reply: string,
+  audience: Audience,
+  note = '',
+): Promise<Draft> {
+  return request<Draft>('/api/voice/flag', {
+    method: 'POST',
+    body: JSON.stringify({ question, reply, audience, note }),
   });
 }
 

@@ -2,12 +2,21 @@ import type { KnowledgeEntry } from '@tsba/shared';
 import { query } from './db.js';
 import { embeddingProvider } from './embeddings.js';
 import { brandMatches } from './brand.js';
+import { documentFrequencies, idfWeights, lexicalScoreIdf, queryTerms } from './retrieval-util.js';
 
-// Added to a maker entry's cosine score when its brand matches the brand detected
-// for the question (or it's brand-agnostic). Big enough to float a same-brand
-// source above a slightly-more-similar wrong-brand one, small enough that a
-// clearly irrelevant same-brand entry still loses to a strong semantic match.
+// Added to a maker entry's score when its brand matches the brand detected for the
+// question (or it's brand-agnostic). Big enough to float a same-brand source above
+// a slightly-better wrong-brand one, small enough not to rescue an irrelevant one.
 const BRAND_BONUS = 0.15;
+
+// The 'local' embedding provider is a hashed bag-of-words, NOT a semantic model —
+// its cosine is effectively noise (an unrelated doc can score higher than the exact
+// datasheet). So when embeddings are local we rank on the IDF keyword signal and keep
+// cosine only as a faint tiebreaker. With a real provider the semantic cosine leads
+// and the keyword overlap just nudges exact model/spec matches up.
+const LOCAL_EMBEDDINGS = embeddingProvider.name === 'local';
+const LEXICAL_WEIGHT = LOCAL_EMBEDDINGS ? 1.0 : 0.6;
+const COSINE_WEIGHT = LOCAL_EMBEDDINGS ? 0.05 : 1.0;
 
 interface Row {
   id: string;
@@ -72,6 +81,7 @@ export async function retrieve(
 
   let makers: Row[] = [];
   let usedVectorSearch = false;
+  const terms = queryTerms(question);
 
   try {
     const [qvec] = await embeddingProvider.embed([question]);
@@ -81,11 +91,18 @@ export async function retrieve(
          FROM knowledge_entries
         WHERE kind = 'maker' AND embedding IS NOT NULL`,
     );
+    // Precompute each chunk's search text once, then derive IDF weights so the
+    // rare discriminating token (the model number) dominates the keyword score.
+    const hays = res.rows.map((r) => `${r.title} ${r.body}`.toLowerCase());
+    const idf = idfWeights(terms, documentFrequencies(terms, hays), res.rows.length);
     makers = res.rows
-      .map((r) => ({
+      .map((r, i) => ({
         r,
-        // Brand-aware: boost the detected brand (and brand-agnostic) entries.
-        score: cosine(qvec, r.embedding ?? []) + (brandMatches(r.brand, brand) ? BRAND_BONUS : 0),
+        // Hybrid: semantic (cosine) + IDF-weighted keyword overlap + brand boost.
+        score:
+          COSINE_WEIGHT * cosine(qvec, r.embedding ?? []) +
+          LEXICAL_WEIGHT * lexicalScoreIdf(hays[i], terms, idf) +
+          (brandMatches(r.brand, brand) ? BRAND_BONUS : 0),
       }))
       .sort((a, b) => b.score - a.score)
       .slice(0, topK)
