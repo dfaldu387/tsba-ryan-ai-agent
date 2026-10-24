@@ -9,6 +9,7 @@ import type {
 } from '@tsba/shared';
 import { embeddingProvider, entryEmbeddingText } from '../embeddings.js';
 import { brandMatches } from '../brand.js';
+import { documentFrequencies, idfWeights, lexicalScoreIdf, queryTerms } from '../retrieval-util.js';
 import { loadKnowledgeEntries } from '../knowledge-data.js';
 import type {
   ConnectionStore,
@@ -37,9 +38,15 @@ function cosine(a: number[], b: number[]): number {
   return dot / (Math.sqrt(na) * Math.sqrt(nb) || 1);
 }
 
-// Added to a maker entry's cosine score when its brand matches the detected brand
-// (or it's brand-agnostic). Kept in sync with BRAND_BONUS in retrieval.ts.
+// Added to a maker entry's score when its brand matches the detected brand (or it's
+// brand-agnostic). Kept in sync with retrieval.ts.
 const BRAND_BONUS = 0.15;
+// Local embeddings are non-semantic (hashed bag-of-words), so their cosine is noise:
+// rank on the IDF keyword signal and keep cosine as a faint tiebreaker. A real
+// provider leads with semantic cosine. Kept in sync with retrieval.ts.
+const LOCAL_EMBEDDINGS = embeddingProvider.name === 'local';
+const LEXICAL_WEIGHT = LOCAL_EMBEDDINGS ? 1.0 : 0.6;
+const COSINE_WEIGHT = LOCAL_EMBEDDINGS ? 0.05 : 1.0;
 
 /**
  * In-memory knowledge store. Loads the JSON on startup and runs the same
@@ -60,13 +67,20 @@ export class MemoryKnowledgeStore implements KnowledgeStore {
 
   async retrieve(question: string, topK: number, brand?: string | null): Promise<KnowledgeEntry[]> {
     let top: KnowledgeEntry[] = [];
+    const terms = queryTerms(question);
     try {
       const [qvec] = await embeddingProvider.embed([question]);
+      // IDF weights so a rare model number outweighs generic query words.
+      const hays = this.makers.map((e) => `${e.title} ${e.text}`.toLowerCase());
+      const idf = idfWeights(terms, documentFrequencies(terms, hays), this.makers.length);
       top = this.makers
         .map((e, i) => ({
           e,
-          // Brand-aware: boost the detected brand (and brand-agnostic) entries.
-          score: cosine(qvec, this.makerVectors[i]) + (brandMatches(e.brand, brand) ? BRAND_BONUS : 0),
+          // Hybrid: semantic (cosine) + IDF-weighted keyword overlap + brand boost.
+          score:
+            COSINE_WEIGHT * cosine(qvec, this.makerVectors[i]) +
+            LEXICAL_WEIGHT * lexicalScoreIdf(hays[i], terms, idf) +
+            (brandMatches(e.brand, brand) ? BRAND_BONUS : 0),
         }))
         .sort((x, y) => y.score - x.score)
         .slice(0, topK)

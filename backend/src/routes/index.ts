@@ -11,7 +11,16 @@ import {
 } from '@tsba/shared';
 import { currentUser, issueToken, requireAuth, requirePermission } from '../auth.js';
 import { appWebUrl, env, googleOAuthConfigured } from '../env.js';
-import { anthropicConfigured, chatReply, draftReply, type ChatTurn } from '../anthropic.js';
+import {
+  anthropicConfigured,
+  buildUserContent,
+  chatReply,
+  draftReply,
+  suggestFollowups,
+  suggestStarters,
+  type ChatAttachment,
+  type ChatTurn,
+} from '../anthropic.js';
 import { buildPrompt, buildVoiceSystem } from '../prompt.js';
 import { offlineChat, offlineDraft } from '../offline-draft.js';
 import { detectBrand, detectBrandFromTurns } from '../brand.js';
@@ -118,29 +127,46 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   );
 
   // ── Voice agent: a natural multi-turn conversation (not a formal draft) ──────
-  app.post<{ Body: { messages?: unknown; audience?: string } }>(
+  app.post<{ Body: { messages?: unknown; audience?: string; attachments?: unknown } }>(
     '/api/voice/chat',
     { preHandler: requirePermission('ask') },
     async (req, reply) => {
       const audience = req.body?.audience;
       if (!isAudience(audience)) return reply.code(400).send({ error: 'invalid_audience' });
 
-      // Validate and bound the conversation history.
+      // Validate and bound the conversation history (text only — attachments ride
+      // separately and are stitched onto the latest user turn below).
       const raw = Array.isArray(req.body?.messages) ? req.body!.messages : [];
-      const turns: ChatTurn[] = [];
+      const texts: { role: 'user' | 'assistant'; content: string }[] = [];
       for (const m of raw) {
         if (!m || typeof m !== 'object') continue;
         const role = (m as { role?: unknown }).role;
         const content = (m as { content?: unknown }).content;
         if ((role === 'user' || role === 'assistant') && typeof content === 'string' && content.trim()) {
-          turns.push({ role, content: content.trim().slice(0, 2000) });
+          texts.push({ role, content: content.trim().slice(0, 2000) });
         }
       }
-      const recent = turns.slice(-12); // cap context sent to the model
+      const recent = texts.slice(-12); // cap context sent to the model
       const lastUser = [...recent].reverse().find((t) => t.role === 'user');
       if (!lastUser) return reply.code(400).send({ error: 'no_user_message' });
       if (recent[recent.length - 1]?.role !== 'user') {
         return reply.code(400).send({ error: 'last_message_must_be_user' });
+      }
+
+      // Validate attachments (images / PDFs) for the latest user turn.
+      const ALLOWED_MEDIA = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'application/pdf']);
+      const MAX_ATTACHMENTS = 4;
+      const MAX_ATTACHMENT_BYTES = 20_000_000; // ~20MB decoded per file
+      const rawAtt = Array.isArray(req.body?.attachments) ? req.body!.attachments : [];
+      const attachments: ChatAttachment[] = [];
+      for (const a of rawAtt.slice(0, MAX_ATTACHMENTS)) {
+        if (!a || typeof a !== 'object') continue;
+        const mt = (a as { mediaType?: unknown }).mediaType;
+        const data = (a as { data?: unknown }).data;
+        if (typeof mt !== 'string' || !ALLOWED_MEDIA.has(mt)) continue;
+        if (typeof data !== 'string' || !data) continue;
+        if (data.length * 0.75 > MAX_ATTACHMENT_BYTES) return reply.code(413).send({ error: 'attachment_too_large' });
+        attachments.push({ mediaType: mt as ChatAttachment['mediaType'], data });
       }
 
       try {
@@ -150,15 +176,102 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         const brand = detectBrandFromTurns(recent.filter((t) => t.role === 'user').map((t) => t.content));
         const entries = await storage.knowledge.retrieve(lastUser.content, env.retrievalTopK, brand);
 
+        // Attachments only help when a real model can read them; stitch them onto
+        // the final user turn so Claude sees the file alongside the question.
+        const modelTurns: ChatTurn[] =
+          attachments.length > 0
+            ? recent.map((t, i) =>
+                i === recent.length - 1
+                  ? { role: t.role, content: buildUserContent(t.content, attachments) }
+                  : t,
+              )
+            : recent;
+
         const text = anthropicConfigured()
-          ? await chatReply(buildVoiceSystem({ audience, entries }), recent)
+          ? await chatReply(buildVoiceSystem({ audience, entries }), modelTurns)
           : offlineChat({ question: lastUser.content, audience, entries });
 
-        return { reply: text };
+        // Guarantee the client's mandated opening line, even if the model omits it.
+        const OPENING = 'This is an automated response from TSBA Technical Support.';
+        const reply = text.trimStart().startsWith(OPENING) ? text.trim() : `${OPENING} ${text.trim()}`;
+
+        // Surface the documents this answer was grounded in, deduped by document
+        // (chunk titles carry a "— part N/M" suffix) so the UI can cite them.
+        const seen = new Set<string>();
+        const sources: SourceCard[] = [];
+        for (const e of entries) {
+          if (e.kind !== 'maker') continue;
+          const docTitle = e.title.replace(/\s*[—-]\s*part\s*\d+\s*\/\s*\d+\s*$/i, '').trim();
+          if (seen.has(docTitle)) continue;
+          seen.add(docTitle);
+          sources.push({ id: e.id, kind: e.kind, title: docTitle, source: e.source });
+        }
+
+        // Contextual follow-up suggestions, generated from this answer (best-effort).
+        const suggestions = anthropicConfigured()
+          ? await suggestFollowups(lastUser.content, reply, sources.map((s) => s.title).join('\n'))
+          : [];
+
+        return { reply, sources, suggestions };
       } catch (err) {
         req.log.error({ err }, 'voice chat failed');
         return reply.code(502).send({ error: 'chat_failed', message: (err as Error).message });
       }
+    },
+  );
+
+  // Opening suggestions for an empty voice chat, grounded in the KB. Cached briefly
+  // so we don't call the model on every page load.
+  let starterCache: { at: number; list: string[] } | null = null;
+  const STARTER_TTL_MS = 10 * 60 * 1000;
+  app.get('/api/voice/suggestions', { preHandler: requirePermission('ask') }, async () => {
+    if (starterCache && Date.now() - starterCache.at < STARTER_TTL_MS) {
+      return { suggestions: starterCache.list };
+    }
+    if (!anthropicConfigured()) return { suggestions: [] };
+    const storage = await getStorage();
+    // Sample some real products to ground the starter questions.
+    const entries = await storage.knowledge.retrieve('inverter features efficiency backup warranty', 12, null);
+    const context = [...new Set(entries.filter((e) => e.kind === 'maker').map((e) => `${e.brand} ${e.model}`.trim()))]
+      .filter(Boolean)
+      .slice(0, 10)
+      .join('\n');
+    const list = await suggestStarters(context);
+    starterCache = { at: Date.now(), list };
+    return { suggestions: list };
+  });
+
+  // Flag a voice answer for the team: records it as a handover draft so it shows
+  // up in the approval queue and the header notification panel.
+  app.post<{ Body: { question?: unknown; reply?: unknown; audience?: string; note?: unknown } }>(
+    '/api/voice/flag',
+    { preHandler: requirePermission('ask') },
+    async (req, reply) => {
+      const question = typeof req.body?.question === 'string' ? req.body.question.trim().slice(0, 2000) : '';
+      const answer = typeof req.body?.reply === 'string' ? req.body.reply.trim().slice(0, 4000) : '';
+      const audience = req.body?.audience;
+      const note = typeof req.body?.note === 'string' ? req.body.note.trim().slice(0, 500) : '';
+      if (!question) return reply.code(400).send({ error: 'question_required' });
+      if (!isAudience(audience)) return reply.code(400).send({ error: 'invalid_audience' });
+
+      const storage = await getStorage();
+      const draft = await storage.drafts.insert({
+        question,
+        audience,
+        channel: 'chat',
+        result: {
+          outcome: 'handover',
+          reply: answer || 'Flagged from the voice agent for team review.',
+          sources: [],
+          note_for_ryan: note,
+          team_handover: {
+            summary: note || 'An operator flagged this voice-agent answer for the team to confirm.',
+            needed: [],
+          },
+        },
+        sources: [],
+      });
+      return draft;
     },
   );
 

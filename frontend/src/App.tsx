@@ -12,6 +12,7 @@ import { ConnectionsManager } from './components/ConnectionsManager';
 import { KnowledgeTab } from './components/KnowledgeTab';
 import { UsersPanel } from './components/UsersPanel';
 import { AskTab } from './components/AskTab';
+import { NotificationBell } from './components/NotificationBell';
 import { VoiceAgent } from './components/VoiceAgent';
 import { ProgressTab } from './components/ProgressTab';
 import { SettingsTab } from './components/SettingsTab';
@@ -250,6 +251,9 @@ export function App() {
           </div>
 
           <div className="head-right">
+            {hasPermission(user.role, 'view') && (
+              <NotificationBell onNavigate={() => setSection('ask')} onAuthError={onAuthError} />
+            )}
             <div className="profile-menu">
               <button
                 type="button"

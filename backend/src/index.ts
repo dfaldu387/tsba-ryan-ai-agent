@@ -12,7 +12,9 @@ const here = dirname(fileURLToPath(import.meta.url));
 const frontendDist = resolve(here, '../../frontend/dist');
 
 async function main(): Promise<void> {
-  const app = Fastify({ logger: { level: env.isProd ? 'info' : 'warn' }, bodyLimit: 1_000_000 });
+  // 32MB body limit so the voice agent can attach images/PDFs (base64-inflated)
+  // for the model to read. Individual attachments are also capped server-side.
+  const app = Fastify({ logger: { level: env.isProd ? 'info' : 'warn' }, bodyLimit: 32_000_000 });
 
   // Dev: the Vite server runs on another origin and needs CORS.
   if (!env.isProd) {
