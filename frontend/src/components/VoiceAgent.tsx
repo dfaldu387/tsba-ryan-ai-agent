@@ -98,15 +98,21 @@ function formatTime(iso?: string): string {
 // Persist the conversation so it survives tab switches and reloads.
 const VOICE_LOG_KEY = 'tsba.voice.turns';
 
-// Only expose this fixed set of TTS voices in the picker.
-const ALLOWED_VOICES = [
-  'Microsoft David - English (United States)',
-  'Microsoft Mark - English (United States)',
-  'Microsoft Zira - English (United States)',
-  'Google US English',
-  'Google UK English Female',
-  'Google UK English Male',
+// The voice picker always shows exactly these 6, on every device/browser.
+// The browser only has some of them installed (the Microsoft voices are
+// Windows-only, the Google ones ship with Chrome), so we render the fixed
+// list regardless and resolve the real voice at speak time — falling back to
+// the option's locale when that device doesn't have the exact voice.
+const VOICE_OPTIONS: { name: string; lang: string }[] = [
+  { name: 'Microsoft David - English (United States)', lang: 'en-US' },
+  { name: 'Microsoft Mark - English (United States)', lang: 'en-US' },
+  { name: 'Microsoft Zira - English (United States)', lang: 'en-US' },
+  { name: 'Google US English', lang: 'en-US' },
+  { name: 'Google UK English Female', lang: 'en-GB' },
+  { name: 'Google UK English Male', lang: 'en-GB' },
 ];
+
+const DEFAULT_VOICE = 'Google UK English Female';
 
 function loadTurns(): Turn[] {
   try {
@@ -140,7 +146,7 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
   const [autoSpeak, setAutoSpeak] = useState(true);
   const [speakingId, setSpeakingId] = useState<number | null>(null);
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
-  const [voiceName, setVoiceName] = useState<string>('');
+  const [voiceName, setVoiceName] = useState<string>(DEFAULT_VOICE);
   // Manual-entry fallback when speech recognition isn't available.
   const [typed, setTyped] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -177,15 +183,13 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
     }
   }, [turns]);
 
-  // Load the list of system TTS voices (populated asynchronously).
+  // Load the system TTS voices (populated asynchronously). We keep the full
+  // installed list only to resolve the chosen voice when speaking — the picker
+  // itself always shows the fixed VOICE_OPTIONS, not whatever is installed.
   useEffect(() => {
     if (!synthSupported) return;
     const load = () => {
-      const all = window.speechSynthesis
-        .getVoices()
-        .filter((v) => v.lang.startsWith('en') && ALLOWED_VOICES.includes(v.name));
-      setVoices(all);
-      setVoiceName((cur) => cur || all.find((v) => /AU|GB/.test(v.lang))?.name || all[0]?.name || '');
+      setVoices(window.speechSynthesis.getVoices());
     };
     load();
     window.speechSynthesis.onvoiceschanged = load;
@@ -216,7 +220,14 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
     window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(turn.reply);
     const voice = voices.find((v) => v.name === voiceName);
-    if (voice) u.voice = voice;
+    if (voice) {
+      u.voice = voice;
+    } else {
+      // This device doesn't have the selected voice installed (e.g. a Windows
+      // voice on macOS) — fall back to its locale so the browser picks the
+      // closest available voice instead of an unrelated default.
+      u.lang = VOICE_OPTIONS.find((o) => o.name === voiceName)?.lang ?? 'en-GB';
+    }
     u.rate = 1;
     u.onstart = () => setSpeakingId(turn.id);
     u.onend = () => setSpeakingId((id) => (id === turn.id ? null : id));
@@ -452,13 +463,13 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
             <span>Speak replies aloud</span>
           </label>
 
-          {synthSupported && voices.length > 0 && (
+          {synthSupported && (
             <div className="field">
               <span className="eyebrow">Voice</span>
               <select className="voice-select" value={voiceName} onChange={(e) => setVoiceName(e.target.value)}>
-                {voices.map((v) => (
-                  <option key={v.name} value={v.name}>
-                    {v.name} ({v.lang})
+                {VOICE_OPTIONS.map((o) => (
+                  <option key={o.name} value={o.name}>
+                    {o.name} ({o.lang})
                   </option>
                 ))}
               </select>
