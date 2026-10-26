@@ -98,6 +98,16 @@ function formatTime(iso?: string): string {
 // Persist the conversation so it survives tab switches and reloads.
 const VOICE_LOG_KEY = 'tsba.voice.turns';
 
+// Only expose this fixed set of TTS voices in the picker.
+const ALLOWED_VOICES = [
+  'Microsoft David - English (United States)',
+  'Microsoft Mark - English (United States)',
+  'Microsoft Zira - English (United States)',
+  'Google US English',
+  'Google UK English Female',
+  'Google UK English Male',
+];
+
 function loadTurns(): Turn[] {
   try {
     const raw = localStorage.getItem(VOICE_LOG_KEY);
@@ -171,7 +181,9 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
   useEffect(() => {
     if (!synthSupported) return;
     const load = () => {
-      const all = window.speechSynthesis.getVoices().filter((v) => v.lang.startsWith('en'));
+      const all = window.speechSynthesis
+        .getVoices()
+        .filter((v) => v.lang.startsWith('en') && ALLOWED_VOICES.includes(v.name));
       setVoices(all);
       setVoiceName((cur) => cur || all.find((v) => /AU|GB/.test(v.lang))?.name || all[0]?.name || '');
     };
