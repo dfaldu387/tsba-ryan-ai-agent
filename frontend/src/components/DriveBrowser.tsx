@@ -4,21 +4,15 @@ import type {
   DriveFolderSource,
   FolderSyncResult,
   IngestResult,
-  IngestedDocument,
 } from '@tsba/shared';
 import {
   AuthError,
   addFolderSource,
   addFolderSourcesBulk,
-  syncAllFolderSources,
   ingestDriveFiles,
-  listDocuments,
   listDriveFiles,
   listFolderSources,
-  removeDocument,
-  removeFolderSource,
   searchDriveFiles,
-  syncFolderSource,
 } from '../api';
 
 interface Crumb {
@@ -42,13 +36,19 @@ function fileIcon(f: DriveFile): string {
   return '📎';
 }
 
-export function DriveBrowser({ onAuthError }: { onAuthError: () => void }) {
+export function DriveBrowser({
+  onAuthError,
+  onChange,
+}: {
+  onAuthError: () => void;
+  /** Called after folders/files are added or ingested, so a parent list can refresh. */
+  onChange?: () => void;
+}) {
   const [crumbs, setCrumbs] = useState<Crumb[]>([{ id: 'root', name: 'My Drive' }]);
   const [files, setFiles] = useState<DriveFile[]>([]);
   const [nextPageToken, setNextPageToken] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [selectedFolders, setSelectedFolders] = useState<Set<string>>(new Set());
-  const [docs, setDocs] = useState<IngestedDocument[]>([]);
   const [sources, setSources] = useState<DriveFolderSource[]>([]);
   const [recursive, setRecursive] = useState(true);
   const [query, setQuery] = useState('');
@@ -57,8 +57,6 @@ export function DriveBrowser({ onAuthError }: { onAuthError: () => void }) {
   const [loading, setLoading] = useState(false);
   const [ingesting, setIngesting] = useState(false);
   const [busyFolder, setBusyFolder] = useState<string | null>(null);
-  const [syncingIds, setSyncingIds] = useState<Set<string>>(new Set());
-  const [syncingAll, setSyncingAll] = useState(false);
   const [results, setResults] = useState<IngestResult[] | null>(null);
   const [folderSummary, setFolderSummary] = useState<FolderSyncResult | null>(null);
   const [error, setError] = useState('');
@@ -84,13 +82,10 @@ export function DriveBrowser({ onAuthError }: { onAuthError: () => void }) {
       .finally(() => setLoading(false));
   }
 
-  function loadDocs() {
-    listDocuments()
-      .then((r) => setDocs(r.documents))
-      .catch((err) => fail(err, 'Couldn’t load ingested documents.'));
-  }
-
   function loadSources() {
+    // Tracks which folders are already in the knowledge base, so the file list
+    // can show an "✓ added · re-sync" hint. The folder/document lists themselves
+    // live on the Knowledge base tab.
     listFolderSources()
       .then((r) => setSources(r.folders))
       .catch((err) => fail(err, 'Couldn’t load selected folders.'));
@@ -98,7 +93,6 @@ export function DriveBrowser({ onAuthError }: { onAuthError: () => void }) {
 
   useEffect(() => {
     // Search-first: don't auto-list My Drive. Folders appear once the user searches.
-    loadDocs();
     loadSources();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -112,76 +106,11 @@ export function DriveBrowser({ onAuthError }: { onAuthError: () => void }) {
       const summary = await addFolderSource(folderId, recursive);
       setFolderSummary(summary);
       loadSources();
-      loadDocs();
+      onChange?.();
     } catch (err) {
       fail(err, 'Couldn’t add that folder.');
     } finally {
       setBusyFolder(null);
-    }
-  }
-
-  function markSyncing(id: string, on: boolean) {
-    setSyncingIds((prev) => {
-      const next = new Set(prev);
-      if (on) next.add(id);
-      else next.delete(id);
-      return next;
-    });
-  }
-
-  async function onSyncSource(id: string) {
-    markSyncing(id, true);
-    setError('');
-    setFolderSummary(null);
-    try {
-      const summary = await syncFolderSource(id);
-      setFolderSummary(summary);
-      loadSources();
-      loadDocs();
-    } catch (err) {
-      fail(err, 'Couldn’t sync that folder.');
-    } finally {
-      markSyncing(id, false);
-    }
-  }
-
-  async function syncAll() {
-    if (!sources.length) return;
-    setSyncingAll(true);
-    setError('');
-    setFolderSummary(null);
-    try {
-      const { folders } = await syncAllFolderSources();
-      const totals = folders.reduce(
-        (a, f) => ({ files: a.files + f.filesFound, ingested: a.ingested + f.ingested, failed: a.failed + f.failed }),
-        { files: 0, ingested: 0, failed: 0 },
-      );
-      setFolderSummary({
-        folderId: 'all',
-        name: `All ${folders.length} folders`,
-        filesFound: totals.files,
-        ingested: totals.ingested,
-        skipped: 0,
-        failed: totals.failed,
-        results: [],
-      });
-      loadSources();
-      loadDocs();
-    } catch (err) {
-      fail(err, 'Couldn’t sync all folders.');
-    } finally {
-      setSyncingAll(false);
-    }
-  }
-
-  async function onRemoveSource(id: string) {
-    const purge = window.confirm('Also remove the documents ingested from this folder from the knowledge base?');
-    try {
-      await removeFolderSource(id, purge);
-      setSources((prev) => prev.filter((s) => s.id !== id));
-      if (purge) loadDocs();
-    } catch (err) {
-      fail(err, 'Couldn’t remove that folder.');
     }
   }
 
@@ -280,7 +209,7 @@ export function DriveBrowser({ onAuthError }: { onAuthError: () => void }) {
       });
       setSelectedFolders(new Set());
       loadSources();
-      loadDocs();
+      onChange?.();
     } catch (err) {
       fail(err, 'Couldn’t add the selected folders.');
     } finally {
@@ -309,20 +238,11 @@ export function DriveBrowser({ onAuthError }: { onAuthError: () => void }) {
       const { results } = await ingestDriveFiles([...selected]);
       setResults(results);
       setSelected(new Set());
-      loadDocs();
+      onChange?.();
     } catch (err) {
       fail(err, 'Ingest failed. Try again.');
     } finally {
       setIngesting(false);
-    }
-  }
-
-  async function onRemoveDoc(id: string) {
-    try {
-      await removeDocument(id);
-      setDocs((prev) => prev.filter((d) => d.id !== id));
-    } catch (err) {
-      fail(err, 'Couldn’t remove the document.');
     }
   }
 
@@ -512,96 +432,6 @@ export function DriveBrowser({ onAuthError }: { onAuthError: () => void }) {
             <div key={r.fileId} className={`pill ${r.status === 'ingested' ? 'green' : 'amber'}`}>
               {r.name}: {r.status}
               {r.status === 'ingested' ? ` · ${r.chunks} chunks` : r.reason ? ` · ${r.reason}` : ''}
-            </div>
-          ))}
-        </div>
-      )}
-
-      <div className="card-h" style={{ marginTop: 18 }}>
-        <h3 className="drive-h">Knowledge-source folders</h3>
-        <div className="drive-selall">
-          <span className="eyebrow">{sources.length} selected</span>
-          {sources.length > 0 && (
-            <button className="btn ghost sm" type="button" disabled={syncingAll} onClick={syncAll}>
-              {syncingAll ? 'Syncing all…' : 'Sync all'}
-            </button>
-          )}
-        </div>
-      </div>
-      {sources.length === 0 ? (
-        <p className="how">
-          No folders selected yet. Open a folder above and choose <b>Add to knowledge base</b> — its supported
-          files are ingested and kept as a source you can re-sync.
-        </p>
-      ) : (
-        <div className="doc-list">
-          {sources.map((s) => (
-            <div key={s.id} className="doc-row">
-              <div className="doc-main">
-                <span className="ic" aria-hidden="true">📁</span>
-                {s.web_url ? (
-                  <a href={s.web_url} target="_blank" rel="noreferrer noopener" className="doc-title">
-                    {s.name}
-                  </a>
-                ) : (
-                  <span className="doc-title">{s.name}</span>
-                )}
-                <span className="doc-meta">
-                  {s.recursive ? 'incl. subfolders' : 'top level only'}
-                  {s.last_file_count != null ? ` · ${s.last_file_count} files` : ''}
-                  {s.last_synced_at ? ` · synced ${new Date(s.last_synced_at).toLocaleDateString()}` : ' · not synced'}
-                </span>
-              </div>
-              <div className="doc-actions">
-                <button
-                  className="btn ghost"
-                  type="button"
-                  disabled={syncingIds.has(s.id) || syncingAll}
-                  onClick={() => onSyncSource(s.id)}
-                >
-                  {syncingIds.has(s.id) || syncingAll ? 'Syncing…' : 'Sync'}
-                </button>
-                <button
-                  className="btn ghost"
-                  type="button"
-                  disabled={syncingIds.has(s.id) || syncingAll}
-                  onClick={() => onRemoveSource(s.id)}
-                >
-                  Remove
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      <div className="card-h" style={{ marginTop: 18 }}>
-        <h3 className="drive-h">Ingested documents</h3>
-        <span className="eyebrow">{docs.length} in knowledge base</span>
-      </div>
-      {docs.length === 0 ? (
-        <p className="how">Nothing ingested yet. Select files above and choose <b>Ingest selected</b>.</p>
-      ) : (
-        <div className="doc-list">
-          {docs.map((d) => (
-            <div key={d.id} className="doc-row">
-              <div className="doc-main">
-                <span className={`pill ${d.status === 'ingested' ? 'green' : 'amber'}`}>{d.status}</span>
-                {d.web_url ? (
-                  <a href={d.web_url} target="_blank" rel="noreferrer noopener" className="doc-title">
-                    {d.title}
-                  </a>
-                ) : (
-                  <span className="doc-title">{d.title}</span>
-                )}
-                <span className="doc-meta">
-                  {d.chunk_count} chunk{d.chunk_count === 1 ? '' : 's'} ·{' '}
-                  {new Date(d.ingested_at).toLocaleDateString()}
-                </span>
-              </div>
-              <button className="btn ghost" type="button" onClick={() => onRemoveDoc(d.id)}>
-                Remove
-              </button>
             </div>
           ))}
         </div>

@@ -9,6 +9,7 @@ import {
   ApiError,
   AuthError,
   assessDocuments,
+  listConnections,
   listDocuments,
   listFolderSources,
   reingestFlaggedDocuments,
@@ -18,6 +19,7 @@ import {
   syncAllFolderSources,
   syncFolderSource,
 } from '../api';
+import { DriveBrowser } from './DriveBrowser';
 
 const SOURCE_LABEL: Record<IngestedDocument['source'], string> = {
   'google-drive': 'Drive',
@@ -46,6 +48,7 @@ export function KnowledgeTab({ user, onAuthError }: { user: AuthenticatedUser; o
   const canIngest = hasPermission(user.role, 'run_ingest');
   const [docs, setDocs] = useState<IngestedDocument[] | null>(null);
   const [folders, setFolders] = useState<DriveFolderSource[] | null>(null);
+  const [driveConnected, setDriveConnected] = useState<boolean | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
   const [syncingAll, setSyncingAll] = useState(false);
@@ -59,10 +62,13 @@ export function KnowledgeTab({ user, onAuthError }: { user: AuthenticatedUser; o
   };
 
   const load = () =>
-    Promise.all([listDocuments(), listFolderSources()])
-      .then(([d, f]) => {
+    Promise.all([listDocuments(), listFolderSources(), listConnections()])
+      .then(([d, f, c]) => {
         setDocs(d.documents);
         setFolders(f.folders);
+        setDriveConnected(
+          c.connections.find((x) => x.provider === 'google-drive')?.connected ?? false,
+        );
       })
       .catch((err) => handle(err, 'Couldn’t load the knowledge base.'));
 
@@ -176,9 +182,52 @@ export function KnowledgeTab({ user, onAuthError }: { user: AuthenticatedUser; o
     }
   }
 
+  const totalChunks = docs?.reduce((n, d) => n + d.chunk_count, 0) ?? 0;
+  const flaggedCount = docs?.filter(isFlagged).length ?? 0;
+
   return (
     <div className="col">
       {error && <span className="err">{error}</span>}
+
+      {/* ── Overview ─────────────────────────────────────────────────────── */}
+      <div className="stat-row">
+        <div className="stat">
+          <span className="stat-value">{docs ? docs.length : '—'}</span>
+          <span className="stat-label">Documents</span>
+        </div>
+        <div className="stat">
+          <span className="stat-value">{docs ? totalChunks.toLocaleString() : '—'}</span>
+          <span className="stat-label">Chunks indexed</span>
+        </div>
+        <div className="stat">
+          <span className="stat-value">{folders ? folders.length : '—'}</span>
+          <span className="stat-label">Folder sources</span>
+        </div>
+        <div className={`stat${flaggedCount > 0 ? ' stat-flag' : ''}`}>
+          <span className="stat-value">{docs ? flaggedCount : '—'}</span>
+          <span className="stat-label">Need OCR</span>
+        </div>
+      </div>
+
+      {/* ── Add from Drive ───────────────────────────────────────────────── */}
+      {canIngest && driveConnected && (
+        <section className="card">
+          <div className="kb-browse">
+            <DriveBrowser onAuthError={onAuthError} onChange={load} />
+          </div>
+        </section>
+      )}
+      {canIngest && driveConnected === false && (
+        <section className="card kb-connect-hint">
+          <div className="card-h">
+            <h2>Add documents from Drive</h2>
+          </div>
+          <p className="how" style={{ marginTop: 0 }}>
+            Connect Google Drive from <b>Connections</b> to browse folders and add files to the
+            knowledge base.
+          </p>
+        </section>
+      )}
 
       {/* ── Folder sources ───────────────────────────────────────────────── */}
       <section className="card">
@@ -199,7 +248,7 @@ export function KnowledgeTab({ user, onAuthError }: { user: AuthenticatedUser; o
           </div>
         </div>
         <p className="how" style={{ marginTop: 0 }}>
-          Folders selected as knowledge sources. Add or manage them from <b>Connections → Google Drive</b>.
+          Folders selected as knowledge sources. Add more with <b>Browse &amp; select from Drive</b> above.
         </p>
         <div className="user-table">
           {folders?.map((f) => (
@@ -294,8 +343,8 @@ export function KnowledgeTab({ user, onAuthError }: { user: AuthenticatedUser; o
           {docs === null && !error && <p className="how">Loading…</p>}
           {docs?.length === 0 && (
             <p className="how">
-              Nothing ingested yet. Connect Google Drive or Gmail and scan content from{' '}
-              <b>Connections</b>.
+              Nothing ingested yet. Add files with <b>Browse &amp; select from Drive</b> above, or scan
+              Gmail from <b>Connections</b>.
             </p>
           )}
         </div>
