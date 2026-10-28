@@ -61,6 +61,9 @@ const SUBTITLES: Record<Section, string> = {
 
 const COLLAPSE_KEY = 'tsba.sidebar.collapsed';
 const SECTION_KEY = 'tsba.section';
+const THEME_KEY = 'tsba.theme';
+
+type Theme = 'light' | 'dark';
 
 // Crisp line icons (inherit the nav link colour via currentColor).
 const svgIcon = (paths: ReactNode): ReactNode => (
@@ -158,6 +161,32 @@ export function App() {
       return next;
     });
 
+  // Light/dark theme. Saved choice wins; otherwise follow the OS preference.
+  const [theme, setTheme] = useState<Theme>(() => {
+    try {
+      const saved = localStorage.getItem(THEME_KEY);
+      if (saved === 'light' || saved === 'dark') return saved;
+    } catch {
+      /* ignore */
+    }
+    return typeof window !== 'undefined' &&
+      window.matchMedia?.('(prefers-color-scheme: dark)').matches
+      ? 'dark'
+      : 'light';
+  });
+
+  // Apply the theme to <html data-theme> and remember the choice.
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    try {
+      localStorage.setItem(THEME_KEY, theme);
+    } catch {
+      /* ignore */
+    }
+  }, [theme]);
+
+  const toggleTheme = () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
+
   useEffect(() => {
     if (!getToken()) return;
     getMe()
@@ -231,6 +260,30 @@ export function App() {
             </button>
           ))}
         </nav>
+
+        <button
+          type="button"
+          className="side-link side-theme"
+          onClick={toggleTheme}
+          aria-pressed={theme === 'dark'}
+          title={collapsed ? (theme === 'dark' ? 'Light mode' : 'Dark mode') : undefined}
+        >
+          <span className="side-ico" aria-hidden="true">
+            {theme === 'dark' ? (
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+                strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="4.5" />
+                <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+                strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" />
+              </svg>
+            )}
+          </span>
+          <span className="side-label">{theme === 'dark' ? 'Light mode' : 'Dark mode'}</span>
+        </button>
 
       </aside>
 

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { AUDIENCES, AUDIENCE_LABELS, type Audience, type SourceCard } from '@tsba/shared';
 import {
   ApiError,
@@ -144,6 +144,8 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
   const [error, setError] = useState('');
   const [turns, setTurns] = useState<Turn[]>(loadTurns);
   const [autoSpeak, setAutoSpeak] = useState(true);
+  // Continuous hands-free mode: listen → answer → speak → listen again.
+  const [handsFree, setHandsFree] = useState(false);
   const [speakingId, setSpeakingId] = useState<number | null>(null);
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [voiceName, setVoiceName] = useState<string>(DEFAULT_VOICE);
@@ -156,6 +158,11 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
   const [starters, setStarters] = useState<string[]>([]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  // Live mirrors of state read inside speech callbacks (which capture stale state).
+  const handsFreeRef = useRef(false);
+  const listeningRef = useRef(false);
+  const thinkingRef = useRef(false);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const finalRef = useRef('');
   const logRef = useRef<HTMLDivElement>(null);
@@ -173,6 +180,26 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
       alive = false;
     };
   }, []);
+
+  // Keep refs in sync for the speech-recognition / synthesis callbacks.
+  useEffect(() => {
+    handsFreeRef.current = handsFree;
+  }, [handsFree]);
+  useEffect(() => {
+    listeningRef.current = listening;
+  }, [listening]);
+  useEffect(() => {
+    thinkingRef.current = thinking;
+  }, [thinking]);
+
+  // Auto-grow the composer textarea: one line by default, expanding with content
+  // (capped by max-height in CSS), and snapping back to one line when cleared.
+  useEffect(() => {
+    const el = taRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
+  }, [typed]);
 
   // Persist the conversation whenever it changes.
   useEffect(() => {
@@ -206,6 +233,7 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
   // Stop everything on unmount.
   useEffect(() => {
     return () => {
+      handsFreeRef.current = false; // stop the loop from reopening the mic
       try {
         recognitionRef.current?.abort();
       } catch {
@@ -230,8 +258,14 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
     }
     u.rate = 1;
     u.onstart = () => setSpeakingId(turn.id);
-    u.onend = () => setSpeakingId((id) => (id === turn.id ? null : id));
-    u.onerror = () => setSpeakingId((id) => (id === turn.id ? null : id));
+    u.onend = () => {
+      setSpeakingId((id) => (id === turn.id ? null : id));
+      resumeHandsFree(); // continuous mode: start listening again after speaking
+    };
+    u.onerror = () => {
+      setSpeakingId((id) => (id === turn.id ? null : id));
+      resumeHandsFree();
+    };
     window.speechSynthesis.speak(u);
   }
 
@@ -242,6 +276,9 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
 
   function clearChat() {
     stopSpeaking();
+    handsFreeRef.current = false;
+    setHandsFree(false);
+    stopListening();
     setTurns([]);
     setAttachments([]);
     nextId.current = 1;
@@ -361,7 +398,8 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
             : t,
         ),
       );
-      if (autoSpeak) speak({ id, question: q, reply });
+      if (autoSpeak && synthSupported && reply) speak({ id, question: q, reply });
+      else resumeHandsFree(); // no spoken reply to wait on — resume the loop now
     } catch (err) {
       setTurns((prev) => prev.filter((t) => t.id !== id)); // drop the pending turn
       setAttachments(files); // restore so the user doesn't lose them on a failure
@@ -409,16 +447,19 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
     };
     rec.onend = () => {
       setListening(false);
+      listeningRef.current = false;
       setInterim('');
       const said = finalRef.current.trim();
       finalRef.current = '';
       if (said) void ask(said);
+      else resumeHandsFree(); // heard nothing — keep the hands-free loop alive
     };
 
     recognitionRef.current = rec;
     try {
       rec.start();
       setListening(true);
+      listeningRef.current = true;
     } catch {
       /* already started */
     }
@@ -437,18 +478,55 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
     else startListening();
   }
 
-  return (
-    <div className="voice-page">
-      {/* ── Mic console ──────────────────────────────────────────────────── */}
-      <section className="card voice-console">
-        <div className="card-h">
-          <h2>Talk to the agent</h2>
-          <span className="eyebrow">Hands-free · grounded in TSBA knowledge</span>
-        </div>
+  // ── Continuous hands-free mode ────────────────────────────────────────────
+  // After each spoken reply (or when nothing was heard), automatically start
+  // listening again, so it's a back-and-forth conversation, not push-to-talk.
+  function resumeHandsFree() {
+    if (!handsFreeRef.current || !getRecognitionCtor()) return;
+    window.setTimeout(() => {
+      if (handsFreeRef.current && !listeningRef.current && !thinkingRef.current) startListening();
+    }, 350); // brief gap so TTS fully stops before the mic reopens
+  }
 
-        <div className="voice-controls">
-          <div className="field">
-            <span className="eyebrow">Who&rsquo;s asking</span>
+  function startHandsFree() {
+    if (!getRecognitionCtor()) return;
+    handsFreeRef.current = true;
+    setHandsFree(true);
+    if (synthSupported) setAutoSpeak(true); // the loop reads replies aloud
+    startListening();
+  }
+
+  function stopHandsFree() {
+    handsFreeRef.current = false;
+    setHandsFree(false);
+    stopListening();
+    stopSpeaking();
+  }
+
+  function toggleHandsFree() {
+    if (handsFree) stopHandsFree();
+    else startHandsFree();
+  }
+
+  // Enter sends; Shift+Enter inserts a newline (matches the reference composer).
+  function onComposerKey(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      if (thinking) return;
+      const q = typed;
+      setTyped('');
+      void ask(q);
+    }
+  }
+
+  return (
+    <div className="voice-page full">
+      {/* ── Conversation (agentic chat, full-width) ──────────────────────── */}
+      <section className="card voice-log-card jchat voice-full">
+        <div className="voice-head">
+          {/* Controls (who's asking + voice) + chat actions on one row. */}
+          <div className="voice-head-right">
+          <div className="voice-head-controls">
             <div className="seg" role="group" aria-label="Who's asking">
               {AUDIENCES.map((a) => (
                 <button key={a} type="button" aria-pressed={audience === a} onClick={() => setAudience(a)}>
@@ -456,69 +534,52 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
                 </button>
               ))}
             </div>
-          </div>
 
-          <label className="voice-toggle">
-            <input type="checkbox" checked={autoSpeak} onChange={(e) => setAutoSpeak(e.target.checked)} />
-            <span>Speak replies aloud</span>
-          </label>
-
-          {synthSupported && (
-            <div className="field">
-              <span className="eyebrow">Voice</span>
-              <select className="voice-select" value={voiceName} onChange={(e) => setVoiceName(e.target.value)}>
+            {synthSupported && (
+              <select
+                className="voice-select"
+                aria-label="Voice"
+                value={voiceName}
+                onChange={(e) => setVoiceName(e.target.value)}
+              >
                 {VOICE_OPTIONS.map((o) => (
                   <option key={o.name} value={o.name}>
                     {o.name} ({o.lang})
                   </option>
                 ))}
               </select>
-            </div>
-          )}
-        </div>
+            )}
 
-        {recognitionSupported ? (
-          <div className="mic-area">
-            <button
-              type="button"
-              className={`mic-btn ${listening ? 'listening' : ''}`}
-              onClick={toggleMic}
-              disabled={thinking}
-              aria-pressed={listening}
-              aria-label={listening ? 'Stop listening' : 'Start listening'}
-            >
-              <svg className="mic-glyph" viewBox="0 0 24 24" width="38" height="38" fill="none"
-                stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <rect x="9" y="2" width="6" height="12" rx="3" />
-                <path d="M5 10v2a7 7 0 0 0 14 0v-2" />
-                <line x1="12" y1="19" x2="12" y2="22" />
-                <line x1="8" y1="22" x2="16" y2="22" />
-              </svg>
-            </button>
-            <p className="mic-status">
-              {listening
-                ? 'Listening… tap to stop'
-                : thinking
-                  ? 'Thinking…'
-                  : 'Tap the mic to speak, or type below'}
-            </p>
-            {(interim || listening) && <p className="mic-interim">{interim || '…'}</p>}
+            {synthSupported && (
+              <label className="voice-toggle">
+                <input type="checkbox" checked={autoSpeak} onChange={(e) => setAutoSpeak(e.target.checked)} />
+                <span>Speak aloud</span>
+              </label>
+            )}
           </div>
-        ) : (
-          <p className="how" style={{ marginTop: 8 }}>
-            In-browser speech recognition isn’t available here (Chrome or Edge support it). You can
-            still type your questions below{synthSupported ? ' — replies are read aloud.' : '.'}
-          </p>
-        )}
 
-        {error && <span className="err" role="status">{error}</span>}
-      </section>
-
-      {/* ── Conversation (agentic chat) ──────────────────────────────────── */}
-      <section className="card voice-log-card jchat">
-        <div className="card-h">
-          <h2>Conversation</h2>
-          <div className="drive-selall">
+          <div className="voice-head-actions">
+            {recognitionSupported && (
+              <button
+                className={`jbtn-ghost hands-free-btn ${handsFree ? 'on' : ''}`}
+                type="button"
+                onClick={toggleHandsFree}
+                aria-pressed={handsFree}
+                title={
+                  handsFree
+                    ? 'Stop the hands-free voice conversation'
+                    : 'Start a hands-free voice conversation (speak, listen, repeat)'
+                }
+              >
+                {handsFree ? (
+                  <>
+                    <span className="hf-dot" aria-hidden="true" /> Stop hands-free
+                  </>
+                ) : (
+                  <>🎙 Hands-free</>
+                )}
+              </button>
+            )}
             {speakingId != null && (
               <button className="jbtn-ghost" type="button" onClick={stopSpeaking}>
                 ■ Stop speaking
@@ -542,6 +603,7 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
             >
               + New chat
             </button>
+          </div>
           </div>
         </div>
 
@@ -676,6 +738,18 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
           </div>
         )}
 
+        {(listening || interim) && (
+          <div className="composer-listening" aria-live="polite">
+            <span className="listening-dot" aria-hidden="true" />
+            <span>{interim || 'Listening…'}</span>
+          </div>
+        )}
+        {error && (
+          <span className="err" role="status" style={{ marginTop: 10 }}>
+            {error}
+          </span>
+        )}
+
         <form
           className="voice-composer"
           onSubmit={(e) => {
@@ -701,15 +775,19 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
             aria-label="Attach files"
             title="Attach images or PDFs"
           >
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"
               strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
             </svg>
           </button>
-          <input
+          <textarea
+            ref={taRef}
             className="voice-input"
+            rows={1}
             value={typed}
             onChange={(e) => setTyped(e.target.value)}
+            onKeyDown={onComposerKey}
             placeholder="Ask the agent anything, or say what you need…"
             disabled={thinking}
             aria-label="Type a message to the agent"
@@ -751,6 +829,7 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
             )}
           </button>
         </form>
+        <p className="composer-hint">Enter to send · Shift+Enter for a new line</p>
       </section>
     </div>
   );
