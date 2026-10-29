@@ -31,17 +31,33 @@ function channelGuidance(channel: Channel): string {
 }
 
 /**
+ * A prompt split into a cache-stable prefix and a per-request volatile suffix.
+ * The stable half is byte-identical across calls, so a prompt-cache breakpoint
+ * placed after it lets repeated calls reuse it at ~10% cost (and lower latency)
+ * without changing any content the model sees.
+ */
+export interface SplitPrompt {
+  stable: string;
+  volatile: string;
+}
+
+/**
  * System prompt for the Voice Agent: a natural spoken conversation, still
  * grounded in the retrieved knowledge. The dialogue itself is passed as chat
  * messages; this only sets behaviour + the knowledge for the latest message.
+ * Returned split: the behaviour rules are stable (cacheable); the retrieved
+ * KNOWLEDGE, which changes every turn, is the volatile suffix.
  */
-export function buildVoiceSystem(args: { audience: Audience; entries: KnowledgeEntry[] }): string {
+export function buildVoiceSystem(args: { audience: Audience; entries: KnowledgeEntry[] }): SplitPrompt {
   const { audience, entries } = args;
-  const knowledge = entries.length
-    ? kbText(entries)
-    : '(No specific knowledge was retrieved for the latest message — likely small talk or a general question.)';
+  // The VERIFIED RULES are identical every turn → put them in the cached stable
+  // block. The retrieved MANUFACTURER answers change per turn → volatile. This
+  // keeps the content identical but lets the ~2.5K instruction+rules prefix be
+  // reused from the prompt cache every turn instead of re-billed in full.
+  const rules = entries.filter((e) => e.kind === 'rule');
+  const makers = entries.filter((e) => e.kind !== 'rule');
 
-  return `You are the TSBA Technical Support voice assistant for Trusted Solar Bigger Advantage (TSBA), an Australian solar and battery installer. You are on a live voice call with ${AUDIENCE_LABELS[audience]}.
+  const stable = `You are the TSBA Technical Support voice assistant for Trusted Solar Bigger Advantage (TSBA), an Australian solar and battery installer. You are on a live voice call with ${AUDIENCE_LABELS[audience]}.
 
 HOW TO TALK
 - Begin EVERY reply with exactly this sentence, then continue naturally on the same line: "This is an automated response from TSBA Technical Support." Use it verbatim, once, as the opening line of every message.
@@ -60,8 +76,13 @@ GROUNDING AND SAFETY
 - Never quote prices or give quotes. If asked, say pricing is handled by the TSBA sales team and offer to pass them on.
 - If the question needs live data from a specific site or system (a fault on one install, a serial number, "check my system"), say the team will take a look.
 
-KNOWLEDGE
-${knowledge}`;
+KNOWLEDGE — VERIFIED RULES (always-current grounding)
+${rules.length ? kbText(rules) : '(none)'}`;
+
+  const volatile = `KNOWLEDGE — MANUFACTURER ANSWERS & DATASHEETS (retrieved for this message)
+${makers.length ? kbText(makers) : '(No specific product knowledge retrieved for the latest message — likely small talk or a general question.)'}`;
+
+  return { stable, volatile };
 }
 
 export function buildPrompt(args: {
@@ -69,12 +90,16 @@ export function buildPrompt(args: {
   audience: Audience;
   channel: Channel;
   entries: KnowledgeEntry[];
-}): string {
+}): SplitPrompt {
   const { question, audience, channel, entries } = args;
-  return `You are the TSBA Technical Support assistant for Trusted Solar Bigger Advantage, an Australian solar and battery installer. You draft a reply to an incoming question. A TSBA staff member (Ryan) approves every draft before it is sent.
+  // Split the grounding: the VERIFIED RULES are the same on every call (stable,
+  // cacheable); the retrieved MANUFACTURER answers/datasheets change per
+  // question (volatile). This lets the big fixed instruction+rules prefix be
+  // served from the prompt cache without removing anything the model sees.
+  const rules = entries.filter((e) => e.kind === 'rule');
+  const makers = entries.filter((e) => e.kind !== 'rule');
 
-WHO IS ASKING: ${AUDIENCE_LABELS[audience]}
-CHANNEL: ${CHANNEL_LABELS[channel]} (${channelGuidance(channel)})
+  const stable = `You are the TSBA Technical Support assistant for Trusted Solar Bigger Advantage, an Australian solar and battery installer. You draft a reply to an incoming question. A TSBA staff member (Ryan) approves every draft before it is sent.
 
 RULES
 1. Answer ONLY from the KNOWLEDGE below, and only when it DIRECTLY supports the answer. A knowledge entry being on the same topic is NOT proof: if the text does not actually state the answer, treat the question as not covered. Never invent or infer a setting, specification, distance, limit or compliance requirement, and never stretch a near-match into an answer. When the evidence is insufficient, use outcome "handover" and say plainly what is missing.
@@ -89,8 +114,14 @@ RULES
 9. Australian English. Plain text in the reply, no markdown. No personal details.
 10. Prefer a short, correct, well-qualified answer over a long or confident-sounding one. Do not pad. Stating "the knowledge doesn't cover this" is a correct and valuable answer — never answer just to answer.
 
-KNOWLEDGE
-${kbText(entries)}
+KNOWLEDGE — VERIFIED RULES (always-current grounding)
+${kbText(rules)}`;
+
+  const volatile = `WHO IS ASKING: ${AUDIENCE_LABELS[audience]}
+CHANNEL: ${CHANNEL_LABELS[channel]} (${channelGuidance(channel)})
+
+KNOWLEDGE — MANUFACTURER ANSWERS & DATASHEETS (retrieved for this question)
+${kbText(makers)}
 
 QUESTION
 ${question}
@@ -98,4 +129,6 @@ ${question}
 Reply with only a JSON object:
 {"outcome":"answer"|"handover"|"decline"|"clarify","reply":"the message to send","sources":["ids used"],"note_for_ryan":"one or two sentences for Ryan: confidence, what to check","team_handover":{"summary":"one line for the team","needed":["details to collect"]}}
 Set team_handover to null unless outcome is "handover".`;
+
+  return { stable, volatile };
 }

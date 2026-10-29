@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
-import { AUDIENCES, AUDIENCE_LABELS, type Audience, type SourceCard } from '@tsba/shared';
+import { AUTOMATED_RESPONSE_PREFIX, type Audience, type SourceCard } from '@tsba/shared';
 import {
   ApiError,
   AuthError,
@@ -95,8 +95,62 @@ function formatTime(iso?: string): string {
   return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
+// Resolve which installed voice to actually use. Prefer the exact pick, but if
+// it isn't installed, fall back to a LOCAL (offline) English voice rather than a
+// network/cloud voice — network voices lag before they start and clip the first
+// words. Returns null only when no usable voice exists (then we set u.lang).
+function pickVoice(
+  voices: SpeechSynthesisVoice[],
+  voiceName: string,
+  lang: string,
+): SpeechSynthesisVoice | null {
+  const exact = voices.find((v) => v.name === voiceName);
+  if (exact) return exact;
+  const localSameLang = voices.find((v) => v.localService && v.lang === lang);
+  if (localSameLang) return localSameLang;
+  const localEnglish = voices.find((v) => v.localService && v.lang.toLowerCase().startsWith('en'));
+  if (localEnglish) return localEnglish;
+  return voices.find((v) => v.lang === lang) ?? null;
+}
+
+// The automated-response opener is shown on screen (in italics) but never read
+// aloud — strip it from the text handed to speech synthesis.
+function spokenText(reply: string): string {
+  const trimmed = reply.trimStart();
+  if (trimmed.startsWith(AUTOMATED_RESPONSE_PREFIX)) {
+    return trimmed.slice(AUTOMATED_RESPONSE_PREFIX.length).trimStart();
+  }
+  return reply;
+}
+
+// Render a reply with the automated-response opener shown in italics (and not
+// spoken). The rest of the reply renders as normal text.
+function ReplyText({ text }: { text: string }) {
+  const trimmed = text.trimStart();
+  if (trimmed.startsWith(AUTOMATED_RESPONSE_PREFIX)) {
+    const rest = trimmed.slice(AUTOMATED_RESPONSE_PREFIX.length).trimStart();
+    return (
+      <>
+        <em className="auto-prefix">{AUTOMATED_RESPONSE_PREFIX}</em>
+        {rest ? (
+          <>
+            <br />
+            {rest}
+          </>
+        ) : null}
+      </>
+    );
+  }
+  return <>{text}</>;
+}
+
 // Persist the conversation so it survives tab switches and reloads.
 const VOICE_LOG_KEY = 'tsba.voice.turns';
+
+// How long a pause (ms) counts as "the speaker is finished". The browser's own
+// end-of-speech detection is far more aggressive than this and cuts people off
+// mid-thought, so we run recognition continuously and judge the end ourselves.
+const SILENCE_MS = 2500;
 
 // The voice picker always shows exactly these 6, on every device/browser.
 // The browser only has some of them installed (the Microsoft voices are
@@ -112,7 +166,11 @@ const VOICE_OPTIONS: { name: string; lang: string }[] = [
   { name: 'Google UK English Male', lang: 'en-GB' },
 ];
 
-const DEFAULT_VOICE = 'Google UK English Female';
+// Default to a LOCAL (offline) voice so playback starts instantly with no clip.
+// Network voices (Google *) lag and swallow opening words; users can still pick
+// one from the dropdown, and pickVoice() falls back to any local voice if this
+// exact one isn't installed.
+const DEFAULT_VOICE = 'Microsoft Zira - English (United States)';
 
 function loadTurns(): Turn[] {
   try {
@@ -137,7 +195,8 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
   const recognitionSupported = Boolean(getRecognitionCtor());
   const synthSupported = typeof window !== 'undefined' && 'speechSynthesis' in window;
 
-  const [audience, setAudience] = useState<Audience>('installer');
+  // Fixed audience for the voice agent (the picker was removed from the UI).
+  const [audience] = useState<Audience>('installer');
   const [listening, setListening] = useState(false);
   const [interim, setInterim] = useState('');
   const [thinking, setThinking] = useState(false);
@@ -165,6 +224,21 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
   const thinkingRef = useRef(false);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const finalRef = useRef('');
+  // The latest not-yet-finalized words. Kept so that if the mic stops before the
+  // browser finalises them, we don't lose the tail of what was said.
+  const interimRef = useRef('');
+  // Bumped on every speak()/stopSpeaking() so a delayed start can tell whether
+  // it's still the current one (guards the settle delay below).
+  const speakSeqRef = useRef(0);
+  // Keep-alive interval: Chrome stops speaking a long utterance after ~15s, so
+  // we nudge it periodically to read the whole reply. Cleared when speech stops.
+  const keepAliveRef = useRef<number | null>(null);
+  // Whether we still intend the mic to be open. The browser ends a recognition
+  // session on its own (short silence, or an internal time cap); while this is
+  // true we transparently reopen it so one logical "listen" spans those gaps.
+  const wantListeningRef = useRef(false);
+  // Pending end-of-speech commit; reset on every new word, fires after SILENCE_MS.
+  const silenceTimerRef = useRef<number | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const nextId = useRef(turns.reduce((m, t) => Math.max(m, t.id), 0) + 1);
 
@@ -234,6 +308,10 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
   useEffect(() => {
     return () => {
       handsFreeRef.current = false; // stop the loop from reopening the mic
+      wantListeningRef.current = false; // and stop onend from restarting it
+      if (silenceTimerRef.current != null) window.clearTimeout(silenceTimerRef.current);
+      speakSeqRef.current++; // invalidate any pending delayed speak
+      if (keepAliveRef.current != null) window.clearInterval(keepAliveRef.current);
       try {
         recognitionRef.current?.abort();
       } catch {
@@ -243,33 +321,78 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
     };
   }, [synthSupported]);
 
+  // Keep speech alive past Chrome's ~15s single-utterance cutoff by nudging it
+  // before the timer trips, so the WHOLE reply is read. Only matters for long
+  // replies; short ones finish before the first nudge.
+  function startKeepAlive() {
+    stopKeepAlive();
+    keepAliveRef.current = window.setInterval(() => {
+      if (!window.speechSynthesis.speaking) {
+        stopKeepAlive();
+        return;
+      }
+      window.speechSynthesis.pause();
+      window.speechSynthesis.resume();
+    }, 9000);
+  }
+  function stopKeepAlive() {
+    if (keepAliveRef.current != null) {
+      window.clearInterval(keepAliveRef.current);
+      keepAliveRef.current = null;
+    }
+  }
+
   function speak(turn: Turn) {
     if (!synthSupported || !turn.reply) return;
+    const seq = ++speakSeqRef.current; // mark this as the current speak request
     window.speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(turn.reply);
-    const voice = voices.find((v) => v.name === voiceName);
-    if (voice) {
-      u.voice = voice;
-    } else {
-      // This device doesn't have the selected voice installed (e.g. a Windows
-      // voice on macOS) — fall back to its locale so the browser picks the
-      // closest available voice instead of an unrelated default.
-      u.lang = VOICE_OPTIONS.find((o) => o.name === voiceName)?.lang ?? 'en-GB';
+    stopKeepAlive();
+    // Read everything except the automated-response opener (shown, not spoken).
+    const toSpeak = spokenText(turn.reply);
+    if (!toSpeak) {
+      resumeHandsFree(); // nothing to say — keep the hands-free loop alive
+      return;
     }
+
+    const fallbackLang = VOICE_OPTIONS.find((o) => o.name === voiceName)?.lang ?? 'en-GB';
+    const voice = pickVoice(voices, voiceName, fallbackLang);
+    // Speak the reply as ONE utterance: no chunk boundaries to slur/clip words,
+    // and no multi-utterance chain that can stall if Chrome skips an onend — so
+    // the full response is always read, smoothly and in order. The keep-alive
+    // below handles the only downside (Chrome's long-utterance cutoff).
+    const u = new SpeechSynthesisUtterance(toSpeak);
+    if (voice) u.voice = voice;
+    else u.lang = fallbackLang;
     u.rate = 1;
     u.onstart = () => setSpeakingId(turn.id);
-    u.onend = () => {
+    const finish = () => {
+      stopKeepAlive();
       setSpeakingId((id) => (id === turn.id ? null : id));
       resumeHandsFree(); // continuous mode: start listening again after speaking
     };
-    u.onerror = () => {
-      setSpeakingId((id) => (id === turn.id ? null : id));
-      resumeHandsFree();
-    };
-    window.speechSynthesis.speak(u);
+    u.onend = finish;
+    u.onerror = finish;
+
+    // Short settle delay so Chrome doesn't clip the first word after cancel().
+    window.setTimeout(() => {
+      if (seq !== speakSeqRef.current) return; // superseded by a newer speak/stop
+      // Prime the engine with a SILENT warm-up utterance first. Network voices
+      // (e.g. Google) have start-up latency, so Chrome begins the real utterance
+      // before audio is ready and swallows the opening words. The warm-up absorbs
+      // that start-up so the real reply begins cleanly ("There are…", not "are…").
+      const warm = new SpeechSynthesisUtterance('.');
+      if (voice) warm.voice = voice;
+      else warm.lang = fallbackLang;
+      warm.volume = 0; // inaudible
+      window.speechSynthesis.speak(warm);
+      window.speechSynthesis.speak(u);
+      startKeepAlive();
+    }, 60);
   }
 
   function stopSpeaking() {
+    speakSeqRef.current++; // cancel any pending delayed speak
+    stopKeepAlive();
     if (synthSupported) window.speechSynthesis.cancel();
     setSpeakingId(null);
   }
@@ -411,9 +534,33 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
       } else {
         setError('Couldn’t get an answer. Please try again.');
       }
+      // A recoverable error shouldn't break the hands-free loop — keep the mic
+      // open so the user can just try again by speaking, without re-arming it.
+      resumeHandsFree();
     } finally {
       setThinking(false);
     }
+  }
+
+  function clearSilenceTimer() {
+    if (silenceTimerRef.current != null) {
+      window.clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+  }
+
+  // The speaker has gone quiet long enough — treat the utterance as finished and
+  // close the mic so onend can hand the transcript off to the agent.
+  function armSilenceTimer() {
+    clearSilenceTimer();
+    silenceTimerRef.current = window.setTimeout(() => {
+      wantListeningRef.current = false; // a real stop — don't auto-reopen
+      try {
+        recognitionRef.current?.stop();
+      } catch {
+        /* ignore */
+      }
+    }, SILENCE_MS);
   }
 
   function startListening() {
@@ -423,10 +570,15 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
     setError('');
     setInterim('');
     finalRef.current = '';
+    interimRef.current = '';
+    clearSilenceTimer();
+    wantListeningRef.current = true;
 
     const rec = new Ctor();
     rec.lang = 'en-AU';
-    rec.continuous = false;
+    // Continuous: a brief pause no longer ends the session, so the speaker can
+    // breathe mid-sentence. We decide when they're actually done (armSilenceTimer).
+    rec.continuous = true;
     rec.interimResults = true;
 
     rec.onresult = (e) => {
@@ -436,21 +588,41 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
         if (res.isFinal) finalRef.current += res[0].transcript;
         else interimText += res[0].transcript;
       }
+      interimRef.current = interimText; // remember the tail in case the mic stops
       setInterim(interimText);
+      armSilenceTimer(); // reset the end-of-speech countdown on every word
     };
     rec.onerror = (e) => {
       if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+        wantListeningRef.current = false; // fatal — stop trying to reopen
         setError('Microphone access was blocked. Allow it in your browser to use voice.');
       } else if (e.error !== 'aborted' && e.error !== 'no-speech') {
         setError(`Voice error: ${e.error}`);
       }
+      // 'no-speech' / 'aborted' are expected when the browser closes an idle
+      // session; onend then reopens it while wantListeningRef is still true.
     };
     rec.onend = () => {
+      // The browser ended the session. If we still intend to be listening (the
+      // user hasn't paused long enough to commit), reopen it so the mic doesn't
+      // close out from under a slow or mid-sentence speaker.
+      if (wantListeningRef.current) {
+        try {
+          rec.start();
+          return;
+        } catch {
+          /* fall through to finalize if it can't restart */
+        }
+      }
+      clearSilenceTimer();
       setListening(false);
       listeningRef.current = false;
       setInterim('');
-      const said = finalRef.current.trim();
+      // Combine finalised text with any trailing interim words the browser
+      // hadn't finalised yet, so the end of a sentence isn't cut off.
+      const said = `${finalRef.current} ${interimRef.current}`.trim();
       finalRef.current = '';
+      interimRef.current = '';
       if (said) void ask(said);
       else resumeHandsFree(); // heard nothing — keep the hands-free loop alive
     };
@@ -466,6 +638,8 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
   }
 
   function stopListening() {
+    wantListeningRef.current = false; // user-initiated stop — don't auto-reopen
+    clearSilenceTimer();
     try {
       recognitionRef.current?.stop();
     } catch {
@@ -483,9 +657,21 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
   // listening again, so it's a back-and-forth conversation, not push-to-talk.
   function resumeHandsFree() {
     if (!handsFreeRef.current || !getRecognitionCtor()) return;
-    window.setTimeout(() => {
-      if (handsFreeRef.current && !listeningRef.current && !thinkingRef.current) startListening();
-    }, 350); // brief gap so TTS fully stops before the mic reopens
+    // Keep retrying until the agent is idle, so the loop never gets stuck
+    // "paused" if it's still thinking or speaking when the first check runs.
+    let tries = 0;
+    const tryStart = () => {
+      if (!handsFreeRef.current) return; // hands-free was turned off
+      if (listeningRef.current) return; // already listening again
+      const busy =
+        thinkingRef.current || (synthSupported && window.speechSynthesis.speaking);
+      if (busy) {
+        if (tries++ < 40) window.setTimeout(tryStart, 250); // ~10s of retries
+        return;
+      }
+      startListening();
+    };
+    window.setTimeout(tryStart, 300); // brief gap so TTS fully stops before the mic reopens
   }
 
   function startHandsFree() {
@@ -527,14 +713,6 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
           {/* Controls (who's asking + voice) + chat actions on one row. */}
           <div className="voice-head-right">
           <div className="voice-head-controls">
-            <div className="seg" role="group" aria-label="Who's asking">
-              {AUDIENCES.map((a) => (
-                <button key={a} type="button" aria-pressed={audience === a} onClick={() => setAudience(a)}>
-                  {AUDIENCE_LABELS[a]}
-                </button>
-              ))}
-            </div>
-
             {synthSupported && (
               <select
                 className="voice-select"
@@ -647,7 +825,7 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
                   ) : (
                     <>
                       <div className="jcard">
-                        <p className="jreply">{t.reply}</p>
+                        <p className="jreply"><ReplyText text={t.reply} /></p>
                         {t.sources && t.sources.length > 0 && (
                           <div className="jsources">
                             <span className="jsources-label">Grounded in</span>

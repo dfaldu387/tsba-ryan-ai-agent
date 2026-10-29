@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { isOutcome, type DraftResult } from '@tsba/shared';
 import { env } from './env.js';
+import { recordFromUsage } from './usage.js';
 
 const client = env.anthropicApiKey ? new Anthropic({ apiKey: env.anthropicApiKey }) : null;
 
@@ -74,7 +75,7 @@ export function buildUserContent(text: string, attachments: ChatAttachment[]): A
  * the grounding rules + retrieved knowledge).
  */
 export async function chatReply(
-  system: string,
+  system: { stable: string; volatile: string },
   turns: ChatTurn[],
   signal?: AbortSignal,
 ): Promise<string> {
@@ -84,11 +85,17 @@ export async function chatReply(
     {
       model: env.anthropicModel,
       max_tokens: 600,
-      system,
+      // Cache the stable behaviour block; the volatile KNOWLEDGE follows it and
+      // is not cached. Same content as before — just a cache breakpoint between.
+      system: [
+        { type: 'text', text: system.stable, cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: system.volatile },
+      ],
       messages: turns.map((t) => ({ role: t.role, content: t.content })),
     },
     { signal },
   );
+  recordFromUsage('voice_chat', env.anthropicModel, message.usage);
 
   const text = message.content
     .filter((b): b is Anthropic.TextBlock => b.type === 'text')
@@ -137,6 +144,7 @@ export async function extractPdfWithClaude(buffer: Buffer, signal?: AbortSignal)
     },
     { signal },
   );
+  recordFromUsage('pdf_extract', env.anthropicModel, message.usage);
 
   return message.content
     .filter((b): b is Anthropic.TextBlock => b.type === 'text')
@@ -163,20 +171,29 @@ export async function suggestFollowups(
         model: env.anthropicModel,
         max_tokens: 200,
         system:
-          'You suggest what a user might ask NEXT in a solar inverter technical-support chat. ' +
-          'Output ONLY a JSON array of exactly 3 short questions (each 4–9 words), nothing else. ' +
-          'Make them specific and useful: build on the product/brand just discussed and the available ' +
-          'knowledge (e.g. efficiency, MPPT count, backup, warranty, IP rating, settings). ' +
-          'Do not repeat the question already asked. Plain text, no numbering, no quotes inside the strings.',
+          'You generate up to 3 short tappable chips for a solar inverter technical-support chat. ' +
+          'Output ONLY a JSON array of exactly 3 short strings (each 3–9 words), nothing else. ' +
+          'Plain text, no numbering, no quotes inside the strings.\n' +
+          'FIRST decide which kind to produce from the ANSWER:\n' +
+          '- If the answer is ASKING THE USER TO CLARIFY or choose (it asks which model/brand/variant ' +
+          'they have, or needs a specific detail before it can answer), produce REQUIREMENT-GATHERING ' +
+          'chips: concrete options the user can tap to supply that detail, phrased as the USER\'S OWN ' +
+          'reply (first person). Draw real model/brand names from the products/documents listed below ' +
+          '(e.g. "I have the Deye SUN-8K-SG05LP1-AU", "It\'s a GoodWe GW5000", "Mine is a SOFAR inverter"). ' +
+          'Prefer the exact models present in the available knowledge; do not invent models.\n' +
+          '- OTHERWISE, produce 3 natural NEXT follow-up QUESTIONS that build on the product/brand just ' +
+          'discussed and the available knowledge (efficiency, MPPT count, backup, warranty, IP rating, settings). ' +
+          'Do not repeat the question already asked.',
         messages: [
           {
             role: 'user',
-            content: `Question just asked: ${question}\n\nAnswer given: ${answer}\n\nProducts/documents available in the knowledge base right now:\n${context || '(general)'}\n\nReturn a JSON array of 3 follow-up questions.`,
+            content: `Question just asked: ${question}\n\nAnswer given: ${answer}\n\nProducts/documents available in the knowledge base right now:\n${context || '(general)'}\n\nReturn the JSON array of 3 chips (requirement-gathering options if the answer is asking the user to clarify, otherwise follow-up questions).`,
           },
         ],
       },
       { signal },
     );
+    recordFromUsage('followups', env.anthropicModel, message.usage);
     const text = message.content
       .filter((b): b is Anthropic.TextBlock => b.type === 'text')
       .map((b) => b.text)
@@ -218,6 +235,7 @@ export async function suggestStarters(context: string, signal?: AbortSignal): Pr
       },
       { signal },
     );
+    recordFromUsage('starters', env.anthropicModel, message.usage);
     const text = message.content
       .filter((b): b is Anthropic.TextBlock => b.type === 'text')
       .map((b) => b.text)
@@ -234,17 +252,33 @@ export async function suggestStarters(context: string, signal?: AbortSignal): Pr
   }
 }
 
-export async function draftReply(prompt: string, signal?: AbortSignal): Promise<DraftResult> {
+export async function draftReply(
+  prompt: { stable: string; volatile: string },
+  signal?: AbortSignal,
+): Promise<DraftResult> {
   if (!client) throw new Error('ANTHROPIC_API_KEY is not set on the server');
 
   const message = await client.messages.create(
     {
       model: env.anthropicModel,
       max_tokens: 1200,
-      messages: [{ role: 'user', content: prompt }],
+      // The stable prefix (instructions + verified rules) is cached; the
+      // volatile suffix (ask context + retrieved datasheets + question) is not.
+      // Identical content to the old single string — only a cache breakpoint
+      // is inserted, so repeat calls reuse the prefix at ~10% cost.
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt.stable, cache_control: { type: 'ephemeral' } },
+            { type: 'text', text: prompt.volatile },
+          ],
+        },
+      ],
     },
     { signal },
   );
+  recordFromUsage('draft', env.anthropicModel, message.usage);
 
   const text = message.content
     .filter((b): b is Anthropic.TextBlock => b.type === 'text')

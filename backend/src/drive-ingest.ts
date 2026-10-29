@@ -5,6 +5,7 @@ import type {
   IngestedDocument,
   KnowledgeEntry,
 } from '@tsba/shared';
+import { invalidateAnswerCache } from './answer-cache.js';
 import {
   collectFiles,
   DriveAuthError,
@@ -161,6 +162,7 @@ export async function ingestFile(fileId: string): Promise<IngestResult> {
 export async function ingestFiles(fileIds: string[]): Promise<IngestResult[]> {
   const results: IngestResult[] = [];
   for (const id of fileIds) results.push(await ingestFile(id));
+  if (fileIds.length) invalidateAnswerCache(); // KB changed → drop stale answers
   return results;
 }
 
@@ -283,6 +285,7 @@ export async function removeFolderSource(folderId: string, purge: boolean): Prom
     } catch {
       // Folder may be gone/inaccessible — the source record is removed regardless.
     }
+    invalidateAnswerCache(); // removed documents → drop stale answers
   }
   return true;
 }

@@ -74,6 +74,20 @@ export interface GoogleTokens {
   scope: string;
 }
 
+/**
+ * A token request failed. `needsReauth` is set when Google rejected the refresh
+ * token itself (`invalid_grant`: expired/revoked) — auto-refresh can't recover
+ * from this and the user must reconnect (re-consent) the provider.
+ */
+export class GoogleTokenError extends Error {
+  readonly needsReauth: boolean;
+  constructor(message: string, needsReauth: boolean) {
+    super(message);
+    this.name = 'GoogleTokenError';
+    this.needsReauth = needsReauth;
+  }
+}
+
 function tokensFromResponse(data: Record<string, unknown>): GoogleTokens {
   const expiresInSec = Number(data.expires_in ?? 3600);
   return {
@@ -113,7 +127,16 @@ export async function refreshAccessToken(refreshToken: string): Promise<GoogleTo
     }),
   });
   const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-  if (!res.ok) throw new Error(`token refresh failed: ${data.error_description ?? data.error ?? res.status}`);
+  if (!res.ok) {
+    const code = String(data.error ?? '');
+    // `invalid_grant` means the refresh token is expired/revoked — unrecoverable
+    // without a fresh consent. Flag it so callers can prompt a reconnect.
+    const needsReauth = code === 'invalid_grant';
+    throw new GoogleTokenError(
+      `token refresh failed: ${data.error_description ?? data.error ?? res.status}`,
+      needsReauth,
+    );
+  }
   const tokens = tokensFromResponse(data);
   // A refresh response usually omits refresh_token — keep the one we have.
   if (!tokens.refreshToken) tokens.refreshToken = refreshToken;

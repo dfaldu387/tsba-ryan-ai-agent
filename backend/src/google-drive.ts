@@ -1,5 +1,6 @@
 import { DRIVE_FOLDER_MIME, type DriveFile, type DriveListing } from '@tsba/shared';
 import { getAccessToken } from './connections.js';
+import { GoogleTokenError } from './google-oauth.js';
 
 // ─── Google Drive API v3 client (list + fetch content) ───────────────────────
 // Uses the stored google-drive OAuth token. Read-only: only files.list,
@@ -31,10 +32,38 @@ export function isIngestable(mimeType: string): boolean {
 
 class DriveAuthError extends Error {}
 
-async function token(): Promise<string> {
-  const t = await getAccessToken('google-drive');
-  if (!t) throw new DriveAuthError('google-drive is not connected');
-  return t;
+async function token(forceRefresh = false): Promise<string> {
+  try {
+    const t = await getAccessToken('google-drive', { forceRefresh });
+    if (!t) throw new DriveAuthError('google-drive is not connected');
+    return t;
+  } catch (err) {
+    // A dead refresh token can't be recovered automatically — surface it as a
+    // Drive auth error so the sync reports a single clear "reconnect" message.
+    if (err instanceof GoogleTokenError && err.needsReauth) {
+      throw new DriveAuthError(
+        'Google Drive access expired — please reconnect Google Drive in Connections.',
+      );
+    }
+    throw err;
+  }
+}
+
+/**
+ * Fetch a Drive endpoint with the current access token. On a 401 (token revoked
+ * or stale before its clock expiry), force a token refresh and retry once —
+ * this is the auto-refresh safety net for long multi-folder syncs.
+ */
+async function driveFetch(url: string, init: RequestInit = {}, retried = false): Promise<Response> {
+  const bearer = await token(retried);
+  const res = await fetch(url, {
+    ...init,
+    headers: { ...(init.headers ?? {}), Authorization: `Bearer ${bearer}` },
+  });
+  if (res.status === 401 && !retried) {
+    return driveFetch(url, init, true);
+  }
+  return res;
 }
 
 export { DriveAuthError };
@@ -71,9 +100,7 @@ export async function listFolder(
   });
   if (pageToken) params.set('pageToken', pageToken);
 
-  const res = await fetch(`${DRIVE_API}/files?${params.toString()}`, {
-    headers: { Authorization: `Bearer ${await token()}` },
-  });
+  const res = await driveFetch(`${DRIVE_API}/files?${params.toString()}`);
   if (!res.ok) throw new Error(`Drive list failed: ${res.status} ${await res.text()}`);
   const data = (await res.json()) as { files?: Record<string, unknown>[]; nextPageToken?: string };
   return {
@@ -98,9 +125,7 @@ export async function searchFiles(q: string): Promise<DriveFile[]> {
     supportsAllDrives: 'true',
     includeItemsFromAllDrives: 'true',
   });
-  const res = await fetch(`${DRIVE_API}/files?${params.toString()}`, {
-    headers: { Authorization: `Bearer ${await token()}` },
-  });
+  const res = await driveFetch(`${DRIVE_API}/files?${params.toString()}`);
   if (!res.ok) throw new Error(`Drive search failed: ${res.status} ${await res.text()}`);
   const data = (await res.json()) as { files?: Record<string, unknown>[] };
   return (data.files ?? [])
@@ -123,9 +148,7 @@ export async function getFileMeta(fileId: string): Promise<DriveFileMeta> {
     fields: 'id, name, mimeType, size, webViewLink',
     supportsAllDrives: 'true',
   });
-  const res = await fetch(`${DRIVE_API}/files/${fileId}?${params.toString()}`, {
-    headers: { Authorization: `Bearer ${await token()}` },
-  });
+  const res = await driveFetch(`${DRIVE_API}/files/${fileId}?${params.toString()}`);
   if (!res.ok) throw new Error(`Drive metadata failed: ${res.status} ${await res.text()}`);
   const f = (await res.json()) as Record<string, unknown>;
   return {
@@ -176,14 +199,12 @@ export async function collectFiles(folderId: string, recursive: boolean): Promis
  * Needs the full `drive` scope (write). Returns the recognised text.
  */
 export async function ocrPdfToText(fileId: string, name: string): Promise<string> {
-  const bearer = await token();
-
   // 1) Copy the PDF into a Google Doc — `ocrLanguage` triggers OCR on the images.
-  const copyRes = await fetch(
+  const copyRes = await driveFetch(
     `${DRIVE_API}/files/${fileId}/copy?ocrLanguage=en&supportsAllDrives=true`,
     {
       method: 'POST',
-      headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: `[OCR temp] ${name}`, mimeType: 'application/vnd.google-apps.document' }),
     },
   );
@@ -192,17 +213,15 @@ export async function ocrPdfToText(fileId: string, name: string): Promise<string
 
   try {
     // 2) Export the OCR'd Google Doc as plain text.
-    const exp = await fetch(
+    const exp = await driveFetch(
       `${DRIVE_API}/files/${copy.id}/export?mimeType=${encodeURIComponent('text/plain')}`,
-      { headers: { Authorization: `Bearer ${bearer}` } },
     );
     if (!exp.ok) throw new Error(`Drive OCR export failed: ${exp.status} ${await exp.text()}`);
     return await exp.text();
   } finally {
     // 3) Always clean up the temporary doc.
-    await fetch(`${DRIVE_API}/files/${copy.id}?supportsAllDrives=true`, {
+    await driveFetch(`${DRIVE_API}/files/${copy.id}?supportsAllDrives=true`, {
       method: 'DELETE',
-      headers: { Authorization: `Bearer ${bearer}` },
     }).catch(() => {});
   }
 }
@@ -212,13 +231,12 @@ export async function fetchFileBytes(
   fileId: string,
   mimeType: string,
 ): Promise<{ buffer: Buffer; contentType: string }> {
-  const bearer = await token();
   const exportMime = GOOGLE_EXPORT[mimeType];
   const url = exportMime
     ? `${DRIVE_API}/files/${fileId}/export?mimeType=${encodeURIComponent(exportMime)}`
     : `${DRIVE_API}/files/${fileId}?alt=media&supportsAllDrives=true`;
 
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${bearer}` } });
+  const res = await driveFetch(url);
   if (!res.ok) throw new Error(`Drive download failed: ${res.status} ${await res.text()}`);
   const buffer = Buffer.from(await res.arrayBuffer());
   return { buffer, contentType: exportMime ?? mimeType };

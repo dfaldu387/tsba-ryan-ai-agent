@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type ReactElement } from 'react';
 import {
   AUDIENCES,
   AUDIENCE_LABELS,
@@ -13,6 +13,26 @@ import { ApiError, AuthError, createDraft, listDrafts, patchDraft } from '../api
 import { SUGGESTIONS } from '../data/suggestions';
 import { DraftView } from './DraftView';
 import { QueueLists } from './QueueLists';
+import {
+  BriefcaseIcon,
+  ChatIcon,
+  MailIcon,
+  TextIcon,
+  UserIcon,
+  WrenchIcon,
+} from './icons';
+
+// Icons for the audience / channel segmented controls.
+const AUDIENCE_ICON: Record<Audience, ReactElement> = {
+  customer: <UserIcon />,
+  installer: <WrenchIcon />,
+  sales: <BriefcaseIcon />,
+};
+const CHANNEL_ICON: Record<Channel, ReactElement> = {
+  chat: <ChatIcon />,
+  text: <TextIcon />,
+  email: <MailIcon />,
+};
 
 export function AskTab({ onAuthError }: { onAuthError: () => void }) {
   const [drafts, setDrafts] = useState<Draft[]>([]);
@@ -43,6 +63,9 @@ export function AskTab({ onAuthError }: { onAuthError: () => void }) {
   }, []);
 
   const current = drafts.find((d) => d.id === currentId) ?? null;
+  // Sample questions scoped to the selected audience — this page is managed
+  // per audience (Customer / Installer / Sales rep).
+  const audienceSuggestions = SUGGESTIONS.filter((s) => s.audience === audience);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -76,41 +99,52 @@ export function AskTab({ onAuthError }: { onAuthError: () => void }) {
     }
   }
 
+  // Loading a draft from the queue restores the audience + channel it arrived on,
+  // so the composer reflects where the question came from (and where the reply
+  // will go back out).
   function selectDraft(d: Draft) {
     setCurrentId(d.id);
+    setAudience(d.audience);
+    setChannel(d.channel);
     draftCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
   return (
-    <main className="wrap">
+    <>
+      {/* Main page tabs — the audience scopes the whole page (questions, drafts,
+          replies are managed per audience). */}
+      <div className="ask-maintabs pilltabs-wrap">
+        <div className="pilltabs" role="tablist" aria-label="Who's asking">
+          {AUDIENCES.map((a) => (
+            <button key={a} type="button" role="tab" aria-selected={audience === a} onClick={() => setAudience(a)}>
+              {AUDIENCE_ICON[a]}
+              {AUDIENCE_LABELS[a]}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <main className="wrap">
       <div className="col">
-        <section className="card" aria-labelledby="h-in">
+        <section className="card ask-incoming" aria-labelledby="h-in">
           <div className="card-h">
             <h2 id="h-in">Incoming question</h2>
             <span className="eyebrow">Arrives as if from a real channel</span>
           </div>
-          <div className="row">
-            <div className="field">
-              <span className="eyebrow">Who&rsquo;s asking</span>
-              <div className="seg" role="group" aria-label="Who's asking">
-                {AUDIENCES.map((a) => (
-                  <button key={a} type="button" aria-pressed={audience === a} onClick={() => setAudience(a)}>
-                    {AUDIENCE_LABELS[a]}
-                  </button>
-                ))}
-              </div>
+
+          <div className="field">
+            <span className="eyebrow">Arrived from</span>
+            <div className="pilltabs arrived-pills" role="group" aria-label="Arrived from">
+              {CHANNELS.map((c) => (
+                <button key={c} type="button" aria-pressed={channel === c} onClick={() => setChannel(c)}>
+                  {CHANNEL_ICON[c]}
+                  {CHANNEL_LABELS[c]}
+                </button>
+              ))}
             </div>
-            <div className="field">
-              <span className="eyebrow">Arrives by</span>
-              <div className="seg" role="group" aria-label="Channel">
-                {CHANNELS.map((c) => (
-                  <button key={c} type="button" aria-pressed={channel === c} onClick={() => setChannel(c)}>
-                    {CHANNEL_LABELS[c]}
-                  </button>
-                ))}
-              </div>
-            </div>
+            <span className="field-hint">The approved reply is sent back out on this channel.</span>
           </div>
+
           <div className="field">
             <label className="eyebrow" htmlFor="recipient">Send approved reply to <i>(optional)</i></label>
             <input
@@ -157,27 +191,30 @@ export function AskTab({ onAuthError }: { onAuthError: () => void }) {
         <section className="card" aria-labelledby="h-try">
           <div className="card-h">
             <h2 id="h-try">Try one of these</h2>
-            <span className="eyebrow">Real questions from TSBA</span>
+            <span className="eyebrow">{AUDIENCE_LABELS[audience]} questions from TSBA</span>
           </div>
           <div className="chips">
-            {SUGGESTIONS.map((s, i) => (
-              <button
-                key={i}
-                type="button"
-                onClick={() => {
-                  setAudience(s.audience);
-                  setQuestion(s.question);
-                  document.getElementById('q')?.focus();
-                }}
-              >
-                <i>{AUDIENCE_LABELS[s.audience]}</i>
-                {s.question}
-              </button>
-            ))}
+            {audienceSuggestions.length === 0 ? (
+              <p className="empty">No sample {AUDIENCE_LABELS[audience]} questions yet.</p>
+            ) : (
+              audienceSuggestions.map((s, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  onClick={() => {
+                    setChannel(s.channel); // auto-select the channel it arrived on
+                    setQuestion(s.question);
+                    document.getElementById('q')?.focus();
+                  }}
+                >
+                  {s.question}
+                </button>
+              ))
+            )}
           </div>
         </section>
 
-        <QueueLists drafts={drafts} currentId={currentId} onSelect={selectDraft} />
+        <QueueLists drafts={drafts} audience={audience} currentId={currentId} onSelect={selectDraft} />
 
         <section className="card how">
           <span className="eyebrow">What it knows today</span>
@@ -194,6 +231,7 @@ export function AskTab({ onAuthError }: { onAuthError: () => void }) {
           </p>
         </section>
       </div>
-    </main>
+      </main>
+    </>
   );
 }

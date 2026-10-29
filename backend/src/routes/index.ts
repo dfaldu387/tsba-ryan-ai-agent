@@ -6,9 +6,11 @@ import {
   isConnectionProvider,
   isRole,
   type AdminOverview,
+  type DraftResult,
   type DraftStatus,
   type SourceCard,
 } from '@tsba/shared';
+import { cacheLookup, cacheStore, invalidateAnswerCache, isStandaloneQuestion } from '../answer-cache.js';
 import { currentUser, issueToken, requireAuth, requirePermission } from '../auth.js';
 import { appWebUrl, env, googleOAuthConfigured } from '../env.js';
 import {
@@ -100,22 +102,41 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
       try {
         const storage = await getStorage();
-        // Step 3 — identify the brand, then retrieve its matching source.
-        const brand = detectBrand(question);
-        const entries = await storage.knowledge.retrieve(question, env.retrievalTopK, brand);
 
-        // Use Claude when a key is set; otherwise fall back to an offline draft
-        // composed from the retrieved knowledge so the preview still works.
-        const result = anthropicConfigured()
-          ? await draftReply(buildPrompt({ question, audience, channel, entries }))
-          : offlineDraft({ question, audience, channel, entries });
+        // Reuse a cached answer for the same question (semantically, when a real
+        // embedding provider is configured) so we skip the LLM call. Keyed by
+        // audience+channel since both change the wording. Only for live (Claude)
+        // drafts — the offline fallback is already cheap and deterministic.
+        const cacheKey = `${audience}|${channel}`;
+        let result: DraftResult;
+        let sources: SourceCard[];
+        const cached = anthropicConfigured()
+          ? await cacheLookup<{ result: DraftResult; sources: SourceCard[] }>('draft', cacheKey, question)
+          : null;
 
-        // Resolve the cited ids into source cards (only ids we actually retrieved).
-        const byId = new Map(entries.map((e) => [e.id, e]));
-        const sources: SourceCard[] = result.sources
-          .map((id) => byId.get(id))
-          .filter((e): e is NonNullable<typeof e> => Boolean(e))
-          .map((e) => ({ id: e.id, kind: e.kind, title: e.title, source: e.source }));
+        if (cached) {
+          result = cached.result;
+          sources = cached.sources;
+        } else {
+          // Step 3 — identify the brand, then retrieve its matching source.
+          const brand = detectBrand(question);
+          const entries = await storage.knowledge.retrieve(question, env.retrievalTopK, brand);
+
+          // Use Claude when a key is set; otherwise fall back to an offline draft
+          // composed from the retrieved knowledge so the preview still works.
+          result = anthropicConfigured()
+            ? await draftReply(buildPrompt({ question, audience, channel, entries }))
+            : offlineDraft({ question, audience, channel, entries });
+
+          // Resolve the cited ids into source cards (only ids we actually retrieved).
+          const byId = new Map(entries.map((e) => [e.id, e]));
+          sources = result.sources
+            .map((id) => byId.get(id))
+            .filter((e): e is NonNullable<typeof e> => Boolean(e))
+            .map((e) => ({ id: e.id, kind: e.kind, title: e.title, source: e.source }));
+
+          if (anthropicConfigured()) await cacheStore('draft', cacheKey, question, { result, sources });
+        }
 
         const draft = await storage.drafts.insert({ question, audience, channel, result, sources, recipient });
         return draft;
@@ -171,6 +192,21 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
       try {
         const storage = await getStorage();
+
+        // Reuse a cached answer when the same question is asked again. Only for
+        // self-contained, attachment-free questions on a live (Claude) setup —
+        // context-dependent follow-ups and file questions always go to the model.
+        const cacheable =
+          anthropicConfigured() && attachments.length === 0 && isStandaloneQuestion(lastUser.content);
+        if (cacheable) {
+          const hit = await cacheLookup<{ reply: string; sources: SourceCard[]; suggestions: string[] }>(
+            'voice',
+            audience,
+            lastUser.content,
+          );
+          if (hit) return hit;
+        }
+
         // Step 3 — brand may have been named earlier in the call, so scan the
         // recent turns, not just the latest message.
         const brand = detectBrandFromTurns(recent.filter((t) => t.role === 'user').map((t) => t.content));
@@ -212,7 +248,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           ? await suggestFollowups(lastUser.content, reply, sources.map((s) => s.title).join('\n'))
           : [];
 
-        return { reply, sources, suggestions };
+        const payload = { reply, sources, suggestions };
+        if (cacheable) await cacheStore('voice', audience, lastUser.content, payload);
+        return payload;
       } catch (err) {
         req.log.error({ err }, 'voice chat failed');
         return reply.code(502).send({ error: 'chat_failed', message: (err as Error).message });

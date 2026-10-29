@@ -82,17 +82,22 @@ export async function disconnect(provider: ConnectionProvider): Promise<boolean>
 
 /**
  * Return a valid (unexpired) access token for a connected provider, refreshing
- * and persisting a new one when the current token is within 60s of expiry.
- * Returns null when the provider isn't connected. Used by the Drive/Gmail
- * features built on top of these connectors.
+ * and persisting a new one when the current token is within 60s of expiry (or
+ * when `forceRefresh` is set — used to recover from a mid-flight 401 where the
+ * token was revoked before its clock expiry). Returns null when the provider
+ * isn't connected. Throws GoogleTokenError (needsReauth) when the refresh token
+ * itself is dead. Used by the Drive/Gmail features built on these connectors.
  */
-export async function getAccessToken(provider: ConnectionProvider): Promise<string | null> {
+export async function getAccessToken(
+  provider: ConnectionProvider,
+  opts: { forceRefresh?: boolean } = {},
+): Promise<string | null> {
   const storage = await getStorage();
   const conn = await storage.connections.get(provider);
   if (!conn) return null;
 
   const expiresSoon = new Date(conn.expires_at).getTime() - Date.now() < 60_000;
-  if (!expiresSoon) return decryptToken(conn.access_token_enc);
+  if (!opts.forceRefresh && !expiresSoon) return decryptToken(conn.access_token_enc);
 
   const refresh = decryptToken(conn.refresh_token_enc);
   if (!refresh) return decryptToken(conn.access_token_enc); // no refresh token; return what we have

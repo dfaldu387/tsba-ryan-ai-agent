@@ -835,3 +835,64 @@ p.how { display: block; line-height: 1.55; }
 .hf-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: currentColor; margin-right: 6px; vertical-align: middle; animation: hf-blink 1.1s ease-in-out infinite; }
 @keyframes hf-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 @media (prefers-reduced-motion: reduce) { .hf-dot, .listening-dot { animation: none; } }
+
+/* ── Icons in controls ─────────────────────────────────────────────────── */
+/* Segmented buttons: align an optional leading icon with the label. */
+.seg button { display: inline-flex; align-items: center; gap: 7px; }
+.seg button svg { width: 15px; height: 15px; }
+/* Labelled buttons that carry a leading icon (opt-in via `.ico`). */
+.btn.ico { display: inline-flex; align-items: center; gap: 7px; justify-content: center; }
+.btn.ico svg { width: 15px; height: 15px; }
+
+/* Square icon-only button, used for compact row actions and pagination. */
+.icon-btn { display: inline-grid; place-items: center; width: 34px; height: 34px; padding: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--muted); cursor: pointer; }
+.icon-btn:hover { border-color: var(--accent); color: var(--accent-strong); filter: none; }
+.icon-btn:disabled { opacity: 0.45; cursor: default; border-color: var(--line); color: var(--muted); }
+.icon-btn.danger:hover { border-color: var(--flag); color: var(--flag); }
+.icon-btn svg { width: 16px; height: 16px; }
+a.icon-btn { text-decoration: none; }
+/* A small muted glyph that leads a table row (folder name, etc.). */
+.row-ico { width: 16px; height: 16px; color: var(--muted); flex: none; }
+
+/* ── Pill segmented control (centered tab toggle) ──────────────────────── */
+.pilltabs-wrap { display: flex; justify-content: center; }
+.pilltabs { display: inline-flex; gap: 4px; padding: 4px; background: var(--sunk); border: 1px solid var(--line); border-radius: 999px; }
+.pilltabs button { border: 0; background: transparent; color: var(--muted); padding: 8px 20px; border-radius: 999px; font-weight: 600; font-size: 14px; display: inline-flex; align-items: center; gap: 8px; cursor: pointer; transition: color 0.12s ease, background 0.12s ease; }
+.pilltabs button:hover { color: var(--ink); }
+.pilltabs button svg { width: 16px; height: 16px; }
+.pilltabs button[aria-selected="true"], .pilltabs button[aria-pressed="true"] { background: var(--surface); color: var(--accent-strong); box-shadow: 0 1px 3px rgba(16, 32, 46, 0.14); }
+:root[data-theme="dark"] .pilltabs button[aria-selected="true"], :root[data-theme="dark"] .pilltabs button[aria-pressed="true"] { background: var(--surface); color: var(--accent); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .pilltabs button[aria-selected="true"], :root:not([data-theme="light"]) .pilltabs button[aria-pressed="true"] { background: var(--surface); color: var(--accent); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4); } }
+
+/* ── Knowledge base: search, pagination ────────────────────────────────── */
+.kb-search { position: relative; display: flex; align-items: center; }
+.kb-search svg { position: absolute; left: 11px; width: 15px; height: 15px; color: var(--muted); pointer-events: none; }
+.kb-search input { width: 100%; padding-left: 34px; }
+
+.pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 2px; }
+.pager-label { text-transform: none; letter-spacing: 0.02em; }
+
+/* ── Indeterminate progress bar (manual sync activity) ─────────────────── */
+.progress-bar { position: relative; height: 4px; border-radius: 999px; background: var(--sunk); overflow: hidden; }
+.progress-bar::before { content: ""; position: absolute; top: 0; height: 100%; width: 40%; border-radius: 999px; background: var(--accent); animation: progress-slide 1.1s ease-in-out infinite; }
+@keyframes progress-slide { 0% { left: -40%; } 100% { left: 100%; } }
+/* Full-width bar that wraps onto its own line beneath a table row. */
+.row-progress { flex: 1 0 100%; margin-top: 8px; }
+@media (prefers-reduced-motion: reduce) {
+  .progress-bar::before { animation: none; width: 100%; left: 0; opacity: 0.55; }
+}
+
+/* ── Knowledge base: merged card with stacked sub-sections ─────────────── */
+.kb-section { display: flex; flex-direction: column; gap: 14px; }
+.kb-section-sep { margin-top: 4px; padding-top: 20px; border-top: 1px solid var(--line); }
+
+/* Automated-response opener: shown in italics, and never read aloud. */
+.auto-prefix { font-style: italic; color: var(--muted); }
+
+/* ── Ask the agent: audience main tabs + arrived-from pills ─────────────── */
+.ask-audience { display: flex; justify-content: center; }
+/* Page-level audience tabs, centered above the two columns. */
+.ask-maintabs { margin: 0 0 16px; }
+/* "Arrived from" channel pills: left-aligned, don't stretch in the column. */
+.field .arrived-pills { align-self: flex-start; max-width: 100%; }
+.field-hint { font-size: 12.5px; color: var(--muted); margin-top: 2px; }

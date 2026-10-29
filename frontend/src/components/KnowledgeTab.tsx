@@ -20,6 +20,18 @@ import {
   syncFolderSource,
 } from '../api';
 import { DriveBrowser } from './DriveBrowser';
+import {
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  ExternalLinkIcon,
+  FolderIcon,
+  MailIcon,
+  RefreshIcon,
+  ResetIcon,
+  SearchIcon,
+  ShieldIcon,
+  TrashIcon,
+} from './icons';
 
 const SOURCE_LABEL: Record<IngestedDocument['source'], string> = {
   'google-drive': 'Drive',
@@ -38,11 +50,16 @@ const QUALITY_BADGE: Record<string, { label: string; cls: string }> = {
   corrupted: { label: 'corrupted — needs OCR', cls: 'danger' },
 };
 
+// How many ingested documents to show per page.
+const DOCS_PER_PAGE = 12;
+
 // Docs that aren't cleanly usable: garbled text, or no text at all (image-only
 // PDFs marked skipped/failed). These are the ones an OCR re-ingest should retry.
 const isFlagged = (d: IngestedDocument) =>
   d.source === 'google-drive' &&
   (d.text_quality === 'low' || d.text_quality === 'corrupted' || d.status === 'skipped' || d.status === 'failed');
+
+type KbTab = 'drive' | 'gmail';
 
 export function KnowledgeTab({ user, onAuthError }: { user: AuthenticatedUser; onAuthError: () => void }) {
   const canIngest = hasPermission(user.role, 'run_ingest');
@@ -55,6 +72,16 @@ export function KnowledgeTab({ user, onAuthError }: { user: AuthenticatedUser; o
   const [reingesting, setReingesting] = useState(false);
   const [assessing, setAssessing] = useState(false);
   const [resyncing, setResyncing] = useState(false);
+
+  // View controls: Drive/Gmail tab, document search, and pagination.
+  const [kbTab, setKbTab] = useState<KbTab>('drive');
+  const [docSearch, setDocSearch] = useState('');
+  const [docPage, setDocPage] = useState(0);
+
+  // Reset to the first page whenever the filter changes.
+  useEffect(() => {
+    setDocPage(0);
+  }, [kbTab, docSearch]);
 
   const handle = (err: unknown, fallback: string) => {
     if (err instanceof AuthError) return onAuthError();
@@ -185,6 +212,16 @@ export function KnowledgeTab({ user, onAuthError }: { user: AuthenticatedUser; o
   const totalChunks = docs?.reduce((n, d) => n + d.chunk_count, 0) ?? 0;
   const flaggedCount = docs?.filter(isFlagged).length ?? 0;
 
+  // Documents for the active tab, filtered by the search box, then paginated.
+  const sourceForTab: IngestedDocument['source'] = kbTab === 'drive' ? 'google-drive' : 'gmail';
+  const query = docSearch.trim().toLowerCase();
+  const filteredDocs = (docs ?? []).filter(
+    (d) => d.source === sourceForTab && (query === '' || d.title.toLowerCase().includes(query)),
+  );
+  const pageCount = Math.max(1, Math.ceil(filteredDocs.length / DOCS_PER_PAGE));
+  const page = Math.min(docPage, pageCount - 1);
+  const pagedDocs = filteredDocs.slice(page * DOCS_PER_PAGE, page * DOCS_PER_PAGE + DOCS_PER_PAGE);
+
   return (
     <div className="col">
       {error && <span className="err">{error}</span>}
@@ -209,15 +246,37 @@ export function KnowledgeTab({ user, onAuthError }: { user: AuthenticatedUser; o
         </div>
       </div>
 
-      {/* ── Add from Drive ───────────────────────────────────────────────── */}
-      {canIngest && driveConnected && (
+      {/* ── Source tabs (centered pill toggle) ───────────────────────────── */}
+      <div className="pilltabs-wrap">
+        <div className="pilltabs" role="tablist" aria-label="Knowledge source">
+          <button
+            role="tab"
+            type="button"
+            aria-selected={kbTab === 'drive'}
+            onClick={() => setKbTab('drive')}
+          >
+            <FolderIcon /> Drive
+          </button>
+          <button
+            role="tab"
+            type="button"
+            aria-selected={kbTab === 'gmail'}
+            onClick={() => setKbTab('gmail')}
+          >
+            <MailIcon /> Gmail
+          </button>
+        </div>
+      </div>
+
+      {/* ── Add from Drive (Drive tab only) ──────────────────────────────── */}
+      {kbTab === 'drive' && canIngest && driveConnected && (
         <section className="card">
           <div className="kb-browse">
             <DriveBrowser onAuthError={onAuthError} onChange={load} />
           </div>
         </section>
       )}
-      {canIngest && driveConnected === false && (
+      {kbTab === 'drive' && canIngest && driveConnected === false && (
         <section className="card kb-connect-hint">
           <div className="card-h">
             <h2>Add documents from Drive</h2>
@@ -229,86 +288,113 @@ export function KnowledgeTab({ user, onAuthError }: { user: AuthenticatedUser; o
         </section>
       )}
 
-      {/* ── Folder sources ───────────────────────────────────────────────── */}
-      <section className="card">
-        <div className="card-h">
-          <h2>Drive folder sources</h2>
-          <div className="drive-selall">
-            <span className="eyebrow">{folders ? `${folders.length} folders` : '…'}</span>
-            {canIngest && folders && folders.length > 0 && (
-              <>
-                <button className="btn ghost sm" type="button" disabled={syncingAll || resyncing} onClick={onSyncAll}>
-                  {syncingAll ? 'Syncing all…' : 'Sync all'}
-                </button>
-                <button className="btn ghost sm danger" type="button" disabled={resyncing || syncingAll} onClick={onResyncAll}>
-                  {resyncing ? 'Resetting…' : 'Reset & re-sync all'}
-                </button>
-              </>
-            )}
-          </div>
-        </div>
-        <p className="how" style={{ marginTop: 0 }}>
-          Folders selected as knowledge sources. Add more with <b>Browse &amp; select from Drive</b> above.
-        </p>
-        <div className="user-table">
-          {folders?.map((f) => (
-            <div key={f.id} className="user-row">
-              <div className="user-row-main">
-                <span className="user-name">{f.name}</span>
-                {f.recursive && <span className="pill">Recursive</span>}
-                <span className="user-email">
-                  {f.last_file_count != null ? `${f.last_file_count} files` : 'not synced'}
-                  {f.last_synced_at ? ` · ${new Date(f.last_synced_at).toLocaleDateString()}` : ''}
-                </span>
-              </div>
-              {canIngest && (
-                <div className="user-row-actions">
-                  <button
-                    className="btn ghost sm"
-                    disabled={busy === f.id || syncingAll}
-                    onClick={() => onSync(f.id)}
-                  >
-                    {busy === f.id || syncingAll ? 'Syncing…' : 'Sync'}
+      {/* ── Sources + documents in a single card (folders only on Drive) ──── */}
+      <section className="card kb-main">
+        {kbTab === 'drive' && (
+          <div className="kb-section">
+            <div className="card-h">
+              <h2>Drive folder sources</h2>
+            <div className="drive-selall">
+              <span className="eyebrow">{folders ? `${folders.length} folders` : '…'}</span>
+              {canIngest && folders && folders.length > 0 && (
+                <>
+                  <button className="btn ghost sm ico" type="button" disabled={syncingAll || resyncing} onClick={onSyncAll} title="Sync all folders">
+                    <RefreshIcon /> {syncingAll ? 'Syncing…' : 'Sync all'}
                   </button>
-                  <button
-                    className="btn ghost sm danger"
-                    disabled={busy === f.id || syncingAll}
-                    onClick={() => onRemoveFolder(f.id)}
-                  >
-                    Remove
+                  <button className="btn ghost sm danger ico" type="button" disabled={resyncing || syncingAll} onClick={onResyncAll} title="Reset & re-sync all folders">
+                    <ResetIcon /> {resyncing ? 'Resetting…' : 'Reset all'}
                   </button>
-                </div>
+                </>
               )}
             </div>
-          ))}
-          {folders === null && !error && <p className="how">Loading…</p>}
-          {folders?.length === 0 && <p className="how">No folder sources yet.</p>}
-        </div>
-      </section>
+          </div>
+          <p className="how" style={{ marginTop: 0 }}>
+            Folders selected as knowledge sources. Add more with <b>Browse &amp; select from Drive</b> above.
+          </p>
+          {(syncingAll || resyncing) && (
+            <div className="progress-bar" role="progressbar" aria-label={resyncing ? 'Resetting and re-syncing' : 'Syncing all folders'} />
+          )}
+          <div className="user-table">
+            {folders?.map((f) => (
+              <div key={f.id} className="user-row">
+                <div className="user-row-main">
+                  <FolderIcon className="row-ico" />
+                  <span className="user-name">{f.name}</span>
+                  {f.recursive && <span className="pill">Recursive</span>}
+                  <span className="user-email">
+                    {f.last_file_count != null ? `${f.last_file_count} files` : 'not synced'}
+                    {f.last_synced_at ? ` · ${new Date(f.last_synced_at).toLocaleDateString()}` : ''}
+                  </span>
+                </div>
+                {canIngest && (
+                  <div className="user-row-actions">
+                    <button
+                      className="icon-btn"
+                      disabled={busy === f.id || syncingAll}
+                      onClick={() => onSync(f.id)}
+                      title={busy === f.id || syncingAll ? 'Syncing…' : 'Sync folder'}
+                      aria-label="Sync folder"
+                    >
+                      <RefreshIcon />
+                    </button>
+                    <button
+                      className="icon-btn danger"
+                      disabled={busy === f.id || syncingAll}
+                      onClick={() => onRemoveFolder(f.id)}
+                      title="Remove folder"
+                      aria-label="Remove folder"
+                    >
+                      <TrashIcon />
+                    </button>
+                  </div>
+                )}
+                {(busy === f.id || syncingAll) && (
+                  <div className="progress-bar row-progress" role="progressbar" aria-label={`Syncing ${f.name}`} />
+                )}
+              </div>
+            ))}
+            {folders === null && !error && <p className="how">Loading…</p>}
+            {folders?.length === 0 && <p className="how">No folder sources yet.</p>}
+            </div>
+          </div>
+        )}
 
-      {/* ── Ingested documents ───────────────────────────────────────────── */}
-      <section className="card">
+        {/* ── Documents (same card; separated when folders are shown above) ── */}
+        <div className={`kb-section${kbTab === 'drive' ? ' kb-section-sep' : ''}`}>
         <div className="card-h">
-          <h2>Ingested documents</h2>
+          <h2>{kbTab === 'drive' ? 'Drive documents' : 'Gmail documents'}</h2>
           <div className="drive-selall">
             <span className="eyebrow">
-              {docs ? `${docs.length} total` : '…'}
-              {docs && docs.some(isFlagged) ? ` · ${docs.filter(isFlagged).length} need OCR` : ''}
+              {docs ? `${filteredDocs.length} shown` : '…'}
+              {kbTab === 'drive' && flaggedCount > 0 ? ` · ${flaggedCount} need OCR` : ''}
             </span>
-            {canIngest && docs && docs.length > 0 && (
-              <button className="btn ghost sm" type="button" disabled={assessing || reingesting} onClick={onAssess}>
-                {assessing ? 'Checking…' : 'Check text quality'}
+            {kbTab === 'drive' && canIngest && docs && docs.length > 0 && (
+              <button className="btn ghost sm ico" type="button" disabled={assessing || reingesting} onClick={onAssess} title="Check text quality of ingested documents">
+                <ShieldIcon /> {assessing ? 'Checking…' : 'Check quality'}
               </button>
             )}
-            {canIngest && docs && docs.some(isFlagged) && (
-              <button className="btn ghost sm" type="button" disabled={reingesting || assessing} onClick={onReingestFlagged}>
-                {reingesting ? 'Re-ingesting…' : `Re-ingest ${docs.filter(isFlagged).length} flagged (OCR)`}
+            {kbTab === 'drive' && canIngest && flaggedCount > 0 && (
+              <button className="btn ghost sm ico" type="button" disabled={reingesting || assessing} onClick={onReingestFlagged} title="Re-ingest flagged documents with OCR">
+                <RefreshIcon /> {reingesting ? 'Re-ingesting…' : `Re-ingest ${flaggedCount} (OCR)`}
               </button>
             )}
           </div>
         </div>
+
+        {/* Search */}
+        <div className="kb-search">
+          <SearchIcon />
+          <input
+            type="search"
+            value={docSearch}
+            onChange={(e) => setDocSearch(e.target.value)}
+            placeholder={`Search ${kbTab === 'drive' ? 'Drive' : 'Gmail'} documents by name…`}
+            aria-label="Search documents"
+          />
+        </div>
+
         <div className="user-table">
-          {docs?.map((d) => (
+          {pagedDocs.map((d) => (
             <div key={d.id} className="user-row">
               <div className="user-row-main">
                 <span className="pill">{SOURCE_LABEL[d.source]}</span>
@@ -327,26 +413,75 @@ export function KnowledgeTab({ user, onAuthError }: { user: AuthenticatedUser; o
                 )}
                 <span className="user-email">{d.chunk_count} chunks</span>
               </div>
-              {canIngest && (
-                <div className="user-row-actions">
+              <div className="user-row-actions">
+                {d.web_url && (
+                  <a
+                    className="icon-btn"
+                    href={d.web_url}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                    title={`Open original in ${SOURCE_LABEL[d.source]}`}
+                    aria-label="Open original"
+                  >
+                    <ExternalLinkIcon />
+                  </a>
+                )}
+                {canIngest && (
                   <button
-                    className="btn ghost sm danger"
+                    className="icon-btn danger"
                     disabled={busy === d.id}
                     onClick={() => onRemoveDoc(d.id)}
+                    title="Remove document"
+                    aria-label="Remove document"
                   >
-                    {busy === d.id ? '…' : 'Remove'}
+                    <TrashIcon />
                   </button>
-                </div>
-              )}
+                )}
+              </div>
             </div>
           ))}
           {docs === null && !error && <p className="how">Loading…</p>}
-          {docs?.length === 0 && (
+          {docs !== null && filteredDocs.length === 0 && (
             <p className="how">
-              Nothing ingested yet. Add files with <b>Browse &amp; select from Drive</b> above, or scan
-              Gmail from <b>Connections</b>.
+              {query ? (
+                <>No {kbTab === 'drive' ? 'Drive' : 'Gmail'} documents match “{docSearch.trim()}”.</>
+              ) : kbTab === 'drive' ? (
+                <>Nothing ingested from Drive yet. Add files with <b>Browse &amp; select from Drive</b> above.</>
+              ) : (
+                <>Nothing ingested from Gmail yet. Scan Gmail from <b>Connections</b> to add emails here.</>
+              )}
             </p>
           )}
+        </div>
+
+        {/* Pagination */}
+        {pageCount > 1 && (
+          <div className="pager">
+            <button
+              className="icon-btn"
+              type="button"
+              disabled={page === 0}
+              onClick={() => setDocPage(page - 1)}
+              title="Previous page"
+              aria-label="Previous page"
+            >
+              <ChevronLeftIcon />
+            </button>
+            <span className="eyebrow pager-label">
+              Page {page + 1} of {pageCount}
+            </span>
+            <button
+              className="icon-btn"
+              type="button"
+              disabled={page >= pageCount - 1}
+              onClick={() => setDocPage(page + 1)}
+              title="Next page"
+              aria-label="Next page"
+            >
+              <ChevronRightIcon />
+            </button>
+          </div>
+        )}
         </div>
       </section>
     </div>

@@ -18,6 +18,9 @@ function findEnv(): string | undefined {
 const envPath = findEnv();
 if (envPath) config({ path: envPath });
 
+// Repo root (where .env lives) — used to anchor on-disk data files.
+const repoRoot = envPath ? dirname(envPath) : process.cwd();
+
 function required(name: string): string {
   const v = process.env[name];
   if (!v) throw new Error(`Missing required env var: ${name}. Copy .env.example to .env and fill it in.`);
@@ -60,6 +63,14 @@ export const env = {
 
   retrievalTopK: Number(optional('RETRIEVAL_TOP_K', '8')),
   webOrigin: optional('WEB_ORIGIN', 'http://localhost:5173'),
+
+  // ─── AI token-usage tracking (hidden, URL-only report) ────────────────────
+  // Every Claude call's input/output token counts are appended to USAGE_LOG_FILE.
+  // The report lives at /usage?key=<USAGE_TOKEN> — an unlisted page (not in the
+  // admin nav) gated purely by this secret token. Leave USAGE_TOKEN blank to
+  // disable the page entirely (it 404s). Logging still happens regardless.
+  usageToken: process.env.USAGE_TOKEN ?? '',
+  usageLogFile: optional('USAGE_LOG_FILE', resolve(repoRoot, 'data/usage.jsonl')),
 
   // ─── Outbound delivery of approved replies ────────────────────────────────
   // 'console' (default) is a safe dry-run: approved replies are logged, never

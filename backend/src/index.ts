@@ -6,6 +6,7 @@ import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import { env } from './env.js';
 import { registerRoutes } from './routes/index.js';
+import { registerUsageRoutes } from './usage-page.js';
 import { getStorage } from './storage.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -22,6 +23,9 @@ async function main(): Promise<void> {
   }
 
   await registerRoutes(app);
+  // Hidden, token-gated token-usage report (/usage?key=…). Registered before the
+  // SPA fallback so the standalone page isn't swallowed by the catch-all.
+  await registerUsageRoutes(app);
 
   // Prod: serve the built SPA from the same origin so the password gate covers it.
   if (env.isProd && existsSync(frontendDist)) {

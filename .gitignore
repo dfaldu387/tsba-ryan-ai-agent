@@ -10,3 +10,7 @@ coverage/
 packages/frontend/dist/
 packages/backend/dist/
 packages/shared/dist/
+
+# AI token-usage log (runtime data)
+data/
+*.jsonl
