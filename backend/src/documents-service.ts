@@ -1,4 +1,5 @@
 import { getStorage } from './storage.js';
+import { invalidateAnswerCache } from './answer-cache.js';
 import { docChunkPrefix } from './drive-ingest.js';
 import { docId as gmailDocId } from './gmail-ingest.js';
 
@@ -15,6 +16,7 @@ export async function removeIngestedDocument(id: string): Promise<boolean> {
       ? `${id}:` // gmail document id already includes the `gmail:` qualifier
       : docChunkPrefix(id); // drive: `drive:<id>:`
   await storage.knowledge.removeByPrefix(prefix);
+  if (removed) invalidateAnswerCache(); // KB changed → drop stale answers
 
   return Boolean(removed);
 }

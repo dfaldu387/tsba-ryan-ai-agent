@@ -2,6 +2,7 @@ import {
   AUDIENCE_LABELS,
   CHANNEL_LABELS,
   OUTCOME_LABELS,
+  type Audience,
   type Draft,
   type DraftStatus,
 } from '@tsba/shared';
@@ -10,6 +11,7 @@ function QueueList({
   title,
   status,
   drafts,
+  audience,
   currentId,
   onSelect,
   empty,
@@ -17,11 +19,15 @@ function QueueList({
   title: string;
   status: DraftStatus;
   drafts: Draft[];
+  audience: Audience;
   currentId: number | null;
   onSelect: (d: Draft) => void;
   empty: string;
 }) {
-  const items = drafts.filter((d) => d.status === status).slice().reverse();
+  const items = drafts
+    .filter((d) => d.status === status && d.audience === audience)
+    .slice()
+    .reverse();
   return (
     <section className="card">
       <div className="card-h">
@@ -58,10 +64,12 @@ function QueueList({
 
 export function QueueLists({
   drafts,
+  audience,
   currentId,
   onSelect,
 }: {
   drafts: Draft[];
+  audience: Audience;
   currentId: number | null;
   onSelect: (d: Draft) => void;
 }) {
@@ -71,14 +79,16 @@ export function QueueLists({
         title={'Waiting for Ryan’s approval'}
         status="pending"
         drafts={drafts}
+        audience={audience}
         currentId={currentId}
         onSelect={onSelect}
-        empty="Nothing waiting. Every reply lands here first."
+        empty="Nothing waiting for this audience. Every reply lands here first."
       />
       <QueueList
         title="Handed to the team"
         status="team"
         drafts={drafts}
+        audience={audience}
         currentId={currentId}
         onSelect={onSelect}
         empty="Questions that need live system data or a site check appear here."
@@ -87,6 +97,7 @@ export function QueueLists({
         title="Sent"
         status="sent"
         drafts={drafts}
+        audience={audience}
         currentId={currentId}
         onSelect={onSelect}
         empty="Approved replies. In the real system these go out by email, text or chat."

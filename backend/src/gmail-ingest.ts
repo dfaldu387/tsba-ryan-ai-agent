@@ -7,6 +7,7 @@ import type {
 import { getLabelName, getMessage, listMessageIds, type GmailMessage } from './google-gmail.js';
 import { chunkText } from './extract.js';
 import { getStorage } from './storage.js';
+import { invalidateAnswerCache } from './answer-cache.js';
 
 // Scans a Gmail label into the knowledge base: each message's text is chunked
 // and stored as 'maker' knowledge with ids `gmail:<messageId>:<n>`. The document
@@ -81,6 +82,7 @@ export async function scanLabel(labelId: string, max = DEFAULT_MAX_MESSAGES): Pr
 
   const results: IngestResult[] = [];
   for (const id of ids) results.push(await ingestMessage(id));
+  if (ids.length) invalidateAnswerCache(); // KB changed → drop stale answers
 
   return {
     labelId,
