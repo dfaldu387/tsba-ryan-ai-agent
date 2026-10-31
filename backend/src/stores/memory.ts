@@ -9,7 +9,8 @@ import type {
 } from '@tsba/shared';
 import { embeddingProvider, entryEmbeddingText } from '../embeddings.js';
 import { brandMatches } from '../brand.js';
-import { documentFrequencies, idfWeights, lexicalScoreIdf, queryTerms } from '../retrieval-util.js';
+import { modelMatches, stripModelTerms } from '../models.js';
+import { diversify, documentKey, documentFrequencies, idfWeights, lexicalScoreIdf, queryTerms } from '../retrieval-util.js';
 import { loadKnowledgeEntries } from '../knowledge-data.js';
 import type {
   ConnectionStore,
@@ -41,6 +42,12 @@ function cosine(a: number[], b: number[]): number {
 // Added to a maker entry's score when its brand matches the detected brand (or it's
 // brand-agnostic). Kept in sync with retrieval.ts.
 const BRAND_BONUS = 0.15;
+// Added when the entry is the exact model the person named — larger than the brand
+// bonus so the model's own document outranks the brand's other guides. In sync with retrieval.ts.
+const MODEL_BONUS = 0.3;
+// At most this many chunks from any one document in the top-K, so a single long
+// guide can't fill every slot and bury other relevant docs. In sync with retrieval.ts.
+const PER_DOC_CAP = 3;
 // Local embeddings are non-semantic (hashed bag-of-words), so their cosine is noise:
 // rank on the IDF keyword signal and keep cosine as a faint tiebreaker. A real
 // provider leads with semantic cosine. Kept in sync with retrieval.ts.
@@ -65,36 +72,48 @@ export class MemoryKnowledgeStore implements KnowledgeStore {
     this.makerVectors = await embeddingProvider.embed(this.makers.map((e) => entryEmbeddingText(e)));
   }
 
-  async retrieve(question: string, topK: number, brand?: string | null): Promise<KnowledgeEntry[]> {
+  async retrieve(
+    question: string,
+    topK: number,
+    brand?: string | null,
+    model?: string | null,
+  ): Promise<KnowledgeEntry[]> {
     let top: KnowledgeEntry[] = [];
-    const terms = queryTerms(question);
+    // Topic terms only for lexical ranking: the model code (when known) rides the
+    // bonus below, so leaving it in the keyword terms would double-count it and
+    // bury entries that match the topic but not the code.
+    const terms = stripModelTerms(queryTerms(question), model);
     try {
       const [qvec] = await embeddingProvider.embed([question]);
       // IDF weights so a rare model number outweighs generic query words.
       const hays = this.makers.map((e) => `${e.title} ${e.text}`.toLowerCase());
       const idf = idfWeights(terms, documentFrequencies(terms, hays), this.makers.length);
-      top = this.makers
+      const ranked = this.makers
         .map((e, i) => ({
           e,
-          // Hybrid: semantic (cosine) + IDF-weighted keyword overlap + brand boost.
+          // Hybrid: semantic (cosine) + IDF-weighted keyword overlap + brand & model boost.
           score:
             COSINE_WEIGHT * cosine(qvec, this.makerVectors[i]) +
             LEXICAL_WEIGHT * lexicalScoreIdf(hays[i], terms, idf) +
-            (brandMatches(e.brand, brand) ? BRAND_BONUS : 0),
+            (brandMatches(e.brand, brand) ? BRAND_BONUS : 0) +
+            (modelMatches(e, model) ? MODEL_BONUS : 0),
         }))
         .sort((x, y) => y.score - x.score)
-        .slice(0, topK)
         .map((x) => x.e);
+      // Diversify: keep the best chunks but cap per document so one long guide
+      // can't fill all K slots and bury the datasheet / monitoring-steps entry.
+      top = diversify(ranked, topK, PER_DOC_CAP, (e) => documentKey(e.title));
     } catch {
       // Lexical fallback if the embedding provider is unavailable.
       const terms = (question.toLowerCase().match(/[a-z0-9]+/g) || []).filter((t) => t.length > 2);
+      // Model- then brand-aware: surface the exact model's entries first.
+      const rank = (e: KnowledgeEntry) => (modelMatches(e, model) ? 2 : 0) + (brandMatches(e.brand, brand) ? 1 : 0);
       top = this.makers
         .filter((e) => {
           const hay = `${e.brand} ${e.model} ${e.title} ${e.text}`.toLowerCase();
           return terms.some((t) => hay.includes(t));
         })
-        // Brand-aware: surface matching-brand entries first.
-        .sort((a, b) => Number(brandMatches(b.brand, brand)) - Number(brandMatches(a.brand, brand)))
+        .sort((a, b) => rank(b) - rank(a))
         .slice(0, topK);
     }
     return [...this.rules, ...top];

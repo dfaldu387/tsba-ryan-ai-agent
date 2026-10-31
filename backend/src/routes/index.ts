@@ -23,9 +23,12 @@ import {
   type ChatAttachment,
   type ChatTurn,
 } from '../anthropic.js';
-import { buildPrompt, buildVoiceSystem } from '../prompt.js';
+import { buildChatSystem, buildPrompt, buildVoiceSystem } from '../prompt.js';
 import { offlineChat, offlineDraft } from '../offline-draft.js';
-import { detectBrand, detectBrandFromTurns } from '../brand.js';
+import { detectBrandFromTurns } from '../brand.js';
+import { detectModel, detectModelFromTurns } from '../models.js';
+import { brandChips, brandFromApp, preClarifyDraft, preClarifyVoice, resolveBrand } from '../disambiguation.js';
+import { detectAudience, detectChannel } from '../detect.js';
 import { deliverApprovedReply } from '../delivery.js';
 import { getStorage } from '../storage.js';
 import { progressBoard } from '../progress.js';
@@ -57,7 +60,7 @@ import {
 import { isLowQualityExtract, looksCorrupted } from '../text-quality.js';
 import type { TextQuality } from '@tsba/shared';
 import { removeIngestedDocument } from '../documents-service.js';
-import { GmailAuthError, listLabels } from '../google-gmail.js';
+import { GmailAuthError, getMessage, listInbox, listLabels, sendReply } from '../google-gmail.js';
 import { scanLabel } from '../gmail-ingest.js';
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
@@ -91,14 +94,22 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     { preHandler: requirePermission('ask') },
     async (req, reply) => {
       const question = (req.body?.question ?? '').trim();
-      const audience = req.body?.audience;
-      const channel = req.body?.channel;
+      const rawAudience = req.body?.audience;
+      const rawChannel = req.body?.channel;
       // Optional: where an approved reply should be sent. Bounded to a sane length.
       const recipient = (req.body?.recipient ?? '').trim().slice(0, 320) || null;
 
       if (!question) return reply.code(400).send({ error: 'question_required' });
-      if (!isAudience(audience)) return reply.code(400).send({ error: 'invalid_audience' });
-      if (!isChannel(channel)) return reply.code(400).send({ error: 'invalid_channel' });
+      // Auto-detect the source when not given (or 'auto'): infer who's asking and
+      // the channel from the question itself, so a query needs no manual tagging.
+      const audience = isAudience(rawAudience) ? rawAudience : detectAudience(question);
+      const channel = isChannel(rawChannel) ? rawChannel : detectChannel(question);
+      if (rawAudience != null && rawAudience !== 'auto' && !isAudience(rawAudience)) {
+        return reply.code(400).send({ error: 'invalid_audience' });
+      }
+      if (rawChannel != null && rawChannel !== 'auto' && !isChannel(rawChannel)) {
+        return reply.code(400).send({ error: 'invalid_channel' });
+      }
 
       try {
         const storage = await getStorage();
@@ -110,17 +121,27 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         const cacheKey = `${audience}|${channel}`;
         let result: DraftResult;
         let sources: SourceCard[];
-        const cached = anthropicConfigured()
-          ? await cacheLookup<{ result: DraftResult; sources: SourceCard[] }>('draft', cacheKey, question)
-          : null;
 
-        if (cached) {
+        // Step 3 — identify the inverter brand (named, or implied by an app name).
+        const brand = resolveBrand(question);
+
+        // Fast path: a question that can't be answered without knowing the
+        // inverter (e.g. "add my inverter to the monitoring app") and no brand
+        // yet → return a ready counter-question with no model/retrieval call.
+        const preClarify = preClarifyDraft({ question, brand });
+        const cached =
+          !preClarify && anthropicConfigured()
+            ? await cacheLookup<{ result: DraftResult; sources: SourceCard[] }>('draft', cacheKey, question)
+            : null;
+
+        if (preClarify) {
+          result = preClarify;
+          sources = [];
+        } else if (cached) {
           result = cached.result;
           sources = cached.sources;
         } else {
-          // Step 3 — identify the brand, then retrieve its matching source.
-          const brand = detectBrand(question);
-          const entries = await storage.knowledge.retrieve(question, env.retrievalTopK, brand);
+          const entries = await storage.knowledge.retrieve(question, env.retrievalTopK, brand, detectModel(question));
 
           // Use Claude when a key is set; otherwise fall back to an offline draft
           // composed from the retrieved knowledge so the preview still works.
@@ -148,12 +169,21 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   );
 
   // ── Voice agent: a natural multi-turn conversation (not a formal draft) ──────
-  app.post<{ Body: { messages?: unknown; audience?: string; attachments?: unknown } }>(
+  app.post<{ Body: { messages?: unknown; audience?: string; attachments?: unknown; mode?: string } }>(
     '/api/voice/chat',
     { preHandler: requirePermission('ask') },
     async (req, reply) => {
-      const audience = req.body?.audience;
-      if (!isAudience(audience)) return reply.code(400).send({ error: 'invalid_audience' });
+      // 'text' mode is the live support chat (typed); default 'voice' keeps the
+      // voice agent unchanged.
+      const mode = req.body?.mode === 'text' ? 'text' : 'voice';
+      // Audience may be an explicit value, or 'auto'/absent → infer from the
+      // message (the support chat auto-detects who's asking). Reject only a
+      // present-but-invalid value.
+      const rawAudience = req.body?.audience;
+      const explicitAudience = isAudience(rawAudience) ? rawAudience : null;
+      if (rawAudience != null && rawAudience !== 'auto' && !explicitAudience) {
+        return reply.code(400).send({ error: 'invalid_audience' });
+      }
 
       // Validate and bound the conversation history (text only — attachments ride
       // separately and are stitched onto the latest user turn below).
@@ -193,6 +223,36 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       try {
         const storage = await getStorage();
 
+        // Auto-detect the "source": who's asking (explicit, else inferred from
+        // the latest message) and the channel it reads like. Returned to the
+        // client so the support chat can show what it detected.
+        const audience = explicitAudience ?? detectAudience(lastUser.content);
+        const channel = detectChannel(lastUser.content);
+
+        // Step 3 — brand may have been named (or an app named) earlier in the
+        // call, so scan the recent user turns, not just the latest message.
+        const userContents = recent.filter((t) => t.role === 'user').map((t) => t.content);
+        const brand =
+          detectBrandFromTurns(userContents) ?? userContents.map(brandFromApp).find((b) => b) ?? null;
+
+        const OPENING = 'This is an automated response from TSBA Technical Support.';
+        const withOpening = (t: string) =>
+          t.trimStart().startsWith(OPENING) ? t.trim() : `${OPENING} ${t.trim()}`;
+
+        // Fast path: a monitoring-app question with no inverter named yet → a
+        // short counter-question with tappable brand chips, no model call.
+        // (Skipped when the turn carries an attachment — that may be the answer.)
+        if (attachments.length === 0) {
+          const pre =
+            mode === 'text'
+              ? preClarifyDraft({ question: lastUser.content, brand })
+              : preClarifyVoice({ question: lastUser.content, brand });
+          if (pre) {
+            const suggestions = mode === 'text' ? brandChips() : (pre as { suggestions: string[] }).suggestions;
+            return { reply: withOpening(pre.reply), sources: [] as SourceCard[], suggestions, audience, channel };
+          }
+        }
+
         // Reuse a cached answer when the same question is asked again. Only for
         // self-contained, attachment-free questions on a live (Claude) setup —
         // context-dependent follow-ups and file questions always go to the model.
@@ -204,13 +264,21 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
             audience,
             lastUser.content,
           );
-          if (hit) return hit;
+          if (hit) return { ...hit, audience, channel };
         }
 
-        // Step 3 — brand may have been named earlier in the call, so scan the
-        // recent turns, not just the latest message.
-        const brand = detectBrandFromTurns(recent.filter((t) => t.role === 'user').map((t) => t.content));
-        const entries = await storage.knowledge.retrieve(lastUser.content, env.retrievalTopK, brand);
+        // Retrieval query: use the recent USER turns, not just the latest message.
+        // A follow-up reply like "I have a Deye" carries no topic words of its own,
+        // so on its own it retrieves generic brand datasheets and the entry that
+        // actually answers the thread (e.g. APP-DEYE, "add to the SOLARMAN app")
+        // never reaches the top-K — making the model hand over an answerable
+        // question. Carrying the earlier turns ("...add my inverter to the
+        // monitoring app") into the query keeps the real topic in scope.
+        const retrievalQuery = userContents.slice(-3).join('\n').slice(-2000);
+        // A specific model named anywhere in the thread grounds the answer in that
+        // model's own document (per-model guides), not a generic brand-level note.
+        const model = detectModelFromTurns(userContents);
+        const entries = await storage.knowledge.retrieve(retrievalQuery, env.retrievalTopK, brand, model);
 
         // Attachments only help when a real model can read them; stitch them onto
         // the final user turn so Claude sees the file alongside the question.
@@ -223,13 +291,16 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
               )
             : recent;
 
+        const system =
+          mode === 'text'
+            ? buildChatSystem({ audience, channel, entries })
+            : buildVoiceSystem({ audience, entries });
         const text = anthropicConfigured()
-          ? await chatReply(buildVoiceSystem({ audience, entries }), modelTurns)
+          ? await chatReply(system, modelTurns)
           : offlineChat({ question: lastUser.content, audience, entries });
 
         // Guarantee the client's mandated opening line, even if the model omits it.
-        const OPENING = 'This is an automated response from TSBA Technical Support.';
-        const reply = text.trimStart().startsWith(OPENING) ? text.trim() : `${OPENING} ${text.trim()}`;
+        const reply = withOpening(text);
 
         // Surface the documents this answer was grounded in, deduped by document
         // (chunk titles carry a "— part N/M" suffix) so the UI can cite them.
@@ -250,7 +321,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
         const payload = { reply, sources, suggestions };
         if (cacheable) await cacheStore('voice', audience, lastUser.content, payload);
-        return payload;
+        return { ...payload, audience, channel };
       } catch (err) {
         req.log.error({ err }, 'voice chat failed');
         return reply.code(502).send({ error: 'chat_failed', message: (err as Error).message });
@@ -795,6 +866,89 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         if (err instanceof GmailAuthError) return reply.code(409).send({ error: 'gmail_not_connected' });
         req.log.error({ err }, 'gmail scan failed');
         return reply.code(502).send({ error: 'gmail_scan_failed', message: (err as Error).message });
+      }
+    },
+  );
+
+  // ── Gmail inbox as the query list ───────────────────────────────────────────
+  // List recent inbox messages as end-user queries (lightweight, no LLM).
+  app.get<{ Querystring: { labelId?: string; max?: string } }>(
+    '/api/gmail/queries',
+    { preHandler: requirePermission('ask') },
+    async (req, reply) => {
+      const labelId = (req.query?.labelId || 'INBOX').trim();
+      const max = Math.min(100, Math.max(1, Number(req.query?.max) || 30));
+      try {
+        return { queries: await listInbox(labelId, max) };
+      } catch (err) {
+        if (err instanceof GmailAuthError) return reply.code(409).send({ error: 'gmail_not_connected' });
+        req.log.error({ err }, 'gmail queries failed');
+        return reply.code(502).send({ error: 'gmail_queries_failed', message: (err as Error).message });
+      }
+    },
+  );
+
+  // Draft a grounded reply for one inbox message. Auto-detects who's asking;
+  // channel is 'email' (it came from Gmail).
+  app.post<{ Params: { id: string } }>(
+    '/api/gmail/queries/:id/draft',
+    { preHandler: requirePermission('ask') },
+    async (req, reply) => {
+      try {
+        const msg = await getMessage(req.params.id);
+        const question = `${msg.subject}\n\n${msg.text}`.trim().slice(0, 6000);
+        const audience = detectAudience(question);
+        const channel = 'email' as const;
+        const storage = await getStorage();
+
+        const brand = resolveBrand(question);
+        const pre = preClarifyDraft({ question, brand });
+        let result: DraftResult;
+        let sources: SourceCard[];
+        if (pre) {
+          result = pre;
+          sources = [];
+        } else {
+          const entries = await storage.knowledge.retrieve(question, env.retrievalTopK, brand, detectModel(question));
+          result = anthropicConfigured()
+            ? await draftReply(buildPrompt({ question, audience, channel, entries }))
+            : offlineDraft({ question, audience, channel, entries });
+          const byId = new Map(entries.map((e) => [e.id, e]));
+          sources = result.sources
+            .map((id) => byId.get(id))
+            .filter((e): e is NonNullable<typeof e> => Boolean(e))
+            .map((e) => ({ id: e.id, kind: e.kind, title: e.title, source: e.source }));
+        }
+        return { audience, channel, from: msg.from, subject: msg.subject, result, sources };
+      } catch (err) {
+        if (err instanceof GmailAuthError) return reply.code(409).send({ error: 'gmail_not_connected' });
+        req.log.error({ err }, 'gmail draft failed');
+        return reply.code(502).send({ error: 'gmail_draft_failed', message: (err as Error).message });
+      }
+    },
+  );
+
+  // Send a reply back to the message's thread (the explicit "send" action).
+  app.post<{ Params: { id: string }; Body: { text?: string } }>(
+    '/api/gmail/queries/:id/reply',
+    { preHandler: requirePermission('approve_drafts') },
+    async (req, reply) => {
+      const text = (req.body?.text ?? '').trim();
+      if (!text) return reply.code(400).send({ error: 'text_required' });
+      try {
+        const msg = await getMessage(req.params.id);
+        const sent = await sendReply({
+          to: msg.from,
+          subject: msg.subject,
+          body: text,
+          threadId: msg.threadId,
+          inReplyTo: msg.messageId,
+        });
+        return { ok: true, ...sent };
+      } catch (err) {
+        if (err instanceof GmailAuthError) return reply.code(409).send({ error: 'gmail_not_connected' });
+        req.log.error({ err }, 'gmail reply failed');
+        return reply.code(502).send({ error: 'gmail_reply_failed', message: (err as Error).message });
       }
     },
   );

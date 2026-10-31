@@ -53,8 +53,8 @@ import type {
 // Postgres-backed stores: thin adapters over the existing SQL modules.
 
 export class PgKnowledgeStore implements KnowledgeStore {
-  retrieve(question: string, topK: number, brand?: string | null): Promise<KnowledgeEntry[]> {
-    return retrieve(question, topK, brand);
+  retrieve(question: string, topK: number, brand?: string | null, model?: string | null): Promise<KnowledgeEntry[]> {
+    return retrieve(question, topK, brand, model);
   }
   add(entries: KnowledgeEntry[]): Promise<void> {
     return addEntries(entries);

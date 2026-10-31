@@ -8,7 +8,11 @@ import type { KnowledgeEntry } from '@tsba/shared';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const dataDir = resolve(here, '../../data');
-const FILES = ['tsba-knowledge-v0.1.json', 'tsba-knowledge-offline-flow.json'];
+const FILES = [
+  'tsba-knowledge-v0.1.json',
+  'tsba-knowledge-offline-flow.json',
+  'tsba-knowledge-monitoring-apps.json',
+];
 
 export function loadKnowledgeEntries(): KnowledgeEntry[] {
   const all: KnowledgeEntry[] = [];

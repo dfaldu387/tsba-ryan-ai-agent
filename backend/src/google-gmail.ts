@@ -1,9 +1,9 @@
 import type { GmailLabel } from '@tsba/shared';
 import { getAccessToken } from './connections.js';
 
-// ─── Gmail API v1 client (read-only: labels + messages) ──────────────────────
-// Uses the stored `gmail` OAuth token. Only labels.list, messages.list and
-// messages.get are ever called — nothing is ever sent from the scan path.
+// ─── Gmail API v1 client ─────────────────────────────────────────────────────
+// Uses the stored `gmail` OAuth token. Reads labels + messages, and (only via
+// the explicit reply action) sends a reply back to a message's thread.
 
 const GMAIL_API = 'https://gmail.googleapis.com/gmail/v1/users/me';
 
@@ -18,6 +18,16 @@ async function token(): Promise<string> {
 async function api<T>(path: string): Promise<T> {
   const res = await fetch(`${GMAIL_API}${path}`, {
     headers: { Authorization: `Bearer ${await token()}` },
+  });
+  if (!res.ok) throw new Error(`Gmail ${path} failed: ${res.status} ${await res.text()}`);
+  return (await res.json()) as T;
+}
+
+async function apiPost<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${GMAIL_API}${path}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${await token()}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`Gmail ${path} failed: ${res.status} ${await res.text()}`);
   return (await res.json()) as T;
@@ -68,11 +78,58 @@ export async function listMessageIds(labelId: string, max: number): Promise<stri
 
 export interface GmailMessage {
   id: string;
+  threadId: string;
   subject: string;
   from: string;
   date: string;
   text: string;
+  /** The RFC822 Message-ID header, used to thread a reply (In-Reply-To). */
+  messageId: string;
   webUrl: string;
+}
+
+/** A lightweight inbox item for the query list (no full body fetch). */
+export interface GmailSummary {
+  id: string;
+  threadId: string;
+  subject: string;
+  from: string;
+  date: string;
+  snippet: string;
+  webUrl: string;
+}
+
+function headerOf(headers: { name: string; value: string }[], name: string): string {
+  return headers.find((x) => x.name.toLowerCase() === name.toLowerCase())?.value ?? '';
+}
+
+/** List recent messages under a label (default INBOX) as lightweight summaries. */
+export async function listInbox(labelId: string, max: number): Promise<GmailSummary[]> {
+  const ids = await listMessageIds(labelId, max);
+  const items = await Promise.all(
+    ids.map(async (id) => {
+      try {
+        const data = await api<{
+          threadId?: string;
+          snippet?: string;
+          payload?: { headers?: { name: string; value: string }[] };
+        }>(`/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`);
+        const headers = data.payload?.headers ?? [];
+        return {
+          id,
+          threadId: data.threadId ?? id,
+          subject: headerOf(headers, 'Subject') || '(no subject)',
+          from: headerOf(headers, 'From'),
+          date: headerOf(headers, 'Date'),
+          snippet: (data.snippet ?? '').replace(/\s+/g, ' ').trim(),
+          webUrl: `https://mail.google.com/mail/u/0/#all/${id}`,
+        } as GmailSummary;
+      } catch {
+        return null;
+      }
+    }),
+  );
+  return items.filter((x): x is GmailSummary => x !== null);
 }
 
 interface Part {
@@ -126,10 +183,49 @@ export async function getMessage(id: string): Promise<GmailMessage> {
     headers.find((x) => x.name.toLowerCase() === name.toLowerCase())?.value ?? '';
   return {
     id,
+    threadId: (data as { threadId?: string }).threadId ?? id,
     subject: h('Subject') || '(no subject)',
     from: h('From'),
     date: h('Date'),
     text: extractBody(data.payload),
+    messageId: h('Message-ID') || h('Message-Id'),
     webUrl: `https://mail.google.com/mail/u/0/#all/${id}`,
   };
+}
+
+/** Parse a bare email address out of a From/To header value. */
+function emailAddress(value: string): string {
+  const m = value.match(/<([^>]+)>/);
+  return (m ? m[1] : value).trim();
+}
+
+function base64Url(s: string): string {
+  return Buffer.from(s, 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/**
+ * Send a plain-text reply to a message's thread. `to` is the original sender,
+ * `subject` is prefixed with "Re:" if needed, and the reply is threaded via the
+ * original Message-ID. Requires the gmail.send scope.
+ */
+export async function sendReply(args: {
+  to: string;
+  subject: string;
+  body: string;
+  threadId: string;
+  inReplyTo?: string;
+}): Promise<{ id: string; threadId: string }> {
+  const to = emailAddress(args.to);
+  const subject = /^re:/i.test(args.subject) ? args.subject : `Re: ${args.subject}`;
+  const lines = [
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    'Content-Type: text/plain; charset="UTF-8"',
+    'MIME-Version: 1.0',
+  ];
+  if (args.inReplyTo) {
+    lines.push(`In-Reply-To: ${args.inReplyTo}`, `References: ${args.inReplyTo}`);
+  }
+  const raw = base64Url(`${lines.join('\r\n')}\r\n\r\n${args.body}`);
+  return apiPost<{ id: string; threadId: string }>('/messages/send', { raw, threadId: args.threadId });
 }

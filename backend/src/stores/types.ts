@@ -17,9 +17,11 @@ export interface KnowledgeStore {
   /**
    * Retrieve the knowledge for a question. When `brand` is given (detected from
    * the conversation), entries for that brand — plus brand-agnostic ones — are
-   * boosted so the matching manufacturer's source ranks first.
+   * boosted so the matching manufacturer's source ranks first. When `model` is
+   * also given, entries for that specific model (its per-model document) are
+   * boosted harder still, so the reply is grounded in the exact model's guide.
    */
-  retrieve(question: string, topK: number, brand?: string | null): Promise<KnowledgeEntry[]>;
+  retrieve(question: string, topK: number, brand?: string | null, model?: string | null): Promise<KnowledgeEntry[]>;
   /** Add (or replace) knowledge entries and embed them so they're retrievable. */
   add(entries: KnowledgeEntry[]): Promise<void>;
   /** Remove entries whose id starts with the given prefix (e.g. a document's chunks). */

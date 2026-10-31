@@ -1,5 +1,44 @@
 // Shared retrieval helpers (no DB dependency) for hybrid lexical+vector ranking.
 
+/**
+ * A document's identity from a chunk title: the title with the "— part N/M"
+ * chunk suffix stripped, lowercased. Lets retrieval tell two chunks of the SAME
+ * document apart from two different documents.
+ */
+export function documentKey(title: string): string {
+  return title.replace(/\s*[—-]\s*part\s*\d+\s*\/\s*\d+\s*$/i, '').trim().toLowerCase();
+}
+
+/**
+ * Pick the top-K items with per-document diversity: at most `perDocCap` chunks
+ * from any one document, so a single long guide (dozens of chunks) can't fill
+ * every slot and crowd out other relevant documents (a datasheet, a how-to
+ * entry, the brand's monitoring-app steps). `items` MUST already be sorted best-
+ * first. Falls back to the next-best overflow chunks only if the cap left the
+ * result short of K, so we never return fewer than we could.
+ */
+export function diversify<T>(items: T[], topK: number, perDocCap: number, keyOf: (t: T) => string): T[] {
+  const picked: T[] = [];
+  const overflow: T[] = [];
+  const count = new Map<string, number>();
+  for (const it of items) {
+    const k = keyOf(it);
+    const n = count.get(k) ?? 0;
+    if (n < perDocCap) {
+      picked.push(it);
+      count.set(k, n + 1);
+      if (picked.length === topK) return picked;
+    } else {
+      overflow.push(it);
+    }
+  }
+  for (const it of overflow) {
+    if (picked.length >= topK) break;
+    picked.push(it);
+  }
+  return picked.slice(0, topK);
+}
+
 const STOP = new Set(
   'the a an and or of to is it in on for what can how do does with this that are your you at from have has any should could will would about which when where who whom'.split(
     ' ',

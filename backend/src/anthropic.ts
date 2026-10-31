@@ -84,7 +84,9 @@ export async function chatReply(
   const message = await client.messages.create(
     {
       model: env.anthropicModel,
-      max_tokens: 600,
+      // Headroom so a complete answer with a short step list is never cut off
+      // mid-sentence (replies are still kept brief by the prompt).
+      max_tokens: 800,
       // Cache the stable behaviour block; the volatile KNOWLEDGE follows it and
       // is not cached. Same content as before — just a cache breakpoint between.
       system: [
