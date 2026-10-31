@@ -12,12 +12,14 @@ import { ConnectionsManager } from './components/ConnectionsManager';
 import { KnowledgeTab } from './components/KnowledgeTab';
 import { UsersPanel } from './components/UsersPanel';
 import { AskTab } from './components/AskTab';
+import { QueryList } from './components/QueryList';
+import { SupportChat } from './components/SupportChat';
 import { NotificationBell } from './components/NotificationBell';
 import { VoiceAgent } from './components/VoiceAgent';
 import { ProgressTab } from './components/ProgressTab';
 import { SettingsTab } from './components/SettingsTab';
 
-type Section = 'dashboard' | 'connections' | 'knowledge' | 'ask' | 'voice' | 'users' | 'progress' | 'settings';
+type Section = 'dashboard' | 'connections' | 'knowledge' | 'ask' | 'drafts' | 'voice' | 'users' | 'progress' | 'settings';
 
 interface NavItem {
   key: Section;
@@ -30,8 +32,9 @@ const NAV: NavItem[] = [
   { key: 'dashboard', label: 'Dashboard', icon: '▦', perm: 'view' },
   { key: 'connections', label: 'Connections', icon: '🔌', perm: 'view' },
   { key: 'knowledge', label: 'Knowledge base', icon: '📚', perm: 'view' },
-  { key: 'ask', label: 'Ask the agent', icon: '💬', perm: 'ask' },
+  { key: 'ask', label: 'Support Inbox', icon: '💬', perm: 'ask' },
   { key: 'voice', label: 'Voice agent', icon: '🎙️', perm: 'ask' },
+  { key: 'drafts', label: 'Drafts & approvals', icon: '📥', perm: 'ask' },
   { key: 'users', label: 'Users & roles', icon: '👥', perm: 'manage_users' },
   { key: 'settings', label: 'Settings', icon: '⚙️', perm: 'view' },
   { key: 'progress', label: 'Progress', icon: '📈', perm: 'view' },
@@ -41,7 +44,8 @@ const TITLES: Record<Section, string> = {
   dashboard: 'Dashboard',
   connections: 'Connections & knowledge sources',
   knowledge: 'Knowledge base',
-  ask: 'Ask the agent',
+  ask: 'Support Inbox',
+  drafts: 'Drafts & approvals',
   voice: 'Voice agent',
   users: 'Users & roles',
   settings: 'Settings',
@@ -52,7 +56,8 @@ const SUBTITLES: Record<Section, string> = {
   dashboard: 'A live overview of the agent, its knowledge and recent activity.',
   connections: 'Connect Google Drive & Gmail, then select folders and scan email into the knowledge base.',
   knowledge: 'Every document and folder source powering the agent’s answers.',
-  ask: 'Generate a grounded draft reply for review and approval.',
+  ask: 'Receive, review and reply to end-user support questions.',
+  drafts: 'Generate a grounded draft reply for review and approval.',
   voice: 'Speak to the agent and hear grounded answers read back aloud.',
   users: 'Create accounts and assign roles. Permissions follow the role.',
   settings: 'System configuration, integrations and your account.',
@@ -91,6 +96,11 @@ const ICONS: Record<Section, ReactNode> = {
     </>,
   ),
   ask: svgIcon(<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />),
+  drafts: svgIcon(
+    <>
+      <path d="M22 12h-6l-2 3h-4l-2-3H2" /><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+    </>,
+  ),
   voice: svgIcon(
     <>
       <rect x="9" y="2" width="6" height="12" rx="3" /><path d="M5 10v2a7 7 0 0 0 14 0v-2" />
@@ -117,7 +127,7 @@ const ICONS: Record<Section, ReactNode> = {
 };
 
 const SECTIONS: Section[] = [
-  'dashboard', 'connections', 'knowledge', 'ask', 'voice', 'users', 'progress', 'settings',
+  'dashboard', 'connections', 'knowledge', 'ask', 'drafts', 'voice', 'users', 'progress', 'settings',
 ];
 const isSection = (v: unknown): v is Section => SECTIONS.includes(v as Section);
 
@@ -305,7 +315,7 @@ export function App() {
 
           <div className="head-right">
             {hasPermission(user.role, 'view') && (
-              <NotificationBell onNavigate={() => setSection('ask')} onAuthError={onAuthError} />
+              <NotificationBell onNavigate={() => setSection('drafts')} onAuthError={onAuthError} />
             )}
             <div className="profile-menu">
               <button
@@ -366,7 +376,13 @@ export function App() {
             </div>
           )}
           {active === 'knowledge' && <KnowledgeTab user={user} onAuthError={onAuthError} />}
-          {active === 'ask' && hasPermission(user.role, 'ask') && <AskTab onAuthError={onAuthError} />}
+          {active === 'ask' && hasPermission(user.role, 'ask') && (
+            <>
+              <QueryList onAuthError={onAuthError} />
+              <SupportChat onAuthError={onAuthError} floatingOnly />
+            </>
+          )}
+          {active === 'drafts' && hasPermission(user.role, 'ask') && <AskTab onAuthError={onAuthError} />}
           {active === 'voice' && hasPermission(user.role, 'ask') && <VoiceAgent onAuthError={onAuthError} />}
           {active === 'users' && hasPermission(user.role, 'manage_users') && (
             <div className="col">

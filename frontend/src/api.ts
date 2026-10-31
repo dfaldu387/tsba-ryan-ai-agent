@@ -7,6 +7,7 @@ import type {
   ConnectionStatus,
   Draft,
   DraftAction,
+  DraftResult,
   DriveFile,
   DriveFolderSource,
   DriveListing,
@@ -149,8 +150,8 @@ export function scanGmailLabel(labelId: string, max?: number): Promise<GmailScan
 
 export function createDraft(body: {
   question: string;
-  audience: Audience;
-  channel: Channel;
+  audience: Audience | 'auto';
+  channel: Channel | 'auto';
   recipient?: string | null;
 }): Promise<Draft> {
   return request<Draft>('/api/draft', { method: 'POST', body: JSON.stringify(body) });
@@ -179,6 +180,29 @@ export function voiceChat(
   });
 }
 
+/**
+ * Live support chat: the agent auto-detects who's asking (audience) and the
+ * channel from the message, answers instantly (no approval gate), and returns
+ * what it detected so the UI can show it. Reuses the grounded /api/voice/chat
+ * pipeline in text mode.
+ */
+export function supportChat(
+  messages: VoiceChatMessage[],
+  attachments: VoiceAttachment[] = [],
+  audience: Audience | 'auto' = 'auto',
+): Promise<{
+  reply: string;
+  sources: SourceCard[];
+  suggestions: string[];
+  audience: Audience;
+  channel: Channel;
+}> {
+  return request('/api/voice/chat', {
+    method: 'POST',
+    body: JSON.stringify({ messages, audience, mode: 'text', attachments }),
+  });
+}
+
 export function getVoiceStarters(): Promise<{ suggestions: string[] }> {
   return request<{ suggestions: string[] }>('/api/voice/suggestions');
 }
@@ -192,6 +216,40 @@ export function flagVoiceAnswer(
   return request<Draft>('/api/voice/flag', {
     method: 'POST',
     body: JSON.stringify({ question, reply, audience, note }),
+  });
+}
+
+// ─── Gmail inbox as the query list ──────────────────────────────────────────
+export interface GmailQuery {
+  id: string;
+  threadId: string;
+  subject: string;
+  from: string;
+  date: string;
+  snippet: string;
+  webUrl: string;
+}
+
+export function getGmailQueries(labelId = 'INBOX', max = 30): Promise<{ queries: GmailQuery[] }> {
+  const qs = new URLSearchParams({ labelId, max: String(max) });
+  return request<{ queries: GmailQuery[] }>(`/api/gmail/queries?${qs.toString()}`);
+}
+
+export function draftGmailQuery(id: string): Promise<{
+  audience: Audience;
+  channel: Channel;
+  from: string;
+  subject: string;
+  result: DraftResult;
+  sources: SourceCard[];
+}> {
+  return request(`/api/gmail/queries/${encodeURIComponent(id)}/draft`, { method: 'POST' });
+}
+
+export function replyGmailQuery(id: string, text: string): Promise<{ ok: true }> {
+  return request(`/api/gmail/queries/${encodeURIComponent(id)}/reply`, {
+    method: 'POST',
+    body: JSON.stringify({ text }),
   });
 }
 

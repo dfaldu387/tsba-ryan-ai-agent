@@ -146,6 +146,46 @@ function ReplyText({ text }: { text: string }) {
 
 // Persist the conversation so it survives tab switches and reloads.
 const VOICE_LOG_KEY = 'tsba.voice.turns';
+// Past conversations, archived when the user starts a new chat.
+const VOICE_HISTORY_KEY = 'tsba.voice.history';
+const MAX_SESSIONS = 30;
+
+/** One archived conversation shown in the history popup. */
+interface ChatSession {
+  id: string;
+  at: string; // when it was archived (ISO)
+  title: string; // first question, for the list
+  turns: Turn[];
+}
+
+function loadHistory(): ChatSession[] {
+  try {
+    const raw = localStorage.getItem(VOICE_HISTORY_KEY);
+    const parsed = raw ? (JSON.parse(raw) as unknown) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (s): s is ChatSession =>
+        Boolean(s) && typeof (s as ChatSession).id === 'string' && Array.isArray((s as ChatSession).turns),
+    );
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory(list: ChatSession[]): void {
+  try {
+    localStorage.setItem(VOICE_HISTORY_KEY, JSON.stringify(list.slice(0, MAX_SESSIONS)));
+  } catch {
+    /* ignore */
+  }
+}
+
+function formatDate(iso?: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
 
 // How long a pause (ms) counts as "the speaker is finished". The browser's own
 // end-of-speech detection is far more aggressive than this and cuts people off
@@ -215,6 +255,10 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
   const [copiedId, setCopiedId] = useState<number | null>(null);
   // KB-grounded opening suggestions for an empty chat (generated, not hardcoded).
   const [starters, setStarters] = useState<string[]>([]);
+  // Past conversations + the history popup.
+  const [history, setHistory] = useState<ChatSession[]>(loadHistory);
+  const [showHistory, setShowHistory] = useState(false);
+  const [viewing, setViewing] = useState<ChatSession | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -397,14 +441,41 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
     setSpeakingId(null);
   }
 
+  // Archive the current conversation to history (so "New chat" doesn't lose it).
+  function archiveCurrent() {
+    const done = turns.filter((t) => t.type !== 'approvals' && t.reply);
+    if (done.length === 0) return;
+    const session: ChatSession = {
+      id: `s${Date.now()}`,
+      at: new Date().toISOString(),
+      title: done[0].question.slice(0, 80),
+      turns: done,
+    };
+    setHistory((prev) => {
+      const next = [session, ...prev].slice(0, MAX_SESSIONS);
+      saveHistory(next);
+      return next;
+    });
+  }
+
   function clearChat() {
     stopSpeaking();
     handsFreeRef.current = false;
     setHandsFree(false);
     stopListening();
+    archiveCurrent();
     setTurns([]);
     setAttachments([]);
     nextId.current = 1;
+  }
+
+  function deleteSession(id: string) {
+    setHistory((prev) => {
+      const next = prev.filter((s) => s.id !== id);
+      saveHistory(next);
+      return next;
+    });
+    setViewing((v) => (v?.id === id ? null : v));
   }
 
   async function addFiles(files: FileList | null) {
@@ -775,6 +846,17 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
             <button
               className="jbtn-ghost"
               type="button"
+              onClick={() => {
+                setViewing(null);
+                setShowHistory(true);
+              }}
+              title="Browse past conversations"
+            >
+              🕑 History{history.length > 0 ? ` (${history.length})` : ''}
+            </button>
+            <button
+              className="jbtn-ghost"
+              type="button"
               onClick={clearChat}
               disabled={thinking || turns.length === 0}
               title="Start a new conversation"
@@ -784,6 +866,57 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
           </div>
           </div>
         </div>
+
+        {showHistory && (
+          <div className="chat-history">
+            <button
+              type="button"
+              className="chat-history-backdrop"
+              aria-label="Close history"
+              onClick={() => setShowHistory(false)}
+            />
+            <div className="chat-history-panel" role="dialog" aria-label="Conversation history">
+              <div className="chat-history-head">
+                <h3>{viewing ? 'Conversation' : 'Conversation history'}</h3>
+                <button type="button" className="chat-history-close" onClick={() => setShowHistory(false)} aria-label="Close">
+                  ✕
+                </button>
+              </div>
+
+              {viewing ? (
+                <div className="chat-history-body">
+                  <button type="button" className="jbtn-ghost" onClick={() => setViewing(null)}>← Back to list</button>
+                  <div className="chat-history-transcript">
+                    {viewing.turns.map((t) => (
+                      <div key={t.id} className="chat-history-turn">
+                        <p className="chat-history-q"><b>You:</b> {t.question}</p>
+                        <p className="chat-history-a"><ReplyText text={t.reply} /></p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : history.length === 0 ? (
+                <div className="chat-history-body">
+                  <p className="empty">No past conversations yet. They’re saved here when you start a new chat.</p>
+                </div>
+              ) : (
+                <ul className="chat-history-list">
+                  {history.map((s) => (
+                    <li key={s.id}>
+                      <button type="button" className="chat-history-item" onClick={() => setViewing(s)}>
+                        <span className="chat-history-title">{s.title || '(untitled)'}</span>
+                        <span className="chat-history-meta">{formatDate(s.at)} · {s.turns.length} message{s.turns.length === 1 ? '' : 's'}</span>
+                      </button>
+                      <button type="button" className="chat-history-del" onClick={() => deleteSession(s.id)} aria-label="Delete conversation" title="Delete">
+                        🗑
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        )}
 
         <div className="voice-log jlog" ref={logRef}>
           {turns.length === 0 && !thinking && (
