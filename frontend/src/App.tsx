@@ -8,6 +8,7 @@ import {
 import { clearToken, getMe, getStoredUser, getToken } from './api';
 import { LoginForm } from './components/LoginForm';
 import { DashboardTab } from './components/DashboardTab';
+import { SolarTab } from './components/SolarTab';
 import { ConnectionsManager } from './components/ConnectionsManager';
 import { KnowledgeTab } from './components/KnowledgeTab';
 import { UsersPanel } from './components/UsersPanel';
@@ -19,7 +20,7 @@ import { VoiceAgent } from './components/VoiceAgent';
 import { ProgressTab } from './components/ProgressTab';
 import { SettingsTab } from './components/SettingsTab';
 
-type Section = 'dashboard' | 'connections' | 'knowledge' | 'ask' | 'drafts' | 'voice' | 'users' | 'progress' | 'settings';
+type Section = 'dashboard' | 'solar' | 'connections' | 'knowledge' | 'ask' | 'drafts' | 'voice' | 'users' | 'progress' | 'settings';
 
 interface NavItem {
   key: Section;
@@ -30,6 +31,7 @@ interface NavItem {
 
 const NAV: NavItem[] = [
   { key: 'dashboard', label: 'Dashboard', icon: '▦', perm: 'view' },
+  { key: 'solar', label: 'Solar monitoring', icon: '☀', perm: 'view' },
   { key: 'connections', label: 'Connections', icon: '🔌', perm: 'view' },
   { key: 'knowledge', label: 'Knowledge base', icon: '📚', perm: 'view' },
   { key: 'ask', label: 'Support Inbox', icon: '💬', perm: 'ask' },
@@ -42,6 +44,7 @@ const NAV: NavItem[] = [
 
 const TITLES: Record<Section, string> = {
   dashboard: 'Dashboard',
+  solar: 'Solar monitoring',
   connections: 'Connections & knowledge sources',
   knowledge: 'Knowledge base',
   ask: 'Support Inbox',
@@ -54,6 +57,7 @@ const TITLES: Record<Section, string> = {
 
 const SUBTITLES: Record<Section, string> = {
   dashboard: 'A live overview of the agent, its knowledge and recent activity.',
+  solar: 'Live station, device and alert data from your Deye Cloud account.',
   connections: 'Connect Google Drive & Gmail, then select folders and scan email into the knowledge base.',
   knowledge: 'Every document and folder source powering the agent’s answers.',
   ask: 'Receive, review and reply to end-user support questions.',
@@ -83,6 +87,12 @@ const ICONS: Record<Section, ReactNode> = {
     <>
       <rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" />
       <rect x="14" y="14" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" />
+    </>,
+  ),
+  solar: svgIcon(
+    <>
+      <circle cx="12" cy="12" r="4.5" />
+      <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4" />
     </>,
   ),
   connections: svgIcon(
@@ -127,7 +137,7 @@ const ICONS: Record<Section, ReactNode> = {
 };
 
 const SECTIONS: Section[] = [
-  'dashboard', 'connections', 'knowledge', 'ask', 'drafts', 'voice', 'users', 'progress', 'settings',
+  'dashboard', 'solar', 'connections', 'knowledge', 'ask', 'drafts', 'voice', 'users', 'progress', 'settings',
 ];
 const isSection = (v: unknown): v is Section => SECTIONS.includes(v as Section);
 
@@ -370,6 +380,7 @@ export function App() {
         <div className="content-body">
           <p className="page-lead">{SUBTITLES[active]}</p>
           {active === 'dashboard' && <DashboardTab onAuthError={onAuthError} />}
+          {active === 'solar' && <SolarTab onAuthError={onAuthError} />}
           {active === 'connections' && (
             <div className="col">
               <ConnectionsManager user={user} onAuthError={onAuthError} />

@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import {
   AGENT_PROFILE,
   isAudience,
@@ -13,6 +13,25 @@ import {
 import { cacheLookup, cacheStore, invalidateAnswerCache, isStandaloneQuestion } from '../answer-cache.js';
 import { currentUser, issueToken, requireAuth, requirePermission } from '../auth.js';
 import { appWebUrl, env, googleOAuthConfigured } from '../env.js';
+import {
+  PROVIDERS,
+  ProviderError,
+  ProviderNotConfiguredError,
+  aggregateStations,
+  configuredProviders,
+  getProvider,
+} from '../providers/index.js';
+import { SOLAR_TOOLS, executeSolarTool, solarToolsAvailable } from '../solar-tools.js';
+
+// Appended to the chat system prompt when a monitoring platform is connected, so
+// the agent knows it can read live plant data (and must not invent figures).
+const SOLAR_SYSTEM_NOTE = `
+
+## Live solar monitoring
+This console monitors the organisation's solar fleet across several platforms (e.g. Deye, GoodWe, Sungrow). You can read it live with two tools:
+- get_solar_overview — every plant across all connected platforms: connected platform names, any unreachable platforms, counts (online/partial/offline), portfolio totals (daily energy, capacity), and per-plant status, current power, today's and total energy, and capacity.
+- get_station_detail — one plant by name: status, current power, today/month/total energy, battery SOC, capacity, location, devices (with online/offline state), active alerts/faults, and full plant attributes (coordinates, owner, grid type, commissioning/install dates, income, CO₂, timezone, …).
+Use these whenever the user asks anything about a plant/system/site, the fleet, production, status, online/offline, batteries, devices/inverters, or faults — call the right tool and answer only from what it returns. Prefer get_solar_overview for fleet-wide or "which are offline" questions and get_station_detail for a named plant. When summarising, proactively flag offline, partial, or faulting plants and obvious anomalies (e.g. a plant reporting power while marked offline). Never invent numbers; if no plant matches, say so and list the available plant names. You may also explain how these monitoring platforms work in general.`;
 import {
   anthropicConfigured,
   buildUserContent,
@@ -291,12 +310,23 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
               )
             : recent;
 
-        const system =
+        const baseSystem =
           mode === 'text'
             ? buildChatSystem({ audience, channel, entries })
             : buildVoiceSystem({ audience, entries });
+        // When a monitoring platform is connected, give the agent the live-data
+        // tools and tell it (in the system prompt) how/when to use them.
+        const solarOn = solarToolsAvailable();
+        const system = solarOn
+          ? { stable: baseSystem.stable + SOLAR_SYSTEM_NOTE, volatile: baseSystem.volatile }
+          : baseSystem;
         const text = anthropicConfigured()
-          ? await chatReply(system, modelTurns)
+          ? await chatReply(
+              system,
+              modelTurns,
+              undefined,
+              solarOn ? { tools: SOLAR_TOOLS, runTool: executeSolarTool } : undefined,
+            )
           : offlineChat({ question: lastUser.content, audience, entries });
 
         // Guarantee the client's mandated opening line, even if the model omits it.
@@ -949,6 +979,54 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         if (err instanceof GmailAuthError) return reply.code(409).send({ error: 'gmail_not_connected' });
         req.log.error({ err }, 'gmail reply failed');
         return reply.code(502).send({ error: 'gmail_reply_failed', message: (err as Error).message });
+      }
+    },
+  );
+
+  // ── Solar monitoring (multi-provider: Deye, GoodWe, …) ──────────────────────
+  // Shared error mapping: not-configured → 503, anything else → 502. All provider
+  // credentials (app secrets, passwords) stay strictly server-side.
+  const solarFail = (reply: FastifyReply, err: unknown) => {
+    if (err instanceof ProviderNotConfiguredError) return reply.code(503).send({ error: 'provider_not_configured' });
+    const code = err instanceof ProviderError ? err.code : undefined;
+    return reply.code(502).send({ error: 'provider_request_failed', code, message: (err as Error).message });
+  };
+
+  // The list of providers and whether each is connected (no secrets returned).
+  app.get('/api/solar/providers', { preHandler: requirePermission('view') }, async () => ({
+    providers: PROVIDERS.map((p) => ({ id: p.id, name: p.name, configured: p.configured() })),
+  }));
+
+  // Aggregated overview: every station across every configured provider, queried
+  // in parallel and resiliently (one retry + last-good fallback per provider), so
+  // a transient blip on one platform neither blanks it nor flashes an error.
+  app.get('/api/solar/overview', { preHandler: requirePermission('view') }, async () => {
+    const { stations, errors, stale } = await aggregateStations();
+    return { stations, errors, stale, providerCount: configuredProviders().length };
+  });
+
+  // One station's detail bundle (realtime, devices, alerts, today's power curve)
+  // from a specific provider.
+  app.get<{ Params: { provider: string; id: string } }>(
+    '/api/solar/:provider/stations/:id/detail',
+    { preHandler: requirePermission('view') },
+    async (req, reply) => {
+      const provider = getProvider(req.params.provider);
+      if (!provider) return reply.code(404).send({ error: 'unknown_provider' });
+      if (!provider.configured()) return reply.code(503).send({ error: 'provider_not_configured' });
+      try {
+        let detail;
+        try {
+          detail = await provider.stationDetail(req.params.id);
+        } catch {
+          // One retry — covers a transient upstream blip or a just-expired token.
+          await new Promise((r) => setTimeout(r, 400));
+          detail = await provider.stationDetail(req.params.id);
+        }
+        return { provider: provider.id, stationId: req.params.id, ...detail };
+      } catch (err) {
+        req.log.error({ err, provider: provider.id }, 'solar station detail failed');
+        return solarFail(reply, err);
       }
     },
   );

@@ -92,7 +92,96 @@ export const env = {
     'GOOGLE_REDIRECT_URI',
     `http://localhost:${optional('PORT', '8080')}/api/oauth/google/callback`,
   ),
+
+  // ─── Deye Cloud (solar monitoring) ────────────────────────────────────────
+  // Developer-portal app credentials + the Deye Cloud account that owns the
+  // stations. The password is stored in plain text here but sent SHA-256-hashed
+  // (the API requires the hash). Base URL is regional — EU or US. Leave blank to
+  // show the Solar tab as "not configured".
+  deyeAppId: process.env.DEYE_APP_ID ?? '',
+  deyeAppSecret: process.env.DEYE_APP_SECRET ?? '',
+  deyeEmail: process.env.DEYE_EMAIL ?? '',
+  deyePassword: process.env.DEYE_PASSWORD ?? '',
+  deyeBaseUrl: (optional('DEYE_BASE_URL', 'https://eu1-developer.deyecloud.com')).replace(/\/+$/, ''),
+  // Optional: select a business-member/company login when the account has one.
+  deyeCompanyId: process.env.DEYE_COMPANY_ID ?? '',
+
+  // ─── GoodWe SEMS (solar monitoring provider) ──────────────────────────────
+  // SEMS Portal account login. No app key needed. Region picks the SEMS host
+  // (au / eu / us / global). Leave blank to show the provider as not connected.
+  goodweEmail: process.env.GOODWE_EMAIL ?? '',
+  goodwePassword: process.env.GOODWE_PASSWORD ?? '',
+  goodweRegion: optional('GOODWE_REGION', 'global'),
+
+  // ─── Solarman Business (same engine as Deye) ──────────────────────────────
+  solarmanAppId: process.env.SOLARMAN_APP_ID ?? '',
+  solarmanAppSecret: process.env.SOLARMAN_APP_SECRET ?? '',
+  solarmanEmail: process.env.SOLARMAN_EMAIL ?? '',
+  solarmanPassword: process.env.SOLARMAN_PASSWORD ?? '',
+  solarmanOrgId: process.env.SOLARMAN_ORG_ID ?? '',
+  solarmanBaseUrl: optional('SOLARMAN_BASE_URL', 'https://globalapi.solarmanpv.com').replace(/\/+$/, ''),
+
+  // ─── SolisCloud (KeyId/KeySecret, HMAC-SHA1) ──────────────────────────────
+  solisKeyId: process.env.SOLIS_KEY_ID ?? '',
+  solisKeySecret: process.env.SOLIS_KEY_SECRET ?? '',
+  solisBaseUrl: optional('SOLIS_BASE_URL', 'https://www.soliscloud.com:13333').replace(/\/+$/, ''),
+
+  // ─── Growatt (OpenAPI v1 token) ───────────────────────────────────────────
+  growattToken: process.env.GROWATT_TOKEN ?? '',
+  growattBaseUrl: optional('GROWATT_BASE_URL', 'https://openapi.growatt.com').replace(/\/+$/, ''),
+
+  // ─── Sungrow iSolarCloud (appkey + x-access-key + account) ────────────────
+  sungrowAppKey: process.env.SUNGROW_APP_KEY ?? '',
+  sungrowSecretKey: process.env.SUNGROW_SECRET_KEY ?? '',
+  sungrowEmail: process.env.SUNGROW_EMAIL ?? '',
+  sungrowPassword: process.env.SUNGROW_PASSWORD ?? '',
+  sungrowBaseUrl: optional('SUNGROW_BASE_URL', 'https://gateway.isolarcloud.com').replace(/\/+$/, ''),
+
+  // ─── Dyness (App ID/Secret, HmacSHA1) — endpoints unverified ──────────────
+  dynessAppId: process.env.DYNESS_APP_ID ?? '',
+  dynessAppSecret: process.env.DYNESS_APP_SECRET ?? '',
+  dynessBaseUrl: optional('DYNESS_BASE_URL', 'https://ems.dyness.com').replace(/\/+$/, ''),
+
+  // ─── Elekeeper / SAJ eSolar (App ID/Secret, token) — endpoints unverified ─
+  elekeeperAppId: process.env.ELEKEEPER_APP_ID ?? '',
+  elekeeperAppSecret: process.env.ELEKEEPER_APP_SECRET ?? '',
+  elekeeperBaseUrl: optional('ELEKEEPER_BASE_URL', 'https://intl-developer.saj-electric.com').replace(/\/+$/, ''),
+
+  // ─── WHES / ECOS Hub — no public API mapped yet ───────────────────────────
+  whesBaseUrl: (process.env.WHES_BASE_URL ?? '').replace(/\/+$/, ''),
 };
+
+/** True once Deye Cloud credentials are configured — gates the Deye provider. */
+export function deyeConfigured(): boolean {
+  return Boolean(env.deyeAppId && env.deyeAppSecret && env.deyeEmail && env.deyePassword);
+}
+
+/** True once GoodWe SEMS credentials are configured — gates the GoodWe provider. */
+export function goodweConfigured(): boolean {
+  return Boolean(env.goodweEmail && env.goodwePassword);
+}
+
+export function solarmanConfigured(): boolean {
+  return Boolean(env.solarmanAppId && env.solarmanAppSecret && env.solarmanEmail && env.solarmanPassword);
+}
+export function solisConfigured(): boolean {
+  return Boolean(env.solisKeyId && env.solisKeySecret);
+}
+export function growattConfigured(): boolean {
+  return Boolean(env.growattToken);
+}
+export function sungrowConfigured(): boolean {
+  return Boolean(env.sungrowAppKey && env.sungrowSecretKey && env.sungrowEmail && env.sungrowPassword);
+}
+export function dynessConfigured(): boolean {
+  return Boolean(env.dynessAppId && env.dynessAppSecret);
+}
+export function elekeeperConfigured(): boolean {
+  return Boolean(env.elekeeperAppId && env.elekeeperAppSecret);
+}
+export function whesConfigured(): boolean {
+  return Boolean(env.whesBaseUrl);
+}
 
 /** True once a Google OAuth client is configured — gates the connect buttons. */
 export function googleOAuthConfigured(): boolean {

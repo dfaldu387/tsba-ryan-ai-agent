@@ -14,3 +14,9 @@ packages/shared/dist/
 # AI token-usage log (runtime data)
 data/
 *.jsonl
+
+# Credential / login files (never commit secrets)
+solar-monitoring-platform-login-details.txt
+*login-details*.txt
+*credentials*.txt
+*.secrets
