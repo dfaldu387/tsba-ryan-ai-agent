@@ -361,3 +361,92 @@ export function resyncAll(): Promise<{ folders: FolderSyncResult[] }> {
 export function removeFolderSource(id: string, purge: boolean): Promise<{ ok: true }> {
   return request<{ ok: true }>(`/api/drive/folders/${id}${purge ? '?purge=1' : ''}`, { method: 'DELETE' });
 }
+
+// ─── Solar monitoring (multi-provider: Deye, GoodWe, …) ─────────────────────
+export type StationStatus = 'online' | 'partial' | 'offline' | 'unknown';
+
+export interface SolarStation {
+  id: string;
+  provider: string;
+  name: string;
+  status: StationStatus;
+  currentPowerW?: number;
+  dailyEnergyKwh?: number;
+  monthlyEnergyKwh?: number;
+  totalEnergyKwh?: number;
+  capacityKw?: number;
+  batterySoc?: number;
+  location?: string;
+  lastUpdate?: number;
+}
+
+export interface SolarProviderInfo {
+  id: string;
+  name: string;
+  configured: boolean;
+}
+
+export interface SolarOverview {
+  stations: SolarStation[];
+  errors: { provider: string; name: string; error: string }[];
+  providerCount: number;
+}
+
+export interface SolarDevice {
+  sn: string;
+  type?: string;
+  online?: boolean;
+}
+
+export interface SolarAlert {
+  id: string;
+  name: string;
+  code?: string;
+  deviceSn?: string;
+  start?: number;
+  level?: string;
+}
+
+export interface SolarPowerPoint {
+  t: number;
+  powerW: number;
+}
+
+export interface SolarLatest {
+  currentPowerW?: number;
+  consumptionPowerW?: number;
+  gridPowerW?: number;
+  batteryPowerW?: number;
+  batterySoc?: number;
+  dailyEnergyKwh?: number;
+  monthlyEnergyKwh?: number;
+  totalEnergyKwh?: number;
+  lastUpdate?: number;
+}
+
+export interface SolarInfoItem {
+  label: string;
+  value: string;
+}
+
+export interface SolarStationDetail {
+  provider: string;
+  stationId: string;
+  latest: SolarLatest | null;
+  devices: SolarDevice[];
+  alerts: SolarAlert[];
+  power: SolarPowerPoint[];
+  info: SolarInfoItem[];
+}
+
+export function getSolarProviders(): Promise<{ providers: SolarProviderInfo[] }> {
+  return request<{ providers: SolarProviderInfo[] }>('/api/solar/providers');
+}
+
+export function getSolarOverview(): Promise<SolarOverview> {
+  return request<SolarOverview>('/api/solar/overview');
+}
+
+export function getSolarStationDetail(provider: string, id: string): Promise<SolarStationDetail> {
+  return request<SolarStationDetail>(`/api/solar/${encodeURIComponent(provider)}/stations/${encodeURIComponent(id)}/detail`);
+}

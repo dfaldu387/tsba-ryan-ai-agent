@@ -74,39 +74,87 @@ export function buildUserContent(text: string, attachments: ChatAttachment[]): A
  * and is steered entirely by the caller-supplied system prompt (which carries
  * the grounding rules + retrieved knowledge).
  */
+export interface ChatTools {
+  tools: Anthropic.Tool[];
+  /** Executes a tool call and returns a JSON-able result. */
+  runTool: (name: string, input: Record<string, unknown>) => Promise<unknown>;
+}
+
 export async function chatReply(
   system: { stable: string; volatile: string },
   turns: ChatTurn[],
   signal?: AbortSignal,
+  toolset?: ChatTools,
 ): Promise<string> {
   if (!client) throw new Error('ANTHROPIC_API_KEY is not set on the server');
 
-  const message = await client.messages.create(
-    {
-      model: env.anthropicModel,
-      // Headroom so a complete answer with a short step list is never cut off
-      // mid-sentence (replies are still kept brief by the prompt).
-      max_tokens: 800,
-      // Cache the stable behaviour block; the volatile KNOWLEDGE follows it and
-      // is not cached. Same content as before — just a cache breakpoint between.
-      system: [
-        { type: 'text', text: system.stable, cache_control: { type: 'ephemeral' } },
-        { type: 'text', text: system.volatile },
-      ],
-      messages: turns.map((t) => ({ role: t.role, content: t.content })),
-    },
-    { signal },
-  );
-  recordFromUsage('voice_chat', env.anthropicModel, message.usage);
+  // Cache the stable behaviour block (reused across turns → fewer input tokens);
+  // the volatile KNOWLEDGE follows it and is not cached. Empty blocks are dropped
+  // (the API rejects empty text blocks).
+  const systemBlocks: Anthropic.Messages.TextBlockParam[] = [
+    { type: 'text', text: system.stable, cache_control: { type: 'ephemeral' } },
+    ...(system.volatile.trim() ? [{ type: 'text' as const, text: system.volatile }] : []),
+  ];
+  const messages: Anthropic.Messages.MessageParam[] = turns.map((t) => ({ role: t.role, content: t.content }));
 
-  const text = message.content
-    .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-    .map((b) => b.text)
-    .join('\n')
-    .trim();
+  // Cache the tool definitions too (mark the last one) so they aren't re-billed
+  // as input on every turn of the tool loop / conversation.
+  const tools =
+    toolset && toolset.tools.length
+      ? toolset.tools.map((t, i, arr) =>
+          i === arr.length - 1 ? { ...t, cache_control: { type: 'ephemeral' as const } } : t,
+        )
+      : undefined;
 
-  if (!text) throw new Error('Model returned an empty reply');
-  return text;
+  // Agentic loop: when tools are provided, let the model call them (to read live
+  // data) and feed results back until it produces a final text answer. Bounded
+  // so a misbehaving loop can't run away.
+  const MAX_TURNS = 5;
+  for (let i = 0; i < MAX_TURNS; i++) {
+    const message = await client.messages.create(
+      {
+        model: env.anthropicModel,
+        max_tokens: 800,
+        system: systemBlocks,
+        messages,
+        ...(tools ? { tools } : {}),
+      },
+      { signal },
+    );
+    recordFromUsage('voice_chat', env.anthropicModel, message.usage);
+
+    if (message.stop_reason === 'tool_use' && toolset) {
+      messages.push({ role: 'assistant', content: message.content });
+      const results: Anthropic.Messages.ToolResultBlockParam[] = [];
+      for (const block of message.content) {
+        if (block.type !== 'tool_use') continue;
+        let result: unknown;
+        try {
+          result = await toolset.runTool(block.name, (block.input ?? {}) as Record<string, unknown>);
+        } catch (err) {
+          result = { error: (err as Error).message };
+        }
+        results.push({
+          type: 'tool_result',
+          tool_use_id: block.id,
+          // Cap payload size so a huge fleet can't blow the context budget.
+          content: JSON.stringify(result).slice(0, 12000),
+        });
+      }
+      messages.push({ role: 'user', content: results });
+      continue;
+    }
+
+    const text = message.content
+      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n')
+      .trim();
+    if (text) return text;
+    // No text and not a tool call → nothing more to do.
+    break;
+  }
+  throw new Error('Model returned an empty reply');
 }
 
 /**
