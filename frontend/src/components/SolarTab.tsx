@@ -499,7 +499,13 @@ GOODWE_REGION=au       # au | eu | us | global`}</pre>
           <span className="eyebrow">{summary.count} total · {summary.online} online</span>
         </div>
 
-        {shown.length === 0 && <p className="solar-empty">No stations found on the connected account(s).</p>}
+        {shown.length === 0 && (
+          <p className="solar-empty">
+            {filter === 'all'
+              ? 'No stations found on the connected account(s).'
+              : `${providerName(filter)} is connected, but this account has no plants yet.`}
+          </p>
+        )}
 
         {shown.length > 0 && (
           <div className="solar-grid">

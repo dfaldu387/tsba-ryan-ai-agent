@@ -22,6 +22,7 @@ import {
   getProvider,
 } from '../providers/index.js';
 import { SOLAR_TOOLS, executeSolarTool, solarToolsAvailable } from '../solar-tools.js';
+import { getSolarAlerts } from '../solar-alerts.js';
 
 // Appended to the chat system prompt when a monitoring platform is connected, so
 // the agent knows it can read live plant data (and must not invent figures).
@@ -1035,6 +1036,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const { stations, errors, stale } = await aggregateStations();
     return { stations, errors, stale, providerCount: configuredProviders().length };
   });
+
+  // Fleet health alerts for the header notification panel: offline/partial
+  // plants, disconnected devices and active faults across all platforms. The
+  // underlying fleet-wide detail scan is cached (~2 min), so this stays cheap
+  // even when several admins poll it.
+  app.get('/api/solar/alerts', { preHandler: requirePermission('view') }, async () => getSolarAlerts());
 
   // One station's detail bundle (realtime, devices, alerts, today's power curve)
   // from a specific provider.

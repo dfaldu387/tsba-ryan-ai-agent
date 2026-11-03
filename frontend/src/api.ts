@@ -439,8 +439,33 @@ export interface SolarStationDetail {
   info: SolarInfoItem[];
 }
 
+export type SolarAlertSeverity = 'offline' | 'partial' | 'fault' | 'alert' | 'device';
+
+export interface SolarMonitorAlert {
+  id: string;
+  severity: SolarAlertSeverity;
+  provider: string;
+  plant: string;
+  plantId: string;
+  title: string;
+  detail?: string;
+  deviceSn?: string;
+  at?: number;
+}
+
+export interface SolarAlertsResult {
+  alerts: SolarMonitorAlert[];
+  generatedAt: number;
+  scannedPlants: number;
+  errors: { provider: string; name: string; error: string }[];
+}
+
 export function getSolarProviders(): Promise<{ providers: SolarProviderInfo[] }> {
   return request<{ providers: SolarProviderInfo[] }>('/api/solar/providers');
+}
+
+export function getSolarAlerts(): Promise<SolarAlertsResult> {
+  return request<SolarAlertsResult>('/api/solar/alerts');
 }
 
 export function getSolarOverview(): Promise<SolarOverview> {
