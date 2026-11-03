@@ -474,6 +474,10 @@ a.doc-title { color: var(--accent-strong); }
 .notif-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; background: var(--accent); }
 .notif-dot.sent, .notif-dot.team { background: #2e9e6b; }
 .notif-dot.rejected { background: var(--danger, #d64545); }
+/* Monitoring-alert severities */
+.notif-dot.alert-offline { background: var(--danger, #d64545); }
+.notif-dot.alert-partial, .notif-dot.alert-fault, .notif-dot.alert-alert { background: #e8a33d; }
+.notif-dot.alert-device { background: #d67c2c; }
 .notif-item-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .notif-item-q { font-size: 13px; font-weight: 600; color: var(--ink); line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .notif-item-meta { font-size: 11.5px; color: var(--muted); text-transform: capitalize; }

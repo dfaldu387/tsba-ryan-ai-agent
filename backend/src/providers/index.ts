@@ -2,6 +2,12 @@ import type { NormalizedStation, SolarProvider } from './types.js';
 import { deyeProvider } from './deye-provider.js';
 import { goodweProvider } from './goodwe.js';
 import { solarmanProvider } from './solarman.js';
+import { solarmanScraperProvider } from './scraper/solarman-scraper.js';
+import { solisScraperProvider } from './scraper/solis-scraper.js';
+import { elekeeperScraperProvider } from './scraper/elekeeper-scraper.js';
+import { whesScraperProvider } from './scraper/whes-scraper.js';
+import { dynessScraperProvider } from './scraper/dyness-scraper.js';
+import { sigenScraperProvider } from './scraper/sigen-scraper.js';
 import { solisProvider } from './solis.js';
 import { growattProvider } from './growatt.js';
 import { sungrowProvider } from './sungrow.js';
@@ -9,17 +15,34 @@ import { dynessProvider } from './dyness.js';
 import { elekeeperProvider } from './elekeeper.js';
 import { whesProvider } from './whes.js';
 
+/**
+ * One platform served by two backends: prefer the API provider when its
+ * credentials are present, else fall back to the portal scraper. Same id/name,
+ * so the UI, agent and alerts treat it as a single platform.
+ */
+function withFallback(primary: SolarProvider, secondary: SolarProvider): SolarProvider {
+  const active = () => (primary.configured() ? primary : secondary);
+  return {
+    id: primary.id,
+    name: primary.name,
+    configured: () => primary.configured() || secondary.configured(),
+    listStations: () => active().listStations(),
+    stationDetail: (id) => active().stationDetail(id),
+  };
+}
+
 /** All known providers, in display order. Add new platforms here. */
 export const PROVIDERS: SolarProvider[] = [
   deyeProvider,
-  solarmanProvider,
+  withFallback(solarmanProvider, solarmanScraperProvider),
   goodweProvider,
-  solisProvider,
+  withFallback(solisProvider, solisScraperProvider),
   growattProvider,
   sungrowProvider,
-  dynessProvider,
-  elekeeperProvider,
-  whesProvider,
+  withFallback(dynessProvider, dynessScraperProvider),
+  withFallback(elekeeperProvider, elekeeperScraperProvider),
+  withFallback(whesProvider, whesScraperProvider),
+  sigenScraperProvider,
 ];
 
 export function getProvider(id: string): SolarProvider | undefined {

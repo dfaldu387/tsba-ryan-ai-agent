@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Draft } from '@tsba/shared';
-import { AuthError, listDrafts } from '../api';
+import { AuthError, getSolarAlerts, listDrafts, type SolarMonitorAlert } from '../api';
 
 // A header notification panel: surfaces replies awaiting approval (and recent
 // activity) so an admin sees what needs attention without opening every tab.
@@ -22,6 +22,7 @@ function relativeTime(iso: string): string {
 
 const POLL_MS = 30_000;
 const SEEN_KEY = 'tsba.notifications.seen';
+const SEEN_ALERTS_KEY = 'tsba.notifications.seenAlerts';
 
 function loadSeenCount(): number {
   try {
@@ -32,16 +33,36 @@ function loadSeenCount(): number {
   }
 }
 
+function loadSeenAlerts(): Set<string> {
+  try {
+    const raw = localStorage.getItem(SEEN_ALERTS_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return new Set<string>(Array.isArray(arr) ? arr : []);
+  } catch {
+    return new Set<string>();
+  }
+}
+
+const SEVERITY_LABEL: Record<SolarMonitorAlert['severity'], string> = {
+  offline: 'Plant offline',
+  partial: 'Plant issue',
+  fault: 'Plant fault',
+  alert: 'Active fault',
+  device: 'Device offline',
+};
+
 export function NotificationBell({
   onNavigate,
   onAuthError,
 }: {
-  onNavigate: () => void;
+  onNavigate: (section: 'drafts' | 'solar') => void;
   onAuthError: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [drafts, setDrafts] = useState<Draft[]>([]);
+  const [alerts, setAlerts] = useState<SolarMonitorAlert[]>([]);
   const [seenCount, setSeenCount] = useState<number>(loadSeenCount);
+  const [seenAlerts, setSeenAlerts] = useState<Set<string>>(loadSeenAlerts);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const refresh = () => {
@@ -50,6 +71,11 @@ export function NotificationBell({
       .catch((err) => {
         if (err instanceof AuthError) onAuthError();
       });
+    // Monitoring alerts are best-effort — a solar-platform hiccup must never
+    // break the (more important) approvals panel.
+    getSolarAlerts()
+      .then((r) => setAlerts(r.alerts))
+      .catch(() => {});
   };
 
   useEffect(() => {
@@ -75,13 +101,19 @@ export function NotificationBell({
     .sort((a, b) => (b.decided_at ?? '').localeCompare(a.decided_at ?? ''))
     .slice(0, 5);
 
-  // Badge counts pending items the user hasn't acknowledged by opening the panel.
-  const unread = Math.max(0, pending.length - seenCount);
+  // Badge counts pending approvals + monitoring alerts the user hasn't yet
+  // acknowledged by opening the panel. Alerts are tracked by id (their set
+  // changes as issues resolve/appear), drafts by count.
+  const unreadAlerts = alerts.filter((a) => !seenAlerts.has(a.id)).length;
+  const unread = Math.max(0, pending.length - seenCount) + unreadAlerts;
 
   const markSeen = () => {
     setSeenCount(pending.length);
+    const ids = alerts.map((a) => a.id);
+    setSeenAlerts(new Set(ids));
     try {
       localStorage.setItem(SEEN_KEY, String(pending.length));
+      localStorage.setItem(SEEN_ALERTS_KEY, JSON.stringify(ids));
     } catch {
       /* ignore */
     }
@@ -131,6 +163,33 @@ export function NotificationBell({
               </button>
             </div>
 
+            {alerts.length > 0 && (
+              <>
+                <div className="notif-section-title">Monitoring alerts ({alerts.length})</div>
+                {alerts.slice(0, 8).map((a) => (
+                  <button
+                    key={a.id}
+                    type="button"
+                    className="notif-item"
+                    role="menuitem"
+                    onClick={() => {
+                      onNavigate('solar');
+                      setOpen(false);
+                    }}
+                  >
+                    <span className={`notif-dot alert-${a.severity}`} aria-hidden="true" />
+                    <span className="notif-item-body">
+                      <span className="notif-item-q">{a.title}</span>
+                      <span className="notif-item-meta">
+                        {SEVERITY_LABEL[a.severity]} · {a.provider}
+                        {a.at ? ` · ${relativeTime(new Date(a.at * 1000).toISOString())}` : ''}
+                      </span>
+                    </span>
+                  </button>
+                ))}
+              </>
+            )}
+
             <div className="notif-section-title">Awaiting approval ({pending.length})</div>
             {pending.length === 0 ? (
               <p className="notif-empty">Nothing waiting — you&rsquo;re all caught up.</p>
@@ -142,7 +201,7 @@ export function NotificationBell({
                   className="notif-item"
                   role="menuitem"
                   onClick={() => {
-                    onNavigate();
+                    onNavigate('drafts');
                     setOpen(false);
                   }}
                 >

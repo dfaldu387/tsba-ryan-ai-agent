@@ -325,7 +325,7 @@ export function App() {
 
           <div className="head-right">
             {hasPermission(user.role, 'view') && (
-              <NotificationBell onNavigate={() => setSection('drafts')} onAuthError={onAuthError} />
+              <NotificationBell onNavigate={(section) => setSection(section)} onAuthError={onAuthError} />
             )}
             <div className="profile-menu">
               <button

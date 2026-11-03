@@ -83,6 +83,28 @@ export interface NormalizedDetail {
   info: StationInfoItem[];
 }
 
+/** Severity of a monitoring notification, most to least severe. */
+export type SolarAlertSeverity = 'offline' | 'partial' | 'fault' | 'alert' | 'device';
+
+/**
+ * A single health issue surfaced in the header notification panel: a plant that
+ * is offline/partial, an individual device that is disconnected, or a provider-
+ * reported active fault. `id` is stable across scans so the UI can de-dupe and
+ * track which alerts have been seen.
+ */
+export interface SolarMonitorAlert {
+  id: string;
+  severity: SolarAlertSeverity;
+  provider: string;
+  plant: string;
+  plantId: string;
+  title: string;
+  detail?: string;
+  deviceSn?: string;
+  /** Epoch seconds, when known (e.g. a fault's start time). */
+  at?: number;
+}
+
 export interface SolarProvider {
   /** Stable slug used in URLs, e.g. 'deye', 'goodwe'. */
   id: string;

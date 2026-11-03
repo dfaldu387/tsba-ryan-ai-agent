@@ -10,6 +10,9 @@
     "start": "node dist/index.js",
     "migrate": "tsx src/scripts/migrate.ts",
     "ingest": "tsx src/scripts/ingest.ts",
+    "portal-login": "tsx src/scripts/portal-login.ts",
+    "portal-chrome": "tsx src/scripts/portal-chrome.ts",
+    "portal-capture": "tsx src/scripts/portal-capture.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
@@ -22,7 +25,8 @@
     "mammoth": "^1.8.0",
     "pdf-parse": "^1.1.1",
     "pg": "^8.13.1",
-    "pg-boss": "^10.1.5"
+    "pg-boss": "^10.1.5",
+    "playwright": "^1.64.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.1",

@@ -215,6 +215,31 @@ function mapStatus(status?: number): StationStatus {
   return 'unknown';
 }
 
+// iSolarCloud returns device_type as a numeric code and type_name in Chinese.
+// Normalise both to the English labels the UI/agent use (and that the
+// devicesByType breakdown groups on), so a Sungrow plant's devices read as
+// "Battery / Inverter / Logger" instead of "43 / 14 / 22".
+const SUNGROW_DEVICE_TYPE: Record<string, string> = {
+  '1': 'Inverter',
+  '11': 'Inverter',
+  '14': 'Inverter', // energy-storage (hybrid) inverter
+  '22': 'Logger', // communication module
+  '43': 'Battery',
+  '35': 'Meter',
+};
+const SUNGROW_DEVICE_TYPE_CN: Record<string, string> = {
+  电池: 'Battery',
+  逆变器: 'Inverter',
+  储能逆变器: 'Inverter',
+  通信模块: 'Logger',
+  电表: 'Meter',
+};
+function sungrowDeviceType(code?: number | string, name?: string): string | undefined {
+  if (code != null && SUNGROW_DEVICE_TYPE[String(code)]) return SUNGROW_DEVICE_TYPE[String(code)];
+  if (name && SUNGROW_DEVICE_TYPE_CN[name]) return SUNGROW_DEVICE_TYPE_CN[name];
+  return name || (code != null ? String(code) : undefined);
+}
+
 function toStation(s: SungrowStation): NormalizedStation {
   return {
     id: String(s.ps_id),
@@ -241,7 +266,7 @@ export const sungrowProvider: SolarProvider = {
   async stationDetail(stationId: string): Promise<NormalizedDetail> {
     const [list, devices] = await Promise.all([
       post<{ pageList?: SungrowStation[] }>('/openapi/getPowerStationList', { curPage: 1, size: 100 }).catch(() => null),
-      post<{ pageList?: { device_sn?: string; sn?: string; device_type?: number | string; device_name?: string; dev_status?: number | string; device_state?: number | string }[] }>(
+      post<{ pageList?: { device_sn?: string; sn?: string; device_type?: number | string; device_type_name?: string; type_name?: string; device_name?: string; dev_status?: number | string; device_state?: number | string }[] }>(
         '/openapi/getDeviceList',
         { ps_id: stationId, curPage: 1, size: 100 },
       ).catch(() => null),
@@ -258,7 +283,7 @@ export const sungrowProvider: SolarProvider = {
         : null,
       devices: (devices?.pageList ?? []).map((d, i) => ({
         sn: d.device_sn || d.sn || d.device_name || String(i),
-        type: d.device_type != null ? String(d.device_type) : undefined,
+        type: sungrowDeviceType(d.device_type, d.device_type_name ?? d.type_name),
         online: String(d.dev_status ?? d.device_state ?? '') === '1',
       })),
       alerts: [],

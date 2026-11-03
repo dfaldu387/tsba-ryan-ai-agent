@@ -20,3 +20,9 @@ solar-monitoring-platform-login-details.txt
 *login-details*.txt
 *credentials*.txt
 *.secrets
+
+# Scraper portal login sessions (live session cookies — never commit)
+.portal-sessions/
+backend/.portal-sessions/
+.portal-chrome-profile/
+backend/.portal-chrome-profile/
