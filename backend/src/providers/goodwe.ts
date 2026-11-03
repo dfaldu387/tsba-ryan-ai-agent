@@ -127,9 +127,14 @@ interface SemsStation {
 }
 
 function mapStatus(status?: number): StationStatus {
+  // SEMS status codes: 1 = generating/normal, 0 = waiting (standby — connected
+  // but not producing, e.g. night / heavy cloud), 2 = fault/alarm, -1 = offline
+  // (not communicating). Mapping 0 → offline (the previous behaviour) falsely
+  // marked every healthy plant "Offline" overnight, so 0 gets its own state.
   if (status === 1) return 'online';
+  if (status === 0) return 'waiting';
   if (status === 2) return 'partial';
-  if (status === -1 || status === 0) return 'offline';
+  if (status === -1) return 'offline';
   return 'unknown';
 }
 
@@ -182,7 +187,10 @@ export const goodweProvider: SolarProvider = {
       const push = (label: string, v: string | number | undefined | null) => {
         if (v != null && v !== '') info.push({ label, value: String(v) });
       };
-      push('Status', s.status === 1 ? 'Online' : s.status === 2 ? 'Partial' : 'Offline');
+      push(
+        'Status',
+        s.status === 1 ? 'Online' : s.status === 0 ? 'Waiting' : s.status === 2 ? 'Partial' : 'Offline',
+      );
       push('Location', s.location);
       push(
         'Coordinates',

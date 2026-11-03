@@ -53,6 +53,7 @@ function buildInfo(s: DeyeStation): StationInfoItem[] {
 
 const STATUS_LABEL: Record<StationStatus, string> = {
   online: 'Online',
+  waiting: 'Waiting',
   partial: 'Partial',
   offline: 'Offline',
   unknown: 'Unknown',
@@ -131,7 +132,9 @@ export const deyeProvider: SolarProvider = {
       devices: devices.map((d) => ({
         sn: d.deviceSn || '',
         type: d.deviceType,
-        online: deviceOnline(d.deviceState),
+        // Deye's device endpoint reports online state in `connectStatus`
+        // (1 = online); `deviceState` is a fallback for other tenants.
+        online: deviceOnline(d.connectStatus ?? d.deviceState),
       })),
       alerts: alerts.map((a, i) => ({
         id: String(a.alertId ?? i),

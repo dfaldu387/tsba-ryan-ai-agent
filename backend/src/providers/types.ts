@@ -8,7 +8,10 @@
  * from.
  */
 
-export type StationStatus = 'online' | 'partial' | 'offline' | 'unknown';
+// 'waiting' = connected and healthy but not producing right now (standby, e.g.
+// night / no sun). It is deliberately distinct from 'offline' (not communicating)
+// so an idle plant isn't falsely alarmed as down.
+export type StationStatus = 'online' | 'waiting' | 'partial' | 'offline' | 'unknown';
 
 export interface NormalizedStation {
   /** Provider-local id, as a string (some platforms use UUIDs, some int64). */

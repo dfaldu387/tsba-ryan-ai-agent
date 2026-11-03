@@ -172,8 +172,15 @@ export interface DeyeStationLatest {
 export interface DeyeDevice {
   deviceSn?: string;
   deviceType?: string;
+  deviceId?: number;
   stationId?: number;
+  // The /v1.0/station/device endpoint reports online state as `connectStatus`
+  // (1 = online, 0 = offline), NOT `deviceState`. `deviceState` is kept as a
+  // fallback in case other Deye-engine tenants return it under that name.
+  connectStatus?: number | string;
   deviceState?: number | string;
+  /** Epoch seconds of the device's last data upload. */
+  collectionTime?: number;
 }
 
 export interface DeyeAlert {

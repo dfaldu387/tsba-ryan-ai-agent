@@ -363,7 +363,7 @@ export function removeFolderSource(id: string, purge: boolean): Promise<{ ok: tr
 }
 
 // ─── Solar monitoring (multi-provider: Deye, GoodWe, …) ─────────────────────
-export type StationStatus = 'online' | 'partial' | 'offline' | 'unknown';
+export type StationStatus = 'online' | 'waiting' | 'partial' | 'offline' | 'unknown';
 
 export interface SolarStation {
   id: string;
