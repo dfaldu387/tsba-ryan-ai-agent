@@ -30,8 +30,39 @@ const SOLAR_SYSTEM_NOTE = `
 ## Live solar monitoring
 This console monitors the organisation's solar fleet across several platforms (e.g. Deye, GoodWe, Sungrow). You can read it live with two tools:
 - get_solar_overview — every plant across all connected platforms: connected platform names, any unreachable platforms, counts (online/partial/offline), portfolio totals (daily energy, capacity), and per-plant status, current power, today's and total energy, and capacity.
-- get_station_detail — one plant by name: status, current power, today/month/total energy, battery SOC, capacity, location, devices (with online/offline state), active alerts/faults, and full plant attributes (coordinates, owner, grid type, commissioning/install dates, income, CO₂, timezone, …).
+- get_station_detail — one plant by name: status, current power, today/month/total energy, battery SOC, capacity, location, device count with a per-type breakdown (devicesByType — how many batteries/inverters/loggers), how many devices are offline, active alerts/faults, and full plant attributes (coordinates, owner, grid type, commissioning/install dates, income, CO₂, timezone, …).
 Use these whenever the user asks anything about a plant/system/site, the fleet, production, status, online/offline, batteries, devices/inverters, or faults — call the right tool and answer only from what it returns. Prefer get_solar_overview for fleet-wide or "which are offline" questions and get_station_detail for a named plant. When summarising, proactively flag offline, partial, or faulting plants and obvious anomalies (e.g. a plant reporting power while marked offline). Never invent numbers; if no plant matches, say so and list the available plant names. You may also explain how these monitoring platforms work in general.`;
+
+// Draft-specific monitoring note. Unlike the chat note it must (a) fit the draft's
+// JSON outcome format and (b) explicitly OVERRIDE draft RULE 5 ("hand over anything
+// needing live site data") — otherwise the draft agent escalates every plant
+// question instead of reading the live data it can now fetch itself.
+const SOLAR_DRAFT_NOTE = `
+
+## Live solar monitoring — you CAN read it yourself
+TSBA runs live solar monitoring across several platforms (e.g. Deye, GoodWe, Sungrow). You have two tools to read it live:
+- get_solar_overview — every plant: connected platforms, online/offline counts, portfolio totals, and per-plant status, current power, today's and total energy, and capacity.
+- get_station_detail — one plant by name: status, current power, today/month/total energy, battery SOC, capacity, location, device count with a per-type breakdown (devicesByType — how many batteries/inverters/loggers), how many devices are offline, active alerts/faults, and full plant attributes.
+
+This OVERRIDES RULE 5 and any "hand over anything needing live data" guidance FOR MONITORING DATA. When the question is about a plant/system/site, the fleet, production, status, online/offline, batteries, devices/inverters, battery SOC, or faults shown in monitoring: CALL the right tool and ANSWER from what it returns with outcome "answer". Do NOT hand it to the team, and do NOT ask the customer for the site address when you can look the plant up by name (prefer get_station_detail for a named plant).
+- Tool results are live facts you may state directly. They are NOT knowledge-base entries, so leave "sources" empty for any figure that came from monitoring, and say in note_for_ryan that those figures are live monitoring readings (name the plant).
+- Never invent numbers. If no plant matches the name, say so (you may list the available plant names) — only then consider "clarify"/"handover". Still use "handover" for things monitoring can't answer (a physical fault needing a site visit, or data not present in monitoring).`;
+
+// Generate an inbox auto-draft with the SAME live monitoring tools the chat/voice
+// agent has, so a ticket about a specific plant can be answered with live data —
+// not just the knowledge base. Falls back to a plain KB-only draft when no
+// monitoring platform is connected. Drafts are human-approved before sending.
+function draftReplyWithData(
+  prompt: { stable: string; volatile: string },
+  signal?: AbortSignal,
+): ReturnType<typeof draftReply> {
+  if (!solarToolsAvailable()) return draftReply(prompt, signal);
+  return draftReply(
+    { stable: prompt.stable + SOLAR_DRAFT_NOTE, volatile: prompt.volatile },
+    signal,
+    { tools: SOLAR_TOOLS, runTool: executeSolarTool },
+  );
+}
 import {
   anthropicConfigured,
   buildUserContent,
@@ -165,7 +196,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           // Use Claude when a key is set; otherwise fall back to an offline draft
           // composed from the retrieved knowledge so the preview still works.
           result = anthropicConfigured()
-            ? await draftReply(buildPrompt({ question, audience, channel, entries }))
+            ? await draftReplyWithData(buildPrompt({ question, audience, channel, entries }))
             : offlineDraft({ question, audience, channel, entries });
 
           // Resolve the cited ids into source cards (only ids we actually retrieved).
@@ -941,7 +972,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         } else {
           const entries = await storage.knowledge.retrieve(question, env.retrievalTopK, brand, detectModel(question));
           result = anthropicConfigured()
-            ? await draftReply(buildPrompt({ question, audience, channel, entries }))
+            ? await draftReplyWithData(buildPrompt({ question, audience, channel, entries }))
             : offlineDraft({ question, audience, channel, entries });
           const byId = new Map(entries.map((e) => [e.id, e]));
           sources = result.sources

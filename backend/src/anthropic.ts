@@ -305,35 +305,75 @@ export async function suggestStarters(context: string, signal?: AbortSignal): Pr
 export async function draftReply(
   prompt: { stable: string; volatile: string },
   signal?: AbortSignal,
+  toolset?: ChatTools,
 ): Promise<DraftResult> {
   if (!client) throw new Error('ANTHROPIC_API_KEY is not set on the server');
 
-  const message = await client.messages.create(
+  // Cache the tool definitions (mark the last one) so they aren't re-billed as
+  // input on every turn of the tool loop.
+  const tools =
+    toolset && toolset.tools.length
+      ? toolset.tools.map((t, i, arr) =>
+          i === arr.length - 1 ? { ...t, cache_control: { type: 'ephemeral' as const } } : t,
+        )
+      : undefined;
+
+  // The stable prefix (instructions + verified rules) is cached; the volatile
+  // suffix (ask context + retrieved datasheets + question) is not. Only a cache
+  // breakpoint is inserted, so repeat calls reuse the prefix at ~10% cost.
+  const messages: Anthropic.Messages.MessageParam[] = [
     {
-      model: env.anthropicModel,
-      max_tokens: 1200,
-      // The stable prefix (instructions + verified rules) is cached; the
-      // volatile suffix (ask context + retrieved datasheets + question) is not.
-      // Identical content to the old single string — only a cache breakpoint
-      // is inserted, so repeat calls reuse the prefix at ~10% cost.
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: prompt.stable, cache_control: { type: 'ephemeral' } },
-            { type: 'text', text: prompt.volatile },
-          ],
-        },
+      role: 'user',
+      content: [
+        { type: 'text', text: prompt.stable, cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: prompt.volatile },
       ],
     },
-    { signal },
-  );
-  recordFromUsage('draft', env.anthropicModel, message.usage);
+  ];
 
-  const text = message.content
-    .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-    .map((b) => b.text)
-    .join('\n');
+  // Agentic loop: when the draft agent is given live-data tools, let it read the
+  // monitoring platforms (same tools as the chat/voice agent) before composing
+  // the final JSON draft. Bounded so a misbehaving loop can't run away. Without
+  // tools this runs exactly once, preserving the original single-shot behaviour.
+  const MAX_TURNS = 5;
+  for (let i = 0; i < MAX_TURNS; i++) {
+    const message = await client.messages.create(
+      {
+        model: env.anthropicModel,
+        max_tokens: 1200,
+        messages,
+        ...(tools ? { tools } : {}),
+      },
+      { signal },
+    );
+    recordFromUsage('draft', env.anthropicModel, message.usage);
 
-  return coerceResult(extractJson(text));
+    if (message.stop_reason === 'tool_use' && toolset) {
+      messages.push({ role: 'assistant', content: message.content });
+      const results: Anthropic.Messages.ToolResultBlockParam[] = [];
+      for (const block of message.content) {
+        if (block.type !== 'tool_use') continue;
+        let result: unknown;
+        try {
+          result = await toolset.runTool(block.name, (block.input ?? {}) as Record<string, unknown>);
+        } catch (err) {
+          result = { error: (err as Error).message };
+        }
+        results.push({
+          type: 'tool_result',
+          tool_use_id: block.id,
+          content: JSON.stringify(result).slice(0, 12000),
+        });
+      }
+      messages.push({ role: 'user', content: results });
+      continue;
+    }
+
+    const text = message.content
+      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n');
+    return coerceResult(extractJson(text));
+  }
+  throw new Error('Model returned an empty draft');
 }

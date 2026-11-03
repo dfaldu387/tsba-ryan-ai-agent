@@ -54,6 +54,7 @@ function fmtClock(epochSec?: number): string {
 
 const STATUS_META: Record<StationStatus, { cls: string; label: string }> = {
   online: { cls: 'ok', label: 'Online' },
+  waiting: { cls: 'mid', label: 'Waiting' },
   partial: { cls: 'mid', label: 'Partial' },
   offline: { cls: 'flag', label: 'Offline' },
   unknown: { cls: 'muted', label: 'Unknown' },
