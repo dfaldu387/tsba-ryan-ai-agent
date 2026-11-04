@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   hasPermission,
   ROLE_LABELS,
@@ -155,14 +155,29 @@ const SECTIONS: Section[] = [
 ];
 const isSection = (v: unknown): v is Section => SECTIONS.includes(v as Section);
 
+// Clean URL paths: /solar, /energy, …; the dashboard lives at the root.
+function pathForSection(s: Section): string {
+  return s === 'dashboard' ? '/' : `/${s}`;
+}
+function sectionFromPath(pathname: string): Section | null {
+  const seg = pathname.replace(/^\/+/, '').split('/')[0];
+  if (!seg) return null; // root → let the caller decide (OAuth / last-section)
+  if (seg === 'admin') return 'dashboard'; // legacy alias
+  return isSection(seg) ? seg : null;
+}
+
 function initialSection(): Section {
   try {
     const params = new URLSearchParams(window.location.search);
     if (params.get('status')) return 'connections'; // returning from OAuth
+    // Clean path wins (e.g. /energy).
+    const fromPath = sectionFromPath(window.location.pathname);
+    if (fromPath) return fromPath;
+    // Back-compat: the old ?tab= links still work.
     const t = params.get('tab');
     if (t === 'admin') return 'dashboard';
     if (isSection(t)) return t;
-    // No explicit tab in the URL — restore the last section the user was on.
+    // No section in the URL — restore the last section the user was on.
     const saved = localStorage.getItem(SECTION_KEY);
     if (isSection(saved)) return saved;
   } catch {
@@ -240,6 +255,34 @@ export function App() {
       /* ignore */
     }
   }, [section]);
+
+  // Keep the URL path in sync with the active section (clean paths like /energy).
+  // First sync replaces (no history entry / strips a legacy ?tab=); later changes
+  // push, so browser back/forward moves between sections.
+  const didSyncUrl = useRef(false);
+  useEffect(() => {
+    if (!user) return;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      params.delete('tab');
+      const qs = params.toString();
+      const target = pathForSection(section) + (qs ? `?${qs}` : '');
+      if (window.location.pathname + window.location.search !== target) {
+        if (didSyncUrl.current) window.history.pushState({}, '', target);
+        else window.history.replaceState({}, '', target);
+      }
+      didSyncUrl.current = true;
+    } catch {
+      /* ignore */
+    }
+  }, [section, user]);
+
+  // Browser back/forward → switch section from the path.
+  useEffect(() => {
+    const onPop = () => setSection(sectionFromPath(window.location.pathname) ?? 'dashboard');
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
 
   // Close the profile menu on Escape.
   useEffect(() => {
