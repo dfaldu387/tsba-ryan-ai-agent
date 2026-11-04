@@ -42,15 +42,22 @@ export function createScraperProvider(cfg: ScraperConfig): SolarProvider {
   const ttl = cfg.ttlMs ?? 600_000;
 
   const fetchStations = (): Promise<NormalizedStation[]> =>
-    cached(`scraper:${cfg.id}:stations`, ttl, async () => {
-      try {
-        return await withSession(cfg.credKey, (page) => cfg.scrapeStations(page));
-      } catch (err) {
-        // SessionExpiredError and scrape errors both surface here; the message
-        // tells the operator to re-run portal-login/capture when the session lapsed.
-        throw new ProviderError(`${cfg.id}_scrape_failed: ${(err as Error).message}`);
-      }
-    });
+    cached(
+      `scraper:${cfg.id}:stations`,
+      ttl,
+      async () => {
+        try {
+          return await withSession(cfg.credKey, (page) => cfg.scrapeStations(page));
+        } catch (err) {
+          // SessionExpiredError and scrape errors both surface here; the message
+          // tells the operator to re-run portal-login/capture when the session lapsed.
+          throw new ProviderError(`${cfg.id}_scrape_failed: ${(err as Error).message}`);
+        }
+      },
+      // Serve the last good scrape instantly and refresh in the background, so a
+      // dashboard load never blocks ~10–20s on a re-scrape once warmed.
+      { swr: true },
+    );
 
   return {
     id: cfg.id,

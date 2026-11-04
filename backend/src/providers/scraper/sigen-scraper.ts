@@ -25,6 +25,9 @@ interface SigenStation {
   pvPowerGenerationDay?: number; // kWh today
   pvPowerGenerationTotal?: number; // kWh total
   ratedActivePower?: number; // kW (consistent capacity)
+  esChgDischargePower?: number | null; // kW — the portal's "Real-time Power" column
+  latitude?: number;
+  longitude?: number;
   pvCapacity?: number; // inconsistent units — not used for display
   batteryCapacity?: number; // kWh
   addr?: string;
@@ -54,6 +57,8 @@ function toStation(s: SigenStation): NormalizedStation {
     id: String(s.stationId),
     name: (s.stationName || s.stationShowName || String(s.stationId)).trim(),
     status: mapStatus(s.status),
+    // The portal's "Real-time Power" column is esChgDischargePower (kW → W).
+    currentPowerW: s.esChgDischargePower != null ? s.esChgDischargePower * 1000 : undefined,
     dailyEnergyKwh: s.pvPowerGenerationDay,
     totalEnergyKwh: s.pvPowerGenerationTotal,
     capacityKw: s.ratedActivePower,
@@ -76,6 +81,7 @@ function detailFromList(stationId: string): NormalizedDetail | null {
   };
   push('Status', mapStatus(s.status));
   push('Location', s.addr);
+  push('Real-time power', s.esChgDischargePower != null ? `${s.esChgDischargePower} kW` : undefined);
   push('Installed capacity', s.ratedActivePower != null ? `${s.ratedActivePower} kW` : undefined);
   push('Battery capacity', s.batteryCapacity != null ? `${s.batteryCapacity} kWh` : undefined);
   push('Today', s.pvPowerGenerationDay != null ? `${s.pvPowerGenerationDay} kWh` : undefined);
@@ -93,6 +99,7 @@ function detailFromList(stationId: string): NormalizedDetail | null {
   return {
     info,
     latest: {
+      currentPowerW: s.esChgDischargePower != null ? s.esChgDischargePower * 1000 : undefined,
       dailyEnergyKwh: s.pvPowerGenerationDay,
       totalEnergyKwh: s.pvPowerGenerationTotal,
     },

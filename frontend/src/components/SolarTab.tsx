@@ -60,6 +60,22 @@ const STATUS_META: Record<StationStatus, { cls: string; label: string }> = {
   unknown: { cls: 'muted', label: 'Unknown' },
 };
 
+/** Status chips render in this order, skipping any status with no stations. */
+const STATUS_ORDER: StationStatus[] = ['online', 'waiting', 'partial', 'offline', 'unknown'];
+
+type SortKey = 'default' | 'power' | 'daily' | 'capacity' | 'name';
+
+const SORT_OPTIONS: { value: SortKey; label: string }[] = [
+  { value: 'default', label: 'Default order' },
+  { value: 'power', label: 'Power (high → low)' },
+  { value: 'daily', label: 'Today’s energy (high → low)' },
+  { value: 'capacity', label: 'Capacity (high → low)' },
+  { value: 'name', label: 'Name (A → Z)' },
+];
+
+// Stable empty reference so provider-scoping memos don't re-run every render.
+const EMPTY_STATIONS: SolarStation[] = [];
+
 // ─── Intraday power chart (inline SVG) ───────────────────────────────────────
 
 function PowerChart({ points }: { points: SolarPowerPoint[] }) {
@@ -276,6 +292,9 @@ export function SolarTab({ onAuthError }: { onAuthError: () => void }) {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<string>('all');
+  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | StationStatus>('all');
+  const [sortBy, setSortBy] = useState<SortKey>('default');
 
   const [selected, setSelected] = useState<SolarStation | null>(null);
   const [detail, setDetail] = useState<SolarStationDetail | null>(null);
@@ -359,28 +378,73 @@ export function SolarTab({ onAuthError }: { onAuthError: () => void }) {
 
   const providerName = (id: string) => providers?.find((p) => p.id === id)?.name ?? id;
   const configured = providers?.filter((p) => p.configured) ?? [];
-  const stations = overview?.stations ?? [];
-  const shown = filter === 'all' ? stations : stations.filter((s) => s.provider === filter);
+  const stations = overview?.stations ?? EMPTY_STATIONS;
+
+  // Provider-scoped set: drives the portfolio KPI tiles and the filter counts.
+  const scoped = useMemo(
+    () => (filter === 'all' ? stations : stations.filter((s) => s.provider === filter)),
+    [stations, filter],
+  );
+
+  // Status chips — only for statuses that actually appear in the scoped set.
+  const statusCounts = useMemo(
+    () =>
+      STATUS_ORDER.map((status) => ({ status, count: scoped.filter((s) => s.status === status).length })).filter(
+        (x) => x.count > 0,
+      ),
+    [scoped],
+  );
+
+  // Displayed set: scoped + status filter + text search + sort.
+  const shown = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const list = scoped.filter((s) => {
+      if (statusFilter !== 'all' && s.status !== statusFilter) return false;
+      if (q && !`${s.name} ${s.location ?? ''}`.toLowerCase().includes(q)) return false;
+      return true;
+    });
+    const num = (v?: number) => (v == null || Number.isNaN(v) ? -Infinity : v);
+    const sorted = [...list];
+    switch (sortBy) {
+      case 'power':
+        sorted.sort((a, b) => num(b.currentPowerW) - num(a.currentPowerW));
+        break;
+      case 'daily':
+        sorted.sort((a, b) => num(b.dailyEnergyKwh) - num(a.dailyEnergyKwh));
+        break;
+      case 'capacity':
+        sorted.sort((a, b) => num(b.capacityKw) - num(a.capacityKw));
+        break;
+      case 'name':
+        sorted.sort((a, b) => a.name.localeCompare(b.name));
+        break;
+      default:
+        break;
+    }
+    return sorted;
+  }, [scoped, statusFilter, search, sortBy]);
+
+  const filtersActive = statusFilter !== 'all' || search.trim() !== '';
 
   const summary = useMemo(() => {
     const sum = (list: SolarStation[], f: (s: SolarStation) => number | undefined) =>
       list.reduce((acc, s) => acc + (f(s) ?? 0), 0);
     // Real-time power: exclude offline plants — they report stale/last-known
     // power, which the platform header leaves out of the live total.
-    const generating = shown.filter((s) => s.status !== 'offline');
+    const generating = scoped.filter((s) => s.status !== 'offline');
     // Installed capacity: exclude offline plants that never report power
     // (non-commissioned), matching the platform's installed-capacity figure.
-    const commissioned = shown.filter((s) => !(s.status === 'offline' && s.currentPowerW == null));
+    const commissioned = scoped.filter((s) => !(s.status === 'offline' && s.currentPowerW == null));
     return {
-      count: shown.length,
-      online: shown.filter((s) => s.status === 'online').length,
+      count: scoped.length,
+      online: scoped.filter((s) => s.status === 'online').length,
       power: sum(generating, (s) => s.currentPowerW),
-      daily: sum(shown, (s) => s.dailyEnergyKwh),
-      monthly: sum(shown, (s) => s.monthlyEnergyKwh),
-      total: sum(shown, (s) => s.totalEnergyKwh),
+      daily: sum(scoped, (s) => s.dailyEnergyKwh),
+      monthly: sum(scoped, (s) => s.monthlyEnergyKwh),
+      total: sum(scoped, (s) => s.totalEnergyKwh),
       capacity: sum(commissioned, (s) => s.capacityKw),
     };
-  }, [shown]);
+  }, [scoped]);
 
   // ── Nothing configured ──
   if (!loading && providers && configured.length === 0) {
@@ -496,14 +560,77 @@ GOODWE_REGION=au       # au | eu | us | global`}</pre>
       <section className="card">
         <div className="card-h">
           <h2>Stations</h2>
-          <span className="eyebrow">{summary.count} total · {summary.online} online</span>
+          <span className="eyebrow">
+            {filtersActive ? `${shown.length} of ${scoped.length}` : `${summary.count} total`} ·{' '}
+            {shown.filter((s) => s.status === 'online').length} online
+          </span>
         </div>
+
+        {/* Search · status · sort toolbar */}
+        {scoped.length > 0 && (
+          <div className="solar-toolbar">
+            <div className="solar-search">
+              <svg className="solar-search-ico" width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="2" />
+                <line x1="16.5" y1="16.5" x2="21" y2="21" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+              <input
+                type="search"
+                className="solar-search-input"
+                placeholder="Search by name or location…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                aria-label="Search stations"
+              />
+              {search && (
+                <button type="button" className="solar-search-clear" onClick={() => setSearch('')} aria-label="Clear search">
+                  ×
+                </button>
+              )}
+            </div>
+
+            {statusCounts.length > 1 && (
+              <div className="solar-status-chips">
+                <button
+                  type="button"
+                  className={`solar-chip sm ${statusFilter === 'all' ? 'active' : ''}`}
+                  onClick={() => setStatusFilter('all')}
+                >
+                  All ({scoped.length})
+                </button>
+                {statusCounts.map(({ status, count }) => (
+                  <button
+                    key={status}
+                    type="button"
+                    className={`solar-chip sm ${statusFilter === status ? 'active' : ''}`}
+                    onClick={() => setStatusFilter(status)}
+                  >
+                    {STATUS_META[status].label} ({count})
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <label className="solar-sort">
+              <span>Sort</span>
+              <select value={sortBy} onChange={(e) => setSortBy(e.target.value as SortKey)}>
+                {SORT_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        )}
 
         {shown.length === 0 && (
           <p className="solar-empty">
-            {filter === 'all'
-              ? 'No stations found on the connected account(s).'
-              : `${providerName(filter)} is connected, but this account has no plants yet.`}
+            {scoped.length === 0
+              ? filter === 'all'
+                ? 'No stations found on the connected account(s).'
+                : `${providerName(filter)} is connected, but this account has no plants yet.`
+              : 'No stations match the current search or status filter.'}
           </p>
         )}
 
