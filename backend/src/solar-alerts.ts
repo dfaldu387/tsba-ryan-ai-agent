@@ -19,6 +19,24 @@ export interface SolarAlertsResult {
 
 const SCAN_TTL_MS = 120_000;
 
+// Cap how many plant-detail scans run at once. Most providers derive detail
+// from the cached station list (cheap), but some (e.g. Elekeeper) open a live
+// browser context per plant — an unbounded fan-out across a large fleet could
+// spawn dozens of concurrent Chromium contexts and exhaust the server's memory.
+const DETAIL_SCAN_CONCURRENCY = 4;
+
+/** Run `worker` over `items` with at most `limit` in flight at any time. */
+async function mapLimit<T>(items: T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const item = items[next++];
+      await worker(item);
+    }
+  });
+  await Promise.all(runners);
+}
+
 export function getSolarAlerts(): Promise<SolarAlertsResult> {
   return cached('solar:alerts', SCAN_TTL_MS, collectSolarAlerts);
 }
@@ -57,8 +75,7 @@ async function collectSolarAlerts(): Promise<SolarAlertsResult> {
   // covers, so scanning them would just add noise. Fan out in parallel; a single
   // plant's failure is swallowed so it can't sink the whole scan.
   const toScan = stations.filter((s) => s.status !== 'offline');
-  await Promise.all(
-    toScan.map(async (s) => {
+  await mapLimit(toScan, DETAIL_SCAN_CONCURRENCY, async (s) => {
       const provider = getProvider(s.provider);
       if (!provider) return;
       try {
@@ -93,8 +110,7 @@ async function collectSolarAlerts(): Promise<SolarAlertsResult> {
       } catch {
         /* one plant's detail failed — skip it, keep the rest of the scan */
       }
-    }),
-  );
+  });
 
   // Most severe first, then alphabetical by plant.
   const rank: Record<string, number> = { offline: 0, partial: 1, fault: 1, alert: 2, device: 3 };

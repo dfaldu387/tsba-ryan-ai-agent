@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 /**
@@ -38,4 +38,23 @@ export function sessionStoragePath(key: string): string {
 
 export function hasSessionStorage(key: string): boolean {
   return existsSync(sessionStoragePath(key));
+}
+
+/** Shape of the sessionStorage/localStorage sidecar we replay into a scrape. */
+export interface StorageSidecar {
+  origin: string;
+  local?: Record<string, string>;
+  session?: Record<string, string>;
+}
+
+/** Write the sidecar captured at login (replayed by withSession for SPAs that
+ *  keep their auth token in session/localStorage rather than cookies). */
+export function writeSessionStorage(key: string, data: StorageSidecar): void {
+  writeFileSync(sessionStoragePath(key), JSON.stringify(data), 'utf8');
+}
+
+/** Delete a portal's saved session (+ sidecar), e.g. when it's found to be stale. */
+export function clearSession(key: string): void {
+  rmSync(sessionPath(key), { force: true });
+  rmSync(sessionStoragePath(key), { force: true });
 }

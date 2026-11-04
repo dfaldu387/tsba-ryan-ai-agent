@@ -60,8 +60,25 @@ async function main(): Promise<void> {
     `TSBA preview API listening on http://localhost:${env.port}  (env: ${env.nodeEnv}, storage: ${env.storage})`,
   );
 
+  // Warm the solar provider caches in the background so the first dashboard load
+  // isn't a cold multi-scrape. Fire-and-forget; errors are non-fatal. Combined
+  // with stale-while-revalidate, users then get instant last-good data.
+  void (async () => {
+    try {
+      const { aggregateStations } = await import('./providers/index.js');
+      await aggregateStations();
+      console.log('Solar caches warmed.');
+    } catch (err) {
+      app.log.warn({ err }, 'solar cache warm failed (non-fatal)');
+    }
+  })();
+
   const shutdown = async () => {
     await app.close();
+    // Tear down the shared headless Chromium so it (and its child processes)
+    // aren't orphaned across restarts/deploys.
+    const { closeBrowser } = await import('./providers/scraper/browser.js');
+    await closeBrowser();
     if (env.storage === 'postgres') {
       const { stopQueue } = await import('./queue.js');
       const { closePool } = await import('./db.js');
@@ -73,6 +90,18 @@ async function main(): Promise<void> {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }
+
+// Keep the server alive through stray async failures. Headless Chromium /
+// Playwright readily emit rejections out of band (a browser disconnect mid-op,
+// a context closed while a waitForResponse is pending, a CDP protocol error).
+// Without these handlers Node terminates the whole process on the first such
+// rejection — i.e. one scrape hiccup takes the entire API down. Log and carry on.
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err);
+});
 
 main().catch((err) => {
   console.error('Fatal startup error:', err);

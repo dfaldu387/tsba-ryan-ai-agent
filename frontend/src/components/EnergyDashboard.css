@@ -1,0 +1,268 @@
+/* ─────────────────────────────────────────────────────────────────────────
+   Energy Platform — full-screen live monitoring wall.
+   Self-contained dark theme, own "nrg-" namespace. Does NOT reuse the admin
+   console's styles (deliberately a distinct page design).
+   ───────────────────────────────────────────────────────────────────────── */
+
+.nrg-root {
+  --nrg-bg: #05101f;
+  --nrg-bg2: #0a1a30;
+  --nrg-panel: rgba(12, 28, 52, 0.55);
+  --nrg-panel-brd: rgba(45, 120, 190, 0.35);
+  --nrg-cyan: #27d3ff;
+  --nrg-cyan-dim: #4a8fc0;
+  --nrg-teal: #15e0c4;
+  --nrg-amber: #ffb547;
+  --nrg-red: #ff5c73;
+  --nrg-green: #27e08a;
+  --nrg-text: #cfe6ff;
+  --nrg-text-dim: #7fa6cc;
+
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background:
+    radial-gradient(1200px 700px at 50% 42%, rgba(20, 70, 120, 0.35), transparent 70%),
+    radial-gradient(900px 500px at 15% 10%, rgba(14, 40, 80, 0.4), transparent 70%),
+    linear-gradient(180deg, #061324 0%, #040c18 100%);
+  color: var(--nrg-text);
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* subtle starfield */
+.nrg-root::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    radial-gradient(1px 1px at 20% 30%, rgba(255, 255, 255, 0.5), transparent),
+    radial-gradient(1px 1px at 70% 20%, rgba(255, 255, 255, 0.4), transparent),
+    radial-gradient(1px 1px at 40% 70%, rgba(255, 255, 255, 0.35), transparent),
+    radial-gradient(1px 1px at 85% 60%, rgba(255, 255, 255, 0.4), transparent),
+    radial-gradient(1px 1px at 55% 85%, rgba(255, 255, 255, 0.3), transparent),
+    radial-gradient(1px 1px at 10% 80%, rgba(255, 255, 255, 0.3), transparent);
+  pointer-events: none;
+  opacity: 0.7;
+}
+
+/* ── Header ──────────────────────────────────────────────────────────────── */
+.nrg-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 22px;
+  background: linear-gradient(90deg, rgba(14, 42, 78, 0.85), rgba(8, 24, 46, 0.3) 60%, transparent);
+  border-bottom: 1px solid var(--nrg-panel-brd);
+  position: relative;
+  z-index: 20;
+}
+.nrg-title {
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  margin: 0;
+  color: #eaf6ff;
+  text-shadow: 0 0 18px rgba(39, 211, 255, 0.5);
+}
+.nrg-title span { color: var(--nrg-cyan); }
+.nrg-head-right { display: flex; align-items: center; gap: 18px; font-size: 13px; color: var(--nrg-text-dim); }
+.nrg-head-right b { color: var(--nrg-text); font-weight: 600; }
+.nrg-exit {
+  background: rgba(39, 211, 255, 0.12);
+  border: 1px solid var(--nrg-panel-brd);
+  color: var(--nrg-cyan);
+  width: 34px; height: 34px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 15px;
+  display: grid; place-items: center;
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.nrg-exit:hover { background: rgba(39, 211, 255, 0.25); box-shadow: 0 0 14px rgba(39, 211, 255, 0.4); }
+
+/* ── Layout grid ─────────────────────────────────────────────────────────── */
+.nrg-grid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 340px 1fr 360px;
+  gap: 14px;
+  padding: 14px;
+  min-height: 0;
+  position: relative;
+  z-index: 1;
+}
+.nrg-col { display: flex; flex-direction: column; gap: 14px; min-height: 0; overflow: hidden; }
+.nrg-col-center { position: relative; align-items: center; }
+
+/* ── Panels ──────────────────────────────────────────────────────────────── */
+.nrg-panel {
+  background: var(--nrg-panel);
+  border: 1px solid var(--nrg-panel-brd);
+  border-radius: 8px;
+  padding: 12px 14px 14px;
+  backdrop-filter: blur(3px);
+  position: relative;
+}
+.nrg-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  color: #eaf6ff;
+  margin: 0 0 12px;
+  padding-left: 12px;
+  position: relative;
+  text-transform: none;
+}
+.nrg-panel-title::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 1px; bottom: 1px;
+  width: 4px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--nrg-cyan), var(--nrg-teal));
+  box-shadow: 0 0 8px rgba(39, 211, 255, 0.7);
+}
+.nrg-panel-title small { color: var(--nrg-text-dim); font-weight: 400; margin-left: 6px; }
+
+/* ── KPI trio (deployed systems) ─────────────────────────────────────────── */
+.nrg-kpi-row { display: flex; justify-content: space-between; gap: 8px; }
+.nrg-kpi { display: flex; align-items: center; gap: 10px; flex: 1; }
+.nrg-kpi-orb {
+  width: 42px; height: 42px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: radial-gradient(circle at 35% 30%, rgba(39, 211, 255, 0.35), rgba(10, 30, 55, 0.6));
+  border: 1px solid rgba(39, 211, 255, 0.4);
+  box-shadow: 0 0 14px rgba(39, 211, 255, 0.25), inset 0 0 10px rgba(39, 211, 255, 0.2);
+  color: var(--nrg-cyan); font-size: 18px;
+}
+.nrg-kpi-txt { line-height: 1.15; }
+.nrg-kpi-val { font-size: 20px; font-weight: 700; color: #eaf6ff; }
+.nrg-kpi-val .u { font-size: 11px; font-weight: 500; color: var(--nrg-text-dim); margin-left: 3px; }
+.nrg-kpi-lbl { font-size: 11px; color: var(--nrg-text-dim); }
+
+/* ── Center KPI chips (over globe) ───────────────────────────────────────── */
+.nrg-chips {
+  position: absolute;
+  top: 4px; left: 0; right: 0;
+  display: flex; justify-content: center; gap: 36px;
+  z-index: 3;
+  pointer-events: none;
+}
+.nrg-chip { display: flex; align-items: center; gap: 12px; }
+.nrg-chip-orb {
+  width: 54px; height: 54px; border-radius: 50%;
+  display: grid; place-items: center; font-size: 22px;
+  color: var(--nrg-cyan);
+  background: radial-gradient(circle at 35% 30%, rgba(39, 211, 255, 0.4), rgba(8, 24, 46, 0.7));
+  border: 1px solid rgba(39, 211, 255, 0.5);
+  box-shadow: 0 0 20px rgba(39, 211, 255, 0.35), inset 0 0 12px rgba(39, 211, 255, 0.25);
+}
+.nrg-chip-lbl { font-size: 12px; color: var(--nrg-text-dim); }
+.nrg-chip-val { font-size: 22px; font-weight: 700; color: #eaf6ff; }
+.nrg-chip-val .u { font-size: 12px; font-weight: 500; color: var(--nrg-text-dim); margin-left: 3px; }
+
+/* ── Globe ───────────────────────────────────────────────────────────────── */
+.nrg-globe { position: absolute; inset: 0; display: grid; place-items: center; }
+.nrg-globe canvas { outline: none; }
+/* Hover tooltip for the plant pins. */
+.nrg-tip {
+  position: absolute;
+  z-index: 30;
+  pointer-events: none;
+  background: rgba(8, 20, 38, 0.96);
+  border: 1px solid rgba(39, 211, 255, 0.4);
+  border-radius: 8px;
+  padding: 9px 11px;
+  color: #eaf6ff;
+  font: 12px/1.5 system-ui, sans-serif;
+  min-width: 180px;
+  max-width: 240px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+}
+.nrg-globe-fallback {
+  color: var(--nrg-text-dim); font-size: 13px; align-self: center;
+}
+
+/* ── Bar chart (per-platform) ────────────────────────────────────────────── */
+.nrg-bars { display: flex; align-items: flex-end; gap: 10px; height: 150px; padding: 18px 2px 0; }
+.nrg-bar-col { flex: 1; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; min-width: 0; }
+.nrg-bar-val { font-size: 11px; color: #eaf6ff; margin-bottom: 4px; white-space: nowrap; }
+.nrg-bar {
+  width: 60%;
+  max-width: 26px;
+  border-radius: 3px 3px 0 0;
+  background: linear-gradient(180deg, var(--nrg-cyan), rgba(21, 224, 196, 0.25));
+  box-shadow: 0 0 10px rgba(39, 211, 255, 0.5);
+  transition: height 0.6s cubic-bezier(0.2, 0.8, 0.2, 1);
+  position: relative;
+}
+.nrg-bar.teal { background: linear-gradient(180deg, var(--nrg-teal), rgba(39, 211, 255, 0.2)); }
+.nrg-bar-lbl { font-size: 10px; color: var(--nrg-text-dim); margin-top: 6px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+
+/* ── Environment benefits ────────────────────────────────────────────────── */
+.nrg-env { display: flex; justify-content: space-around; text-align: center; }
+.nrg-env-item { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.nrg-env-ico {
+  width: 46px; height: 46px; border-radius: 50%;
+  display: grid; place-items: center; font-size: 20px;
+  background: radial-gradient(circle at 50% 120%, rgba(39, 211, 255, 0.5), rgba(8, 24, 46, 0.3));
+  border: 1px solid rgba(39, 211, 255, 0.35);
+  box-shadow: 0 6px 14px -4px rgba(39, 211, 255, 0.5);
+}
+.nrg-env-lbl { font-size: 10.5px; color: var(--nrg-text-dim); line-height: 1.25; max-width: 90px; }
+.nrg-env-val { font-size: 17px; font-weight: 700; color: #eaf6ff; }
+.nrg-env-val .u { font-size: 10px; color: var(--nrg-text-dim); margin-left: 2px; font-weight: 500; }
+
+/* ── Status donut ────────────────────────────────────────────────────────── */
+.nrg-donut-wrap { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.nrg-legend { display: flex; gap: 16px; font-size: 11px; color: var(--nrg-text-dim); }
+.nrg-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+.nrg-donut { position: relative; width: 140px; height: 140px; }
+.nrg-donut-center { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; }
+.nrg-donut-center b { font-size: 30px; color: #eaf6ff; display: block; line-height: 1; }
+.nrg-donut-center span { font-size: 10px; color: var(--nrg-text-dim); }
+
+/* ── Ranking ─────────────────────────────────────────────────────────────── */
+.nrg-rank { display: flex; flex-direction: column; gap: 10px; }
+.nrg-rank-row { display: flex; align-items: center; gap: 10px; }
+.nrg-rank-no {
+  width: 22px; height: 22px; flex: none; border-radius: 4px;
+  display: grid; place-items: center; font-size: 12px; font-weight: 700; color: #04121f;
+  background: linear-gradient(135deg, #ffd24a, #ff9d2e);
+}
+.nrg-rank-no.n2 { background: linear-gradient(135deg, #cfe0ef, #9fb6cc); }
+.nrg-rank-no.n3 { background: linear-gradient(135deg, #e8a579, #c67c49); }
+.nrg-rank-no.nx { background: rgba(39, 211, 255, 0.25); color: var(--nrg-cyan); }
+.nrg-rank-body { flex: 1; min-width: 0; }
+.nrg-rank-name { font-size: 12px; color: #eaf6ff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 4px; }
+.nrg-rank-track { height: 5px; border-radius: 3px; background: rgba(39, 211, 255, 0.12); overflow: hidden; }
+.nrg-rank-fill { height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--nrg-teal), var(--nrg-cyan)); box-shadow: 0 0 8px rgba(39, 211, 255, 0.5); transition: width 0.6s; }
+.nrg-rank-val { font-size: 12px; color: var(--nrg-cyan); font-weight: 600; white-space: nowrap; }
+.nrg-rank-val .u { font-size: 10px; color: var(--nrg-text-dim); margin-left: 2px; }
+
+/* ── Alerts ──────────────────────────────────────────────────────────────── */
+.nrg-alerts { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.nrg-alert-row { display: flex; gap: 10px; align-items: flex-start; font-size: 12px; padding: 7px 9px; border-radius: 6px; background: rgba(255, 92, 115, 0.07); border-left: 3px solid var(--nrg-red); }
+.nrg-alert-row.sev-offline { border-color: var(--nrg-red); background: rgba(255, 92, 115, 0.08); }
+.nrg-alert-row.sev-partial, .nrg-alert-row.sev-alert, .nrg-alert-row.sev-fault { border-color: var(--nrg-amber); background: rgba(255, 181, 71, 0.08); }
+.nrg-alert-row.sev-device { border-color: var(--nrg-cyan-dim); background: rgba(74, 143, 192, 0.1); }
+.nrg-alert-plant { color: #eaf6ff; font-weight: 600; }
+.nrg-alert-info { color: var(--nrg-text-dim); }
+.nrg-empty { text-align: center; color: var(--nrg-text-dim); font-size: 12px; padding: 30px 0; }
+.nrg-empty-orb { width: 40px; height: 40px; border-radius: 50%; margin: 0 auto 10px; background: radial-gradient(circle at 40% 35%, rgba(79, 143, 192, 0.4), rgba(8,24,46,0.4)); border: 1px solid rgba(79,143,192,0.3); }
+
+.nrg-scroll { overflow-y: auto; min-height: 0; }
+.nrg-root ::-webkit-scrollbar { width: 6px; }
+.nrg-root ::-webkit-scrollbar-thumb { background: rgba(39, 211, 255, 0.3); border-radius: 3px; }
+
+.nrg-loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--nrg-cyan); font-size: 14px; z-index: 5; pointer-events: none; }
+
+/* responsive: stack columns on narrow screens */
+@media (max-width: 1100px) {
+  .nrg-grid { grid-template-columns: 1fr; grid-auto-rows: min-content; overflow-y: auto; }
+  .nrg-col-center { height: 420px; }
+  .nrg-chips { gap: 18px; }
+}
