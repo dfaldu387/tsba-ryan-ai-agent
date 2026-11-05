@@ -44,19 +44,26 @@ interface CachedToken {
 }
 let tokenCache: CachedToken | null = null;
 
+// A Deye account that belongs to a business organization only sees that org's
+// stations when its token is minted with the org's `companyId`. A token minted
+// WITHOUT a companyId is scoped to the login's personal stations only (e.g. 12
+// of an org's 61). We resolve the companyId dynamically via /v1.0/account/info
+// (see `resolveCompanyId`) and cache it so it costs one extra call per re-auth,
+// not per request. An explicit DEYE_COMPANY_ID overrides the lookup.
+let resolvedCompanyId: string | null = null;
+
 const sha256Hex = (s: string): string => createHash('sha256').update(s, 'utf8').digest('hex');
 
-/** Acquire a fresh bearer token and cache it. */
-async function authenticate(): Promise<string> {
-  if (!deyeConfigured()) throw new DeyeNotConfiguredError();
-
+/** Mint a bearer token, optionally scoped to a business organization. */
+async function mintToken(companyId?: string): Promise<{ token: string; ttlMs: number }> {
   const url = `${env.deyeBaseUrl}${TOKEN_PATH}?appId=${encodeURIComponent(env.deyeAppId)}`;
   const body: Record<string, unknown> = {
     appSecret: env.deyeAppSecret,
     email: env.deyeEmail,
     password: sha256Hex(env.deyePassword),
   };
-  if (env.deyeCompanyId) body.companyId = env.deyeCompanyId;
+  // The API types companyId as an integer; send it as a number when numeric.
+  if (companyId) body.companyId = /^\d+$/.test(companyId) ? Number(companyId) : companyId;
 
   let res: Response;
   try {
@@ -79,11 +86,56 @@ async function authenticate(): Promise<string> {
       data.code != null ? String(data.code) : undefined,
     );
   }
-
   // expiresIn is in seconds; default to 30 days if the field is missing.
-  const ttlMs = (Number(data.expiresIn) || 30 * 24 * 3600) * 1000;
-  tokenCache = { token: data.accessToken, expiresAt: Date.now() + ttlMs };
-  return data.accessToken;
+  return { token: data.accessToken, ttlMs: (Number(data.expiresIn) || 30 * 24 * 3600) * 1000 };
+}
+
+/**
+ * Look up the organization the account belongs to and return its companyId.
+ * `/v1.0/account/info` returns `orgInfoList` (business-member list); we take the
+ * first org. Returns undefined for a personal account with no org, in which
+ * case the personal-scope token is already the correct scope.
+ */
+async function resolveCompanyId(token: string): Promise<string | undefined> {
+  let res: Response;
+  try {
+    res = await fetch(`${env.deyeBaseUrl}/v1.0/account/info`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', authorization: `Bearer ${token}` },
+      body: '{}',
+    });
+  } catch (err) {
+    throw new DeyeError(`deye_network_error: ${(err as Error).message}`);
+  }
+  const data = (await res.json().catch(() => ({}))) as Envelope & {
+    orgInfoList?: Array<{ companyId?: number | string; companyName?: string }>;
+  };
+  const org = data.orgInfoList?.find((o) => o.companyId != null);
+  return org?.companyId != null ? String(org.companyId) : undefined;
+}
+
+/** Acquire a fresh bearer token (org-scoped when the account has an org) and cache it. */
+async function authenticate(): Promise<string> {
+  if (!deyeConfigured()) throw new DeyeNotConfiguredError();
+
+  // Priority: explicit env override → previously resolved org → dynamic lookup.
+  let companyId = env.deyeCompanyId || resolvedCompanyId || undefined;
+
+  if (!companyId) {
+    // Mint a personal token, then discover the org from /v1.0/account/info.
+    const personal = await mintToken();
+    companyId = await resolveCompanyId(personal.token).catch(() => undefined);
+    if (!companyId) {
+      // No org: the personal token is the right (and only) scope.
+      tokenCache = { token: personal.token, expiresAt: Date.now() + personal.ttlMs };
+      return personal.token;
+    }
+    resolvedCompanyId = companyId;
+  }
+
+  const scoped = await mintToken(companyId);
+  tokenCache = { token: scoped.token, expiresAt: Date.now() + scoped.ttlMs };
+  return scoped.token;
 }
 
 /** Return a valid cached token, authenticating if needed. */

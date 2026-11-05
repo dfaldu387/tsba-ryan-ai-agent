@@ -28,7 +28,6 @@ const PORTAL_DOMAIN: Record<string, string> = {
   dyness: 'dyness',
   elekeeper: 'saj-electric.com',
   whes: 'ecos',
-  sigen: 'sigencloud.com',
 };
 
 async function main() {

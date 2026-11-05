@@ -158,31 +158,6 @@ export const AUTO_LOGIN: Record<string, AutoLoginConfig> = {
     successWhen: (page) => !/\/login/i.test(page.url()),
   },
 
-  // Sigenergy (SigenCloud) — Ant-Design form at web-aus.sigencloud.com (the AU/NZ
-  // region subdomain, so no region switch needed). Email + password + a REQUIRED
-  // "I agree to the Terms of Service and Privacy Policy" checkbox, no captcha or
-  // cookie banner. Signed in once the URL leaves /user/login.
-  sigen: {
-    loginUrl: 'https://web-aus.sigencloud.com/user/login',
-    async login(page, creds) {
-      await page.waitForSelector('input[type="password"]', { timeout: 20_000 }).catch(() => {});
-
-      await page
-        .locator('input[placeholder*="mail" i]:visible, input[type="text"]:visible')
-        .first()
-        .fill(creds.username)
-        .catch(() => {});
-      await page.locator('input[type="password"]:visible').first().fill(creds.password).catch(() => {});
-
-      // Required "I agree to the Terms …" consent. The inline links make the
-      // label unclickable, so force-check the hidden ant-checkbox input directly.
-      await page.locator('.ant-checkbox-input').first().check({ force: true, timeout: 3000 }).catch(() => {});
-
-      await page.getByRole('button', { name: /^log\s*in$/i }).first().click({ timeout: 5000 }).catch(() => {});
-    },
-    successWhen: (page) => !/\/login/i.test(page.url()),
-  },
-
   // WHES / ECOS Hub (eCactus / WeiHeng) is intentionally NOT auto-logged-in.
   // A headless login succeeds (AU data-center + consent, auth returns 200) but
   // the resulting session only persists HUB_refreshToken — never the access

@@ -7,7 +7,7 @@ import { solisScraperProvider } from './scraper/solis-scraper.js';
 import { elekeeperScraperProvider } from './scraper/elekeeper-scraper.js';
 import { whesScraperProvider } from './scraper/whes-scraper.js';
 import { dynessScraperProvider } from './scraper/dyness-scraper.js';
-import { sigenScraperProvider } from './scraper/sigen-scraper.js';
+import { sigenProvider } from './sigen-provider.js';
 import { solisProvider } from './solis.js';
 import { growattProvider } from './growatt.js';
 import { sungrowProvider } from './sungrow.js';
@@ -42,7 +42,7 @@ export const PROVIDERS: SolarProvider[] = [
   withFallback(dynessProvider, dynessScraperProvider),
   withFallback(elekeeperProvider, elekeeperScraperProvider),
   withFallback(whesProvider, whesScraperProvider),
-  sigenScraperProvider,
+  sigenProvider,
 ];
 
 export function getProvider(id: string): SolarProvider | undefined {
