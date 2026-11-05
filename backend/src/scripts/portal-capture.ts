@@ -25,7 +25,6 @@ const PORTAL_DOMAIN: Record<string, string> = {
   solarman: 'solarmanpv.com',
   solis: 'soliscloud.com',
   growatt: 'growatt.com',
-  dyness: 'dyness',
   elekeeper: 'saj-electric.com',
   whes: 'ecos',
 };

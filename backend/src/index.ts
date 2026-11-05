@@ -55,6 +55,15 @@ async function main(): Promise<void> {
     }
   }
 
+  // Persist periodic solar snapshots (station readings + fleet aggregate) so the
+  // live-pass-through monitoring data becomes a durable time series.
+  try {
+    const { startSolarRecorder } = await import('./solar-recorder.js');
+    startSolarRecorder();
+  } catch (err) {
+    app.log.error({ err }, 'could not start solar recorder');
+  }
+
   await app.listen({ port: env.port, host: '0.0.0.0' });
   console.log(
     `TSBA preview API listening on http://localhost:${env.port}  (env: ${env.nodeEnv}, storage: ${env.storage})`,

@@ -64,41 +64,6 @@ async function genericLogin(page: Page, creds: PortalCreds): Promise<void> {
 }
 
 export const AUTO_LOGIN: Record<string, AutoLoginConfig> = {
-  // Dyness "Smart Energy Storage Cloud Platform" (APAC). A Vue SPA login form:
-  // the markup only appears after the JS hydrates, there's a cookie "Accept"
-  // banner, and a "I have read and agree …" consent checkbox must be ticked
-  // before the Login button will submit. No bot challenge observed.
-  dyness: {
-    loginUrl: 'https://apacems.dyness.com/login',
-    async login(page, creds) {
-      // The form is an Arco-Design Vue SPA; wait for it to render.
-      await page.waitForSelector('input[type="password"]', { timeout: 20_000 }).catch(() => {});
-
-      // A cookie-consent overlay covers the form and swallows clicks until
-      // dismissed — accept it and wait for it to detach.
-      await page
-        .locator('.cookie-consent-layer .arco-btn', { hasText: /accept/i })
-        .first()
-        .click({ timeout: 4000 })
-        .catch(() => {});
-      await page.waitForSelector('.cookie-consent-layer', { state: 'detached', timeout: 5000 }).catch(() => {});
-
-      await page
-        .locator('input[placeholder*="email" i]:visible, input[type="text"]:visible')
-        .first()
-        .fill(creds.username)
-        .catch(() => {});
-      await page.locator('input[type="password"]:visible').first().fill(creds.password).catch(() => {});
-
-      // Required "I have read and agree …" consent. The Arco checkbox only
-      // toggles via its icon-hover hit area (the wrapper/label clicks are inert).
-      await page.locator('.arco-checkbox-icon-hover').first().click({ timeout: 3000 }).catch(() => {});
-
-      await page.getByRole('button', { name: /^login$/i }).first().click({ timeout: 5000 }).catch(() => {});
-    },
-    successWhen: (page) => !/\/login/i.test(page.url()),
-  },
-
   // SolisCloud (Ginlong) — Element-Plus form on the "Account" tab. No cookie
   // overlay or captcha by default; a "I have read and agree …" checkbox must be
   // ticked. Signed in once the URL leaves /login (→ /overview/...).

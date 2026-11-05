@@ -20,7 +20,8 @@ const TOKEN_PATH = '/openapi/auth/login/password';
 // Re-mint a little before the real expiry to avoid racing the boundary.
 const EXPIRY_SKEW_MS = 5 * 60 * 1000;
 // Business codes (and HTTP 401) that mean "token invalid/expired" → re-auth once.
-const AUTH_FAIL_CODES = new Set(['11003', '11004', '11005', '401', '40001']);
+// 2090 = "token invalid or expired" (seen with HTTP 424); 401/40001 = unauthorized.
+const AUTH_FAIL_CODES = new Set(['11003', '11004', '11005', '401', '40001', '2090']);
 
 export class SigenError extends Error {
   constructor(message: string, public code?: string) {

@@ -109,3 +109,54 @@ CREATE TABLE IF NOT EXISTS drive_folders (
   last_synced_at  TIMESTAMPTZ,
   last_file_count INTEGER
 );
+
+-- ─── Solar monitoring: persisted snapshots of live provider-API data ──────────
+-- Solar data is otherwise a live pass-through (fetched on demand, never stored).
+-- A background recorder (backend/src/solar-recorder.ts) writes a periodic
+-- snapshot of every station and a fleet aggregate, so: (1) the dashboard can
+-- fall back to the last-known reading when a provider API is unreachable, and
+-- (2) historical trends (e.g. monthly production) can be charted — including for
+-- providers whose own API exposes no history (Sigenergy/Sungrow), because the
+-- trend is derived from our stored total-energy series rather than theirs.
+
+-- One row per station per capture. total_kwh is the station's lifetime energy;
+-- monthly production for a trend is the delta of total_kwh across the period.
+CREATE TABLE IF NOT EXISTS solar_station_readings (
+  id              BIGSERIAL PRIMARY KEY,
+  provider        TEXT NOT NULL,             -- provider id, e.g. 'deye'
+  station_id      TEXT NOT NULL,             -- provider-local station id
+  name            TEXT NOT NULL,
+  status          TEXT NOT NULL,             -- online | waiting | partial | offline | unknown
+  current_power_w   DOUBLE PRECISION,
+  daily_kwh         DOUBLE PRECISION,
+  monthly_kwh       DOUBLE PRECISION,
+  total_kwh         DOUBLE PRECISION,
+  capacity_kw       DOUBLE PRECISION,
+  battery_soc       DOUBLE PRECISION,
+  location        TEXT,
+  captured_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_solar_station_readings_lookup
+  ON solar_station_readings (provider, station_id, captured_at DESC);
+CREATE INDEX IF NOT EXISTS idx_solar_station_readings_time
+  ON solar_station_readings (captured_at DESC);
+
+-- One row per capture: fleet-wide aggregate (powers the dashboard trend cheaply
+-- without scanning the per-station table).
+CREATE TABLE IF NOT EXISTS solar_fleet_readings (
+  id                 BIGSERIAL PRIMARY KEY,
+  systems            INTEGER NOT NULL,
+  online             INTEGER NOT NULL DEFAULT 0,
+  waiting            INTEGER NOT NULL DEFAULT 0,
+  partial            INTEGER NOT NULL DEFAULT 0,
+  offline            INTEGER NOT NULL DEFAULT 0,
+  total_power_w      DOUBLE PRECISION,
+  total_daily_kwh    DOUBLE PRECISION,
+  total_energy_kwh   DOUBLE PRECISION,       -- sum of station lifetime totals
+  total_capacity_kw  DOUBLE PRECISION,
+  total_devices      INTEGER,
+  online_devices     INTEGER,
+  captured_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_solar_fleet_readings_time
+  ON solar_fleet_readings (captured_at DESC);

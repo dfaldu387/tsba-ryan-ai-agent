@@ -1068,4 +1068,35 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       }
     },
   );
+
+  // ── Persisted history (from the solar snapshot recorder) ────────────────────
+
+  // Monthly fleet production (kWh) derived from stored lifetime-total snapshots.
+  app.get<{ Querystring: { months?: string } }>(
+    '/api/solar/history/monthly',
+    { preHandler: requirePermission('view') },
+    async (req) => {
+      const months = Math.min(36, Math.max(1, Number(req.query.months) || 6));
+      const storage = await getStorage();
+      return { months: await storage.solar.monthlyProduction(months) };
+    },
+  );
+
+  // Fleet aggregate snapshots over a recent window (for power/status trends).
+  app.get<{ Querystring: { hours?: string } }>(
+    '/api/solar/history/fleet',
+    { preHandler: requirePermission('view') },
+    async (req) => {
+      const hours = Math.min(24 * 90, Math.max(1, Number(req.query.hours) || 24));
+      const storage = await getStorage();
+      return { readings: await storage.solar.fleetHistory(Date.now() - hours * 3_600_000) };
+    },
+  );
+
+  // Force a snapshot now (otherwise written on the recorder's interval).
+  app.post('/api/solar/snapshot', { preHandler: requirePermission('ask') }, async () => {
+    const { captureSolarSnapshot } = await import('../solar-recorder.js');
+    const res = await captureSolarSnapshot();
+    return { recorded: res != null, stations: res?.stations ?? 0 };
+  });
 }

@@ -36,6 +36,12 @@ import {
   removeUser,
   updateUser,
 } from '../users-repo.js';
+import {
+  recordSolar,
+  latestStationReadings,
+  fleetReadingsSince,
+  monthlyProduction,
+} from '../solar-repo.js';
 import type {
   ConnectionStore,
   DocumentStore,
@@ -44,6 +50,9 @@ import type {
   InsertDraftArgs,
   KnowledgeStore,
   NewUser,
+  SolarFleetReading,
+  SolarStationReading,
+  SolarStore,
   StoredConnection,
   StoredUser,
   UserStore,
@@ -151,5 +160,20 @@ export class PgFolderSourceStore implements FolderSourceStore {
   }
   remove(id: string): Promise<DriveFolderSource | null> {
     return removeFolder(id);
+  }
+}
+
+export class PgSolarStore implements SolarStore {
+  record(stations: SolarStationReading[], fleet: SolarFleetReading): Promise<void> {
+    return recordSolar(stations, fleet);
+  }
+  latestStations(): Promise<SolarStationReading[]> {
+    return latestStationReadings();
+  }
+  fleetHistory(sinceMs: number): Promise<SolarFleetReading[]> {
+    return fleetReadingsSince(sinceMs);
+  }
+  monthlyProduction(months: number): Promise<{ month: string; kwh: number }[]> {
+    return monthlyProduction(months);
   }
 }

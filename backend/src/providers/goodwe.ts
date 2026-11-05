@@ -2,6 +2,9 @@ import { env, goodweConfigured } from '../env.js';
 import {
   ProviderError,
   ProviderNotConfiguredError,
+  type NormalizedAlert,
+  type NormalizedDevice,
+  type NormalizedPowerPoint,
   type NormalizedStation,
   type NormalizedDetail,
   type SolarProvider,
@@ -28,6 +31,19 @@ const REGION_HOSTS: Record<string, string> = {
 
 function baseUrl(): string {
   return REGION_HOSTS[(env.goodweRegion || 'global').toLowerCase()] ?? REGION_HOSTS.global;
+}
+
+/**
+ * SEMS timestamps come as "YYYY-MM-DD HH:mm:ss" (station-local, no zone) or an
+ * MM/DD/YYYY variant. Parse to epoch seconds; return undefined if unparseable.
+ */
+function parseSemsTime(v?: string): number | undefined {
+  if (!v) return undefined;
+  const iso = v.includes('T') ? v : v.replace(' ', 'T');
+  const ms = Date.parse(iso);
+  if (!Number.isNaN(ms)) return Math.floor(ms / 1000);
+  const alt = Date.parse(v);
+  return Number.isNaN(alt) ? undefined : Math.floor(alt / 1000);
 }
 
 interface LoginData {
@@ -138,6 +154,44 @@ function mapStatus(status?: number): StationStatus {
   return 'unknown';
 }
 
+// ─── Detail-level SEMS shapes (warnings query + intraday power chart) ────────
+
+/** One active warning on an inverter (fields vary by firmware — all optional). */
+interface SemsWarning {
+  warning_message?: string;
+  warningmessage?: string;
+  device_sn?: string;
+  sn?: string;
+  happen_time?: string;
+  time?: string;
+  warning_level?: number | string;
+  level?: number | string;
+  error_code?: string;
+  code?: string;
+}
+/** Per-inverter group returned by PowerstationWarningsQuery. */
+interface SemsWarningStation {
+  sn?: string;
+  sn_name?: string;
+  status?: number;
+  warning?: SemsWarning[];
+}
+interface SemsWarningsResult {
+  pw_id?: string;
+  list?: SemsWarningStation[];
+}
+/** A single point on the intraday power curve. */
+interface SemsPac {
+  date?: string;
+  pac?: number;
+  x?: string;
+  y?: number;
+}
+interface SemsPacResult {
+  today_power?: number;
+  pacs?: SemsPac[];
+}
+
 function toStation(s: SemsStation): NormalizedStation {
   return {
     id: s.powerstation_id,
@@ -170,17 +224,33 @@ export const goodweProvider: SolarProvider = {
   },
 
   // SEMS's monitor-detail endpoint returns no body for this (shared) account, so
-  // the detail view is derived from the station's own monitor record. Devices,
-  // alerts and the intraday curve aren't exposed here yet.
+  // the detail view is derived from the station's own monitor record, enriched
+  // with the per-inverter warnings query (which also yields the inverter roster)
+  // and the intraday power curve.
   async stationDetail(stationId: string): Promise<NormalizedDetail> {
-    const data = await semsPost<{ list?: SemsStation[] }>('PowerStationMonitor/QueryPowerStationMonitor', {
-      page_index: 1,
-      page_size: 100,
-      key: '',
-      orderby: '',
-      powerstation_type: '',
-      powerstation_status: '',
-    });
+    const today = new Date().toISOString().slice(0, 10);
+    const [data, warnings, pac] = await Promise.all([
+      semsPost<{ list?: SemsStation[] }>('PowerStationMonitor/QueryPowerStationMonitor', {
+        page_index: 1,
+        page_size: 100,
+        key: '',
+        orderby: '',
+        powerstation_type: '',
+        powerstation_status: '',
+      }),
+      // Per-inverter active warnings. Also the only roster of the plant's
+      // inverters available on this account (monitor-detail comes back empty).
+      semsPost<SemsWarningsResult>('v3/Warning/PowerstationWarningsQuery', {
+        pw_id: stationId,
+        page_index: 1,
+        page_size: 100,
+      }).catch((): SemsWarningsResult => ({})),
+      // Today's AC-power curve (Watts by time).
+      semsPost<SemsPacResult>('PowerStationMonitor/GetPowerStationPacByDayForApp', {
+        id: stationId,
+        date: today,
+      }).catch((): SemsPacResult => ({})),
+    ]);
     const s = (data.list ?? []).find((x) => x.powerstation_id === stationId);
     const info: StationInfoItem[] = [];
     if (s) {
@@ -207,6 +277,43 @@ export const goodweProvider: SolarProvider = {
       push('Organisation', s.org_name);
       push('Station ID', s.powerstation_id);
     }
+    // Inverter roster from the warnings query. SEMS doesn't give a per-inverter
+    // comms flag here, so treat an inverter as online unless the whole plant is
+    // offline (status -1) — i.e. if the plant is reporting, so is its inverter.
+    const plantOffline = s?.status === -1;
+    const warnStations = warnings.list ?? [];
+    const devices: NormalizedDevice[] = warnStations
+      .filter((w) => w.sn)
+      .map((w) => ({
+        sn: w.sn as string,
+        type: 'Inverter',
+        online: w.status != null ? w.status !== -1 : !plantOffline,
+      }));
+
+    // Active warnings across all inverters → normalized alerts.
+    const alerts: NormalizedAlert[] = [];
+    for (const w of warnStations) {
+      for (const a of w.warning ?? []) {
+        alerts.push({
+          id: `goodwe-${w.sn ?? ''}-${a.error_code ?? a.code ?? alerts.length}`,
+          name: a.warning_message || a.warningmessage || a.error_code || a.code || 'Warning',
+          code: a.error_code ?? a.code,
+          deviceSn: a.device_sn ?? a.sn ?? w.sn,
+          start: parseSemsTime(a.happen_time ?? a.time),
+          level: a.warning_level != null ? String(a.warning_level) : a.level != null ? String(a.level) : undefined,
+        });
+      }
+    }
+
+    // Intraday power curve (Watts by time).
+    const power: NormalizedPowerPoint[] = (pac.pacs ?? [])
+      .map((p) => {
+        const t = parseSemsTime(p.date ?? p.x);
+        const w = p.pac ?? p.y;
+        return t != null && w != null ? { t, powerW: w } : null;
+      })
+      .filter((p): p is NormalizedPowerPoint => p !== null);
+
     return {
       info,
       latest: s
@@ -217,9 +324,9 @@ export const goodweProvider: SolarProvider = {
             totalEnergyKwh: s.etotal,
           }
         : null,
-      devices: [],
-      alerts: [],
-      power: [],
+      devices,
+      alerts,
+      power,
     };
   },
 };
