@@ -137,6 +137,16 @@ export const env = {
   sungrowPassword: process.env.SUNGROW_PASSWORD ?? '',
   sungrowBaseUrl: optional('SUNGROW_BASE_URL', 'https://gateway.isolarcloud.com').replace(/\/+$/, ''),
 
+  // ─── Sigenergy (SigenCloud OpenAPI) ───────────────────────────────────────
+  // Official developer OpenAPI (replaces the old portal scraper). Account-based
+  // auth: the same Sigen account email + password used on the portal. Base URL
+  // is regional — openapi-aus for AU/NZ, openapi-eu / openapi-us elsewhere. The
+  // email/password fall back to the old SCRAPER_SIGEN_* vars so an existing .env
+  // keeps working after the scraper is removed.
+  sigenEmail: process.env.SIGEN_EMAIL ?? process.env.SCRAPER_SIGEN_USER ?? '',
+  sigenPassword: process.env.SIGEN_PASSWORD ?? process.env.SCRAPER_SIGEN_PASS ?? '',
+  sigenBaseUrl: optional('SIGEN_BASE_URL', 'https://openapi-aus.sigencloud.com').replace(/\/+$/, ''),
+
   // ─── Dyness (App ID/Secret, HmacSHA1) — endpoints unverified ──────────────
   dynessAppId: process.env.DYNESS_APP_ID ?? '',
   dynessAppSecret: process.env.DYNESS_APP_SECRET ?? '',
@@ -175,6 +185,10 @@ export function sungrowConfigured(): boolean {
 }
 export function dynessConfigured(): boolean {
   return Boolean(env.dynessAppId && env.dynessAppSecret);
+}
+/** True once Sigenergy OpenAPI credentials are configured — gates the Sigen provider. */
+export function sigenConfigured(): boolean {
+  return Boolean(env.sigenEmail && env.sigenPassword);
 }
 export function elekeeperConfigured(): boolean {
   return Boolean(env.elekeeperAppId && env.elekeeperAppSecret);

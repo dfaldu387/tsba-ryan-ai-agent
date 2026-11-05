@@ -469,6 +469,27 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
     nextId.current = 1;
   }
 
+  // Re-open a past conversation as the active chat so it can be continued.
+  // Archives whatever is currently open first, and removes the session from the
+  // list so it isn't duplicated (it re-archives on the next New chat / clear).
+  function resumeSession(s: ChatSession) {
+    stopSpeaking();
+    handsFreeRef.current = false;
+    setHandsFree(false);
+    stopListening();
+    archiveCurrent();
+    setTurns(s.turns);
+    nextId.current = s.turns.reduce((m, t) => Math.max(m, t.id), 0) + 1;
+    setAttachments([]);
+    setHistory((prev) => {
+      const next = prev.filter((x) => x.id !== s.id);
+      saveHistory(next);
+      return next;
+    });
+    setViewing(null);
+    setShowHistory(false);
+  }
+
   function deleteSession(id: string) {
     setHistory((prev) => {
       const next = prev.filter((s) => s.id !== id);
@@ -903,7 +924,12 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
                 <ul className="chat-history-list">
                   {history.map((s) => (
                     <li key={s.id}>
-                      <button type="button" className="chat-history-item" onClick={() => setViewing(s)}>
+                      <button
+                        type="button"
+                        className="chat-history-item"
+                        onClick={() => resumeSession(s)}
+                        title="Open and continue this conversation"
+                      >
                         <span className="chat-history-title">{s.title || '(untitled)'}</span>
                         <span className="chat-history-meta">{formatDate(s.at)} · {s.turns.length} message{s.turns.length === 1 ? '' : 's'}</span>
                       </button>
