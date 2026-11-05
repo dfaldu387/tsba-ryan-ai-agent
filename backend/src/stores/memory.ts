@@ -20,6 +20,9 @@ import type {
   InsertDraftArgs,
   KnowledgeStore,
   NewUser,
+  SolarFleetReading,
+  SolarStationReading,
+  SolarStore,
   StoredConnection,
   StoredUser,
   Storage,
@@ -333,6 +336,48 @@ export class MemoryUserStore implements UserStore {
   }
 }
 
+/**
+ * In-memory solar snapshot store (dev / STORAGE=memory). Keeps a bounded ring of
+ * captures so the dashboard trend + API-outage fallback work without Postgres;
+ * history is lost on restart.
+ */
+export class MemorySolarStore implements SolarStore {
+  private readonly latest = new Map<string, SolarStationReading>();
+  private readonly fleet: SolarFleetReading[] = [];
+  private static readonly MAX_FLEET = 20_000;
+
+  async record(stations: SolarStationReading[], fleet: SolarFleetReading): Promise<void> {
+    const at = new Date().toISOString();
+    for (const s of stations) this.latest.set(`${s.provider}:${s.station_id}`, { ...s, captured_at: at });
+    this.fleet.push({ ...fleet, captured_at: at });
+    if (this.fleet.length > MemorySolarStore.MAX_FLEET) this.fleet.splice(0, this.fleet.length - MemorySolarStore.MAX_FLEET);
+  }
+
+  async latestStations(): Promise<SolarStationReading[]> {
+    return [...this.latest.values()];
+  }
+
+  async fleetHistory(sinceMs: number): Promise<SolarFleetReading[]> {
+    return this.fleet.filter((f) => Date.parse(f.captured_at ?? '') >= sinceMs);
+  }
+
+  async monthlyProduction(months: number): Promise<{ month: string; kwh: number }[]> {
+    // Last lifetime-total per calendar month → month-over-month delta.
+    const endByMonth = new Map<string, number>();
+    for (const f of this.fleet) {
+      if (f.total_energy_kwh == null || !f.captured_at) continue;
+      endByMonth.set(f.captured_at.slice(0, 7), f.total_energy_kwh); // iteration is chronological → last wins
+    }
+    const sorted = [...endByMonth.entries()].sort(([a], [b]) => a.localeCompare(b)).slice(-(months + 1));
+    const out: { month: string; kwh: number }[] = [];
+    for (let i = 1; i < sorted.length; i++) {
+      const kwh = sorted[i][1] - sorted[i - 1][1];
+      if (kwh >= 0) out.push({ month: sorted[i][0], kwh });
+    }
+    return out;
+  }
+}
+
 export async function createMemoryStorage(): Promise<Storage> {
   const knowledge = new MemoryKnowledgeStore();
   await knowledge.init();
@@ -343,6 +388,7 @@ export async function createMemoryStorage(): Promise<Storage> {
     documents: new MemoryDocumentStore(),
     folders: new MemoryFolderSourceStore(),
     users: new MemoryUserStore(),
+    solar: new MemorySolarStore(),
     usesPostgres: false,
   };
 }

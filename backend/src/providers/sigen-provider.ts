@@ -129,10 +129,14 @@ export const sigenProvider: SolarProvider = {
         monthlyEnergyKwh: summary.monthlyPowerGeneration,
         totalEnergyKwh: summary.lifetimePowerGeneration,
       },
-      // The OpenAPI exposes devices and alarms via separate rate-limited
-      // endpoints; the overview and detail don't need them yet, so they're left
-      // empty (the scraper returned them empty too). Intraday power curve isn't
-      // offered over HTTP — it comes via the MQTT telemetry stream.
+      // Devices, alarms and the intraday power curve are NOT reachable through
+      // this account's SigenCloud OpenAPI. Verified by exhaustive probing: the
+      // only endpoints that resolve are /openapi/system (list — no device
+      // fields), /systems/{id}/summary and /systems/{id}/energyFlow; every
+      // device/alarm path returns 404 or an empty catch-all, and /v3/api-docs is
+      // 403. Device inventory + alarms live in the Sigen portal/MQTT stream, not
+      // the HTTP API — so these stay empty (Sigen contributes 0 to the fleet
+      // device tally) until Sigen grants a device/alarm API scope.
       devices: [],
       alerts: [],
       power: [],

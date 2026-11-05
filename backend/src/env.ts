@@ -147,10 +147,12 @@ export const env = {
   sigenPassword: process.env.SIGEN_PASSWORD ?? process.env.SCRAPER_SIGEN_PASS ?? '',
   sigenBaseUrl: optional('SIGEN_BASE_URL', 'https://openapi-aus.sigencloud.com').replace(/\/+$/, ''),
 
-  // ─── Dyness (App ID/Secret, HmacSHA1) — endpoints unverified ──────────────
+  // ─── Dyness Open API v1.1 (App ID/Secret, HMAC-SHA1 signed) ───────────────
+  // Regional gateway: APAC (AU/NZ/Asia) → https://apacopen-api.dyness.com,
+  // Europe → https://open-api.dyness.com. The API lives under /openapi/ems-device.
   dynessAppId: process.env.DYNESS_APP_ID ?? '',
   dynessAppSecret: process.env.DYNESS_APP_SECRET ?? '',
-  dynessBaseUrl: optional('DYNESS_BASE_URL', 'https://ems.dyness.com').replace(/\/+$/, ''),
+  dynessBaseUrl: optional('DYNESS_BASE_URL', 'https://apacopen-api.dyness.com').replace(/\/+$/, ''),
 
   // ─── Elekeeper / SAJ eSolar (App ID/Secret, token) — endpoints unverified ─
   elekeeperAppId: process.env.ELEKEEPER_APP_ID ?? '',
@@ -159,6 +161,14 @@ export const env = {
 
   // ─── WHES / ECOS Hub — no public API mapped yet ───────────────────────────
   whesBaseUrl: (process.env.WHES_BASE_URL ?? '').replace(/\/+$/, ''),
+
+  // ─── Solar snapshot recorder ──────────────────────────────────────────────
+  // How often to persist a fleet snapshot (station readings + aggregate) to the
+  // database, in minutes. 0 disables the recorder. Readings older than the
+  // retention window are pruned. Storage must be 'postgres' for durability; in
+  // 'memory' mode the recorder still runs but history is lost on restart.
+  solarSnapshotIntervalMin: Number(optional('SOLAR_SNAPSHOT_INTERVAL_MIN', '15')),
+  solarRetentionDays: Number(optional('SOLAR_RETENTION_DAYS', '400')),
 };
 
 /** True once Deye Cloud credentials are configured — gates the Deye provider. */

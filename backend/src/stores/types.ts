@@ -111,6 +111,54 @@ export interface UserStore {
   remove(id: string): Promise<StoredUser | null>;
 }
 
+/** One persisted snapshot of a station's live reading (see solar_station_readings). */
+export interface SolarStationReading {
+  provider: string;
+  station_id: string;
+  name: string;
+  status: string;
+  current_power_w?: number | null;
+  daily_kwh?: number | null;
+  monthly_kwh?: number | null;
+  total_kwh?: number | null;
+  capacity_kw?: number | null;
+  battery_soc?: number | null;
+  location?: string | null;
+  /** ISO timestamp; set by the DB on insert, present on reads. */
+  captured_at?: string;
+}
+
+/** One persisted fleet-wide aggregate snapshot (see solar_fleet_readings). */
+export interface SolarFleetReading {
+  systems: number;
+  online: number;
+  waiting: number;
+  partial: number;
+  offline: number;
+  total_power_w?: number | null;
+  total_daily_kwh?: number | null;
+  total_energy_kwh?: number | null;
+  total_capacity_kw?: number | null;
+  total_devices?: number | null;
+  online_devices?: number | null;
+  captured_at?: string;
+}
+
+export interface SolarStore {
+  /** Persist one capture: a snapshot per station plus the fleet aggregate. */
+  record(stations: SolarStationReading[], fleet: SolarFleetReading): Promise<void>;
+  /** Most recent reading per station — used as a fallback when a provider API is down. */
+  latestStations(): Promise<SolarStationReading[]>;
+  /** Fleet aggregate snapshots at or after `sinceMs` (epoch ms), oldest first. */
+  fleetHistory(sinceMs: number): Promise<SolarFleetReading[]>;
+  /**
+   * Fleet production per calendar month for the last `months` months, derived
+   * from the stored lifetime-total series (last total of each month minus the
+   * previous month's), in kWh. Oldest first.
+   */
+  monthlyProduction(months: number): Promise<{ month: string; kwh: number }[]>;
+}
+
 export interface Storage {
   knowledge: KnowledgeStore;
   drafts: DraftStore;
@@ -118,5 +166,6 @@ export interface Storage {
   documents: DocumentStore;
   folders: FolderSourceStore;
   users: UserStore;
+  solar: SolarStore;
   usesPostgres: boolean;
 }

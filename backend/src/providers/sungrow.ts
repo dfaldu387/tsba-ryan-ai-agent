@@ -1,7 +1,9 @@
 import { env, sungrowConfigured } from '../env.js';
+import { cached } from './cache.js';
 import {
   ProviderError,
   ProviderNotConfiguredError,
+  type NormalizedAlert,
   type NormalizedStation,
   type NormalizedDetail,
   type SolarProvider,
@@ -158,6 +160,38 @@ interface SungrowStation {
   co2_reduce_total?: Metric;
   equivalent_hour?: Metric;
   ps_type?: number | string;
+  // Health signal carried on the station record (iSolarCloud doesn't authorise a
+  // detailed alarm-list endpoint for this app's scope, so these counts are the
+  // fault signal we have): number of active alarms / device faults.
+  alarm_count?: number;
+  fault_count?: number;
+  ps_fault_status?: number;
+}
+
+/** /openapi/getPowerStationDetail — richer attributes than the list record. */
+interface SungrowStationDetail {
+  ps_name?: string;
+  ps_type_name?: string;
+  design_capacity?: Metric; // PV capacity
+  design_capacity_battery?: Metric; // battery capacity
+  install_date?: string;
+  alarm_count?: number;
+  ps_fault_status?: number;
+  ps_price?: number | string;
+  param_income_unit_name?: string;
+}
+
+/** A Sungrow device row from /openapi/getDeviceList. */
+interface SungrowDevice {
+  device_sn?: string;
+  sn?: string;
+  device_type?: number | string;
+  device_type_name?: string;
+  type_name?: string;
+  device_name?: string;
+  dev_status?: number | string;
+  device_state?: number | string;
+  dev_fault_status?: number | string;
 }
 
 // iSolarCloud returns some unit labels in Chinese — translate for display.
@@ -183,7 +217,7 @@ function fmtMetric(m: Metric): string | undefined {
   return u ? `${value} ${u}` : String(value);
 }
 
-function buildInfo(s: SungrowStation): StationInfoItem[] {
+function buildInfo(s: SungrowStation, detail?: SungrowStationDetail | null): StationInfoItem[] {
   const items: [string, string | number | undefined][] = [
     ['Status', s.ps_status === 1 ? 'Online' : s.ps_status === 2 || s.ps_status === 3 ? 'Partial' : 'Offline'],
     ['Location', s.ps_location],
@@ -191,14 +225,20 @@ function buildInfo(s: SungrowStation): StationInfoItem[] {
       'Coordinates',
       s.latitude != null && s.longitude != null ? `${s.latitude}, ${s.longitude}` : undefined,
     ],
-    ['Installed capacity', fmtMetric(s.total_capcity)],
+    ['System type', detail?.ps_type_name],
+    ['Installed capacity', fmtMetric(s.total_capcity) ?? fmtMetric(detail?.design_capacity)],
+    ['Battery capacity', fmtMetric(detail?.design_capacity_battery)],
     ['Today', fmtMetric(s.today_energy)],
     ['Total', fmtMetric(s.total_energy)],
     ['Today income', fmtMetric(s.today_income)],
     ['Total income', fmtMetric(s.total_income)],
     ['CO₂ reduced', fmtMetric(s.co2_reduce_total)],
     ['Equivalent hours', fmtMetric(s.equivalent_hour)],
-    ['Install date', s.install_date],
+    // Fault signal from the station record (the detailed alarm list isn't
+    // exposed to this app's API scope).
+    ['Active alarms', s.alarm_count != null ? String(s.alarm_count) : detail?.alarm_count != null ? String(detail.alarm_count) : undefined],
+    ['Device faults', s.fault_count != null ? String(s.fault_count) : undefined],
+    ['Install date', s.install_date ?? detail?.install_date],
     ['Grid connection', s.grid_connection_time],
     ['Timezone', s.ps_current_time_zone],
     ['Station ID', s.ps_id != null ? String(s.ps_id) : undefined],
@@ -264,16 +304,41 @@ export const sungrowProvider: SolarProvider = {
   },
 
   async stationDetail(stationId: string): Promise<NormalizedDetail> {
-    const [list, devices] = await Promise.all([
+    const [list, deviceRes, detailRes] = await Promise.all([
       post<{ pageList?: SungrowStation[] }>('/openapi/getPowerStationList', { curPage: 1, size: 100 }).catch(() => null),
-      post<{ pageList?: { device_sn?: string; sn?: string; device_type?: number | string; device_type_name?: string; type_name?: string; device_name?: string; dev_status?: number | string; device_state?: number | string }[] }>(
-        '/openapi/getDeviceList',
-        { ps_id: stationId, curPage: 1, size: 100 },
-      ).catch(() => null),
+      post<{ pageList?: SungrowDevice[] }>('/openapi/getDeviceList', { ps_id: stationId, curPage: 1, size: 100 }).catch(() => null),
+      // Richer attributes (battery capacity, system type, …). Cached 10 min —
+      // these change rarely and it keeps the detail view snappy.
+      cached(`sungrow:detail:${stationId}`, 600_000, () =>
+        post<SungrowStationDetail>('/openapi/getPowerStationDetail', { ps_id: stationId }),
+      ).catch((): SungrowStationDetail | null => null),
     ]);
     const s = (list?.pageList ?? []).find((x) => String(x.ps_id) === stationId);
+    const rawDevices = deviceRes?.pageList ?? [];
+    const devices = rawDevices.map((d, i) => ({
+      sn: d.device_sn || d.sn || d.device_name || String(i),
+      type: sungrowDeviceType(d.device_type, d.device_type_name ?? d.type_name),
+      online: String(d.dev_status ?? d.device_state ?? '') === '1',
+    }));
+
+    // iSolarCloud doesn't expose a detailed alarm list to this app's scope, so
+    // synthesise alerts from the fault/alarm counts on the station record and
+    // from any device the device list reports as not communicating.
+    const alerts: NormalizedAlert[] = [];
+    const alarmCount = s?.alarm_count ?? detailRes?.alarm_count ?? 0;
+    const faultCount = s?.fault_count ?? 0;
+    if (alarmCount > 0) {
+      alerts.push({ id: `sungrow-alarm-${stationId}`, name: `${alarmCount} active alarm${alarmCount > 1 ? 's' : ''}`, level: 'alarm' });
+    }
+    if (faultCount > 0) {
+      alerts.push({ id: `sungrow-fault-${stationId}`, name: `${faultCount} device fault${faultCount > 1 ? 's' : ''}`, level: 'fault' });
+    }
+    for (const d of devices.filter((d) => !d.online)) {
+      alerts.push({ id: `sungrow-dev-${d.sn}`, name: `${d.type ?? 'Device'} offline`, deviceSn: d.sn, level: 'device' });
+    }
+
     return {
-      info: s ? buildInfo(s) : [],
+      info: s ? buildInfo(s, detailRes) : [],
       latest: s
         ? {
             currentPowerW: powerW(s.curr_power),
@@ -281,12 +346,11 @@ export const sungrowProvider: SolarProvider = {
             totalEnergyKwh: energyKwh(s.total_energy),
           }
         : null,
-      devices: (devices?.pageList ?? []).map((d, i) => ({
-        sn: d.device_sn || d.sn || d.device_name || String(i),
-        type: sungrowDeviceType(d.device_type, d.device_type_name ?? d.type_name),
-        online: String(d.dev_status ?? d.device_state ?? '') === '1',
-      })),
-      alerts: [],
+      devices,
+      alerts,
+      // iSolarCloud's intraday power-curve endpoints aren't enabled for this
+      // app's API scope (they return E900 "Unauthorized access"), so the curve
+      // is left empty rather than guessed.
       power: [],
     };
   },

@@ -457,6 +457,10 @@ export interface SolarAlertsResult {
   alerts: SolarMonitorAlert[];
   generatedAt: number;
   scannedPlants: number;
+  /** Total devices reported across the fleet (0 for providers with no device API, e.g. Sigenergy). */
+  totalDevices?: number;
+  /** Of totalDevices, how many are communicating. */
+  onlineDevices?: number;
   errors: { provider: string; name: string; error: string }[];
 }
 
@@ -466,6 +470,15 @@ export function getSolarProviders(): Promise<{ providers: SolarProviderInfo[] }>
 
 export function getSolarAlerts(): Promise<SolarAlertsResult> {
   return request<SolarAlertsResult>('/api/solar/alerts');
+}
+
+/** A single month's fleet production, kWh (from persisted snapshots). */
+export interface MonthlyProductionPoint {
+  month: string; // 'YYYY-MM'
+  kwh: number;
+}
+export function getSolarMonthlyProduction(months = 6): Promise<{ months: MonthlyProductionPoint[] }> {
+  return request<{ months: MonthlyProductionPoint[] }>(`/api/solar/history/monthly?months=${months}`);
 }
 
 export function getSolarOverview(): Promise<SolarOverview> {

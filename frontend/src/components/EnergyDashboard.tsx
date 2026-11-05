@@ -6,9 +6,11 @@ import {
   getSolarOverview,
   getSolarAlerts,
   getSolarProviders,
+  getSolarMonthlyProduction,
   type SolarStation,
   type SolarMonitorAlert,
   type SolarProviderInfo,
+  type MonthlyProductionPoint,
   type StationStatus,
 } from '../api';
 import './EnergyDashboard.css';
@@ -21,6 +23,7 @@ const CO2_KG_PER_TREE_YEAR = 21; // CO2 a mature tree sequesters per year
 
 const OVERVIEW_POLL_MS = 60_000; // live numbers refresh
 const ALERTS_POLL_MS = 120_000; // alert scan refresh (cached ~2 min server-side)
+const MONTHLY_POLL_MS = 1_800_000; // monthly trend barely moves — refresh every 30 min
 
 /* Earth texture (dark/night look). Loaded at runtime from CDN; the globe still
    renders (atmosphere + markers) if it can't be fetched. */
@@ -123,6 +126,10 @@ interface Props {
 export function EnergyDashboard({ onExit, onAuthError }: Props) {
   const [stations, setStations] = useState<SolarStation[]>([]);
   const [alerts, setAlerts] = useState<SolarMonitorAlert[]>([]);
+  // Fleet device tally from the alert scan (0 for providers with no device API).
+  const [deviceTotals, setDeviceTotals] = useState<{ total: number; online: number }>({ total: 0, online: 0 });
+  // Monthly production trend from persisted snapshots (fills in as history builds).
+  const [monthly, setMonthly] = useState<MonthlyProductionPoint[]>([]);
   const [providers, setProviders] = useState<SolarProviderInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [lastUpdate, setLastUpdate] = useState<number>(Date.now());
@@ -152,7 +159,21 @@ export function EnergyDashboard({ onExit, onAuthError }: Props) {
         .catch(onErr);
     const loadAlerts = () =>
       getSolarAlerts()
-        .then((a) => alive && setAlerts(a.alerts))
+        .then((a) => {
+          if (!alive) return;
+          setAlerts(a.alerts);
+          // Keep last-good counts if a scan reports 0 (cold/just-restarted backend).
+          setDeviceTotals((prev) =>
+            a.totalDevices && a.totalDevices > 0
+              ? { total: a.totalDevices, online: a.onlineDevices ?? a.totalDevices }
+              : prev,
+          );
+        })
+        .catch(onErr);
+
+    const loadMonthly = () =>
+      getSolarMonthlyProduction(6)
+        .then((r) => alive && setMonthly(r.months))
         .catch(onErr);
 
     getSolarProviders()
@@ -160,12 +181,15 @@ export function EnergyDashboard({ onExit, onAuthError }: Props) {
       .catch(onErr);
     loadOverview();
     loadAlerts();
+    loadMonthly();
     const o = setInterval(loadOverview, OVERVIEW_POLL_MS);
     const al = setInterval(loadAlerts, ALERTS_POLL_MS);
+    const mo = setInterval(loadMonthly, MONTHLY_POLL_MS);
     return () => {
       alive = false;
       clearInterval(o);
       clearInterval(al);
+      clearInterval(mo);
     };
   }, [onAuthError]);
 
@@ -312,6 +336,7 @@ export function EnergyDashboard({ onExit, onAuthError }: Props) {
   const aSystems = useCountUp(m.systems);
   const aInv = useCountUp(m.invCapacityKw);
   const aToday = useCountUp(m.todayMwh);
+  const aDevices = useCountUp(deviceTotals.total);
 
   // Escape always exits to the console, even if something overlays the ✕ button.
   useEffect(() => {
@@ -363,14 +388,19 @@ export function EnergyDashboard({ onExit, onAuthError }: Props) {
                   <div className="nrg-kpi-lbl">Inv. Capacity</div>
                 </div>
               </div>
-              <div className="nrg-kpi">
-                <div className="nrg-kpi-orb">🔋</div>
+              <div className="nrg-kpi" title={deviceTotals.total > 0 ? `${deviceTotals.online} online / ${deviceTotals.total} total — inverters, batteries, loggers & meters reported by provider APIs` : undefined}>
+                <div className="nrg-kpi-orb">🖧</div>
                 <div className="nrg-kpi-txt">
-                  <div className="nrg-kpi-val">{m.avgSoc != null ? fmt(m.avgSoc, 0) : '—'}<span className="u">%</span></div>
-                  <div className="nrg-kpi-lbl">Avg Battery SOC</div>
+                  <div className="nrg-kpi-val">{deviceTotals.total > 0 ? fmt(aDevices) : '—'}</div>
+                  <div className="nrg-kpi-lbl">Total Devices</div>
                 </div>
               </div>
             </div>
+          </section>
+
+          <section className="nrg-panel">
+            <h2 className="nrg-panel-title">Production Trend <small>MWh</small></h2>
+            <MonthlyTrend points={monthly} />
           </section>
 
           <section className="nrg-panel">
@@ -497,6 +527,42 @@ export function EnergyDashboard({ onExit, onAuthError }: Props) {
           </section>
         </div>
       </div>
+    </div>
+  );
+}
+
+/* ── Monthly production trend (bars, from persisted snapshots) ────────────────
+   Production per calendar month, derived server-side from the stored lifetime-
+   total series — so it covers every platform, including ones whose own API has
+   no history. It fills in as the snapshot recorder accumulates months. */
+function MonthlyTrend({ points }: { points: MonthlyProductionPoint[] }) {
+  const monthLabel = (ym: string): string => {
+    const [y, m] = ym.split('-').map(Number);
+    if (!y || !m) return ym;
+    return new Date(y, m - 1, 1).toLocaleDateString('en-AU', { month: 'short' });
+  };
+  if (points.length === 0) {
+    return (
+      <div className="nrg-bars">
+        <div className="nrg-empty" style={{ width: '100%' }}>
+          Building history — monthly bars appear as snapshots accumulate.
+        </div>
+      </div>
+    );
+  }
+  const maxMwh = Math.max(1, ...points.map((p) => p.kwh / 1000));
+  return (
+    <div className="nrg-bars">
+      {points.map((p) => {
+        const mwh = p.kwh / 1000;
+        return (
+          <div className="nrg-bar-col" key={p.month} title={`${p.month}: ${fmt(mwh, 2)} MWh`}>
+            <div className="nrg-bar-val">{fmt(mwh, 1)}</div>
+            <div className="nrg-bar teal" style={{ height: `${(mwh / maxMwh) * 100}%` }} />
+            <div className="nrg-bar-lbl">{monthLabel(p.month)}</div>
+          </div>
+        );
+      })}
     </div>
   );
 }

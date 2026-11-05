@@ -14,6 +14,7 @@ export async function getStorage(): Promise<Storage> {
       PgDocumentStore,
       PgFolderSourceStore,
       PgUserStore,
+      PgSolarStore,
     } = await import('./stores/postgres.js');
     cached = {
       knowledge: new PgKnowledgeStore(),
@@ -22,6 +23,7 @@ export async function getStorage(): Promise<Storage> {
       documents: new PgDocumentStore(),
       folders: new PgFolderSourceStore(),
       users: new PgUserStore(),
+      solar: new PgSolarStore(),
       usesPostgres: true,
     };
   } else {

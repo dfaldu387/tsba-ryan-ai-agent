@@ -6,7 +6,6 @@ import { solarmanScraperProvider } from './scraper/solarman-scraper.js';
 import { solisScraperProvider } from './scraper/solis-scraper.js';
 import { elekeeperScraperProvider } from './scraper/elekeeper-scraper.js';
 import { whesScraperProvider } from './scraper/whes-scraper.js';
-import { dynessScraperProvider } from './scraper/dyness-scraper.js';
 import { sigenProvider } from './sigen-provider.js';
 import { solisProvider } from './solis.js';
 import { growattProvider } from './growatt.js';
@@ -39,7 +38,7 @@ export const PROVIDERS: SolarProvider[] = [
   withFallback(solisProvider, solisScraperProvider),
   growattProvider,
   sungrowProvider,
-  withFallback(dynessProvider, dynessScraperProvider),
+  dynessProvider,
   withFallback(elekeeperProvider, elekeeperScraperProvider),
   withFallback(whesProvider, whesScraperProvider),
   sigenProvider,

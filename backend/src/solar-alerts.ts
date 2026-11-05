@@ -13,6 +13,15 @@ export interface SolarAlertsResult {
   alerts: SolarMonitorAlert[];
   generatedAt: number;
   scannedPlants: number;
+  /**
+   * Total devices (inverters, batteries, loggers, meters) reported across the
+   * fleet, summed from the per-plant detail scan. Counts only plants that were
+   * scanned (offline plants are skipped). Providers whose API doesn't expose a
+   * device list — notably Sigenergy's OpenAPI — contribute 0 here.
+   */
+  totalDevices: number;
+  /** Of `totalDevices`, how many are communicating (online). */
+  onlineDevices: number;
   /** Platforms that couldn't be reached for the plant list. */
   errors: { provider: string; name: string; error: string }[];
 }
@@ -75,11 +84,17 @@ async function collectSolarAlerts(): Promise<SolarAlertsResult> {
   // covers, so scanning them would just add noise. Fan out in parallel; a single
   // plant's failure is swallowed so it can't sink the whole scan.
   const toScan = stations.filter((s) => s.status !== 'offline');
+  let totalDevices = 0;
+  let onlineDevices = 0;
   await mapLimit(toScan, DETAIL_SCAN_CONCURRENCY, async (s) => {
       const provider = getProvider(s.provider);
       if (!provider) return;
       try {
         const detail = await provider.stationDetail(s.id);
+        // Fleet device tally (JS is single-threaded, so these increments are safe
+        // across the concurrent workers).
+        totalDevices += detail.devices.length;
+        onlineDevices += detail.devices.filter((d) => d.online !== false).length;
         for (const d of detail.devices) {
           if (d.online === false) {
             alerts.push({
@@ -116,5 +131,5 @@ async function collectSolarAlerts(): Promise<SolarAlertsResult> {
   const rank: Record<string, number> = { offline: 0, partial: 1, fault: 1, alert: 2, device: 3 };
   alerts.sort((a, b) => rank[a.severity] - rank[b.severity] || a.plant.localeCompare(b.plant));
 
-  return { alerts, generatedAt: Date.now(), scannedPlants: toScan.length, errors };
+  return { alerts, generatedAt: Date.now(), scannedPlants: toScan.length, totalDevices, onlineDevices, errors };
 }
