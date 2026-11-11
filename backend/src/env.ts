@@ -169,6 +169,11 @@ export const env = {
   // 'memory' mode the recorder still runs but history is lost on restart.
   solarSnapshotIntervalMin: Number(optional('SOLAR_SNAPSHOT_INTERVAL_MIN', '15')),
   solarRetentionDays: Number(optional('SOLAR_RETENTION_DAYS', '400')),
+
+  // NOTE: Solar monitoring alerts (offline plants / inverters / faults) are no
+  // longer configured here — they live in the DB and are edited in the admin
+  // Settings UI (recipients, interval, quiet hours, customer alerts). See
+  // backend/src/solar-alert-settings.ts.
 };
 
 /** True once Deye Cloud credentials are configured — gates the Deye provider. */

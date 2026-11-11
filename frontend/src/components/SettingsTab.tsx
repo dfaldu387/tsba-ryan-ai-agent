@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import type { AdminOverview, AuthenticatedUser } from '@tsba/shared';
 import { AuthError, getOverview } from '../api';
+import { AlertSettings } from './AlertSettings';
+import { PlantContacts } from './PlantContacts';
 
 function Row({ label, value, tone }: { label: string; value: string; tone?: 'ok' | 'warn' }) {
   return (
@@ -87,6 +89,10 @@ export function SettingsTab({ user, onAuthError }: { user: AuthenticatedUser; on
           </p>
         )}
       </section>
+
+      <AlertSettings user={user} onAuthError={onAuthError} />
+
+      <PlantContacts user={user} onAuthError={onAuthError} />
 
       <section className="card">
         <div className="card-h">

@@ -17,8 +17,14 @@ import {
  * hex of the password. Passing an orgId yields a business-scoped token. The
  * bearer token is cached and re-acquired on an invalid-token response.
  *
- * Status: endpoints are from Solarman community integrations; verify against
- * your business API docs once credentials are in (paths may differ by plan).
+ * Endpoints verified against the Solarman Open API manual + community clients:
+ *   POST /account/v1.0/token      — bearer (orgId ⇒ Business-scoped token)
+ *   POST /station/v1.0/list       — fleet  → { stationList: [...] }
+ *   POST /station/v1.0/realTime   — one plant's live snapshot
+ *   POST /station/v1.0/device     — one plant's device list
+ *   POST /device/v1.0/alertList   — a device's alarms (available for faults)
+ * Dormant until SOLARMAN_APP_ID/SECRET are set (Business API access must be
+ * granted by Solarman). Rate limit: ~50 calls/min per account.
  */
 
 const sha256Hex = (s: string): string => createHash('sha256').update(s, 'utf8').digest('hex');
@@ -90,11 +96,20 @@ interface SolarmanStation {
   name?: string;
   networkStatus?: string;
   connectionStatus?: string;
-  generationPower?: number;
-  installedCapacity?: number;
+  generationPower?: number; // W
+  installedCapacity?: number; // kWp
   batterySoc?: number;
   locationAddress?: string;
-  lastUpdateTime?: number;
+  lastUpdateTime?: number; // epoch seconds
+  // Richer fields the Business list also returns (all optional/defensive).
+  generationValue?: number; // today kWh
+  generationTotal?: number; // all-time kWh
+  gridInterconnectionType?: string;
+  startOperatingTime?: number; // epoch seconds
+  ownerName?: string;
+  creatorName?: string;
+  contactPhone?: string;
+  nmi?: string;
 }
 
 function mapStatus(s?: string): StationStatus {
@@ -105,23 +120,76 @@ function mapStatus(s?: string): StationStatus {
   return 'unknown';
 }
 
+// Device list fields vary (connectStatus 0/1 vs deviceState 1 online/2 alarm/3
+// offline); treat a device as online unless something clearly marks it down.
+interface SolarmanDevice {
+  deviceSn?: string;
+  deviceType?: string;
+  connectStatus?: number | string;
+  deviceState?: number | string;
+  deviceStatus?: number | string;
+}
+function deviceOnline(d: SolarmanDevice): boolean {
+  const cs = String(d.connectStatus ?? '').toUpperCase();
+  if (cs === '0' || cs === 'OFFLINE') return false;
+  const st = String(d.deviceState ?? d.deviceStatus ?? '').toUpperCase();
+  if (st === '3' || st === 'OFFLINE') return false;
+  return true;
+}
+
+// Last fleet list, kept so stationDetail can build its info without re-fetching.
+const rawById = new Map<string, SolarmanStation>();
+
+const tsDate = (sec?: number): string | undefined =>
+  sec ? new Date(sec * 1000).toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' }) : undefined;
+
+function toStation(s: SolarmanStation): NormalizedStation {
+  return {
+    id: String(s.id),
+    name: s.name || `Station ${s.id}`,
+    status: mapStatus(s.networkStatus || s.connectionStatus),
+    currentPowerW: s.generationPower,
+    dailyEnergyKwh: s.generationValue,
+    totalEnergyKwh: s.generationTotal,
+    capacityKw: s.installedCapacity,
+    batterySoc: s.batterySoc,
+    location: s.locationAddress,
+    owner: s.ownerName || s.creatorName || undefined,
+    contact: s.contactPhone || undefined,
+    lastUpdate: s.lastUpdateTime,
+  };
+}
+
+function infoFromStation(s: SolarmanStation): { label: string; value: string }[] {
+  const info: { label: string; value: string }[] = [];
+  const push = (label: string, v: string | number | undefined | null) => {
+    if (v != null && v !== '') info.push({ label, value: String(v) });
+  };
+  push('Location', s.locationAddress);
+  push('Owner', s.ownerName || s.creatorName);
+  push('Contact', s.contactPhone);
+  push('Installed capacity', s.installedCapacity != null ? `${s.installedCapacity} kWp` : undefined);
+  push('Today', s.generationValue != null ? `${s.generationValue} kWh` : undefined);
+  push('Total', s.generationTotal != null ? `${s.generationTotal} kWh` : undefined);
+  push('Grid type', s.gridInterconnectionType);
+  push('NMI', s.nmi);
+  push('Commissioned', tsDate(s.startOperatingTime));
+  push('Last update', tsDate(s.lastUpdateTime));
+  push('Station ID', s.id);
+  return info;
+}
+
 export const solarmanProvider: SolarProvider = {
   id: 'solarman',
   name: 'Solarman Business',
   configured: solarmanConfigured,
 
   async listStations(): Promise<NormalizedStation[]> {
-    const data = await post<Envelope & { stationList?: SolarmanStation[] }>('/station/v1.0/list', { page: 1, size: 100 });
-    return (data.stationList ?? []).map((s) => ({
-      id: String(s.id),
-      name: s.name || `Station ${s.id}`,
-      status: mapStatus(s.networkStatus || s.connectionStatus),
-      currentPowerW: s.generationPower,
-      capacityKw: s.installedCapacity,
-      batterySoc: s.batterySoc,
-      location: s.locationAddress,
-      lastUpdate: s.lastUpdateTime,
-    }));
+    const data = await post<Envelope & { stationList?: SolarmanStation[] }>('/station/v1.0/list', { page: 1, size: 200 });
+    const list = data.stationList ?? [];
+    rawById.clear();
+    for (const s of list) rawById.set(String(s.id), s);
+    return list.map(toStation);
   },
 
   async stationDetail(stationId: string): Promise<NormalizedDetail> {
@@ -131,13 +199,16 @@ export const solarmanProvider: SolarProvider = {
         '/station/v1.0/realTime',
         { stationId: id },
       ).catch(() => null),
-      post<Envelope & { deviceListItems?: { deviceSn?: string; deviceType?: string; connectStatus?: number | string }[] }>(
-        '/station/v1.0/device',
-        { stationId: id, page: 1, size: 100 },
-      ).catch(() => null),
+      post<Envelope & { deviceListItems?: SolarmanDevice[] }>('/station/v1.0/device', {
+        stationId: id,
+        page: 1,
+        size: 100,
+      }).catch(() => null),
     ]);
+
+    const rec = rawById.get(stationId);
     return {
-      info: [],
+      info: rec ? infoFromStation(rec) : [],
       latest: latest
         ? {
             currentPowerW: latest.generationPower,
@@ -152,7 +223,7 @@ export const solarmanProvider: SolarProvider = {
       devices: (devices?.deviceListItems ?? []).map((d, i) => ({
         sn: d.deviceSn || String(i),
         type: d.deviceType,
-        online: String(d.connectStatus ?? '').toUpperCase() === '1' || String(d.connectStatus).toUpperCase() === 'ONLINE',
+        online: deviceOnline(d),
       })),
       alerts: [],
       power: [],

@@ -425,3 +425,85 @@ export interface GmailScanResult {
   failed: number;
   results: IngestResult[];
 }
+
+// ─── Solar monitoring alert settings (admin-configurable, stored in the DB) ──
+
+/** Admin-side alert recipients and how long an issue must persist first. */
+export interface AdminAlertChannel {
+  /** Email addresses that receive fleet alerts. */
+  recipients: string[];
+  /** Only notify once an issue has persisted at least this many minutes (0 = immediately). */
+  delayMin: number;
+}
+
+/**
+ * Customer (plant-owner) alert settings. Delivery is not wired yet — enabling
+ * this stores the preference and the debounce; per-plant customer addresses are
+ * added later.
+ */
+export interface CustomerAlertChannel {
+  enabled: boolean;
+  delayMin: number;
+}
+
+/**
+ * Admin-maintained owner/contact details for one plant, used when the monitoring
+ * platform doesn't expose them (or to override what it does). Surfaced in alert
+ * emails. Keyed by `${provider}:${plantId}` in the PlantContacts map.
+ */
+export interface PlantContact {
+  /** Owner / primary contact name. */
+  name?: string;
+  email?: string;
+  phone?: string;
+  /** Free-text note (site access, preferred contact hours, …). */
+  notes?: string;
+  /** Plant name, stored for display so the editor needn't re-resolve it. */
+  plantName?: string;
+}
+
+/** All plant contacts, keyed by `${provider}:${plantId}`. */
+export type PlantContacts = Record<string, PlantContact>;
+
+/**
+ * One admin rule mapping an issue to a knowledge-base document: when any of the
+ * comma-separated keywords appears in an alert's text, that document (a Drive
+ * PDF in the KB) is attached to the alert email.
+ */
+export interface AlertResolutionRule {
+  /** Comma/space separated match terms, e.g. "offline, wifi, not communicating". */
+  keywords: string;
+  /** KB document id (the Drive file id). */
+  documentId: string;
+  /** Document title, for display and the attachment filename. */
+  documentTitle: string;
+}
+
+/**
+ * Configuration for the background solar alert monitor. Persisted in the DB and
+ * edited in the admin UI; the monitor reads it live (no restart needed).
+ */
+export interface SolarAlertSettings {
+  /** Master switch for the monitor. */
+  enabled: boolean;
+  /** How often the fleet is scanned, minutes. */
+  intervalMin: number;
+  /** Send a recovery email when a previously-alerted issue clears. */
+  recovery: boolean;
+  /** Suppress all emails while it is night at the fleet location; send a morning catch-up. */
+  quietNight: boolean;
+  /** Fleet reference location used for the sunset/sunrise calculation. */
+  lat: number;
+  lng: number;
+  admin: AdminAlertChannel;
+  customer: CustomerAlertChannel;
+  /** Include an AI-written, KB-grounded solution in the alert email body. */
+  includeSolution: boolean;
+  /** Attach a matching resolution guide (PDF from the KB) to alert emails. */
+  attachResolution: boolean;
+  /** Keyword→document rules, evaluated in order; first match wins. Falls back to
+   *  automatic KB retrieval when no rule matches and attachResolution is on. */
+  resolutionRules: AlertResolutionRule[];
+  /** ISO timestamp of the last save (server-set). */
+  updatedAt?: string;
+}

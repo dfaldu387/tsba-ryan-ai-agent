@@ -29,6 +29,14 @@ export interface NormalizedStation {
   /** Battery state of charge, %. */
   batterySoc?: number;
   location?: string;
+  /** Plant owner / primary contact, when the platform exposes them (e.g. Deye). */
+  owner?: string;
+  contact?: string;
+  /** Installation coordinates (decimal degrees), when the platform exposes them.
+   *  Used for per-plant sunrise/sunset so night-time alerts are judged at the
+   *  plant's own location rather than a single fleet reference point. */
+  lat?: number;
+  lng?: number;
   /** Last data update, epoch seconds. */
   lastUpdate?: number;
 }
@@ -103,6 +111,9 @@ export interface SolarMonitorAlert {
   deviceSn?: string;
   /** Epoch seconds, when known (e.g. a fault's start time). */
   at?: number;
+  /** Plant coordinates (decimal degrees), when known — for per-plant quiet hours. */
+  lat?: number;
+  lng?: number;
 }
 
 export interface SolarProvider {

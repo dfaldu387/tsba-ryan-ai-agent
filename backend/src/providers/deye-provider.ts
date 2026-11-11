@@ -100,6 +100,10 @@ export const deyeProvider: SolarProvider = {
           totalEnergyKwh: energy.yearly,
           batterySoc: s.batterySOC,
           location: s.locationAddress,
+          owner: s.ownerName ?? undefined,
+          contact: s.contactPhone || undefined,
+          lat: s.locationLat,
+          lng: s.locationLng,
           lastUpdate: s.lastUpdateTime,
         };
       }),

@@ -47,9 +47,40 @@ const IDLE_MS = 5 * 60_000; // close the browser if unused for 5 min
  * burst of requests on a cold cache can open dozens at once and OOM the server.
  * Keep it small — scrape results are cached, so throughput barely matters.
  */
-const MAX_CONTEXTS = Math.max(1, Number(process.env.SCRAPER_MAX_CONTEXTS) || 2);
+const MAX_CONTEXTS = Math.max(1, Number(process.env.SCRAPER_MAX_CONTEXTS) || 1);
 let active = 0;
 const waiters: Array<() => void> = [];
+
+// Resource types that a DATA scrape never needs — we only want the page's JS to
+// run and fire its XHR/fetch for the device list. Blocking images, media and
+// fonts (plus third-party analytics) cuts the scrape's memory, CPU and bandwidth
+// sharply and makes it finish sooner (less to download before the data call
+// fires). CSS is deliberately kept — it's tiny and a few SPAs gate their mount on
+// it. Set SCRAPER_BLOCK_ASSETS=0 to disable entirely if a portal misbehaves.
+const BLOCK_ASSETS = process.env.SCRAPER_BLOCK_ASSETS !== '0';
+const BLOCKED_TYPES = new Set(['image', 'media', 'font']);
+const TRACKER_HOSTS =
+  /google-analytics|googletagmanager|doubleclick|facebook\.net|connect\.facebook|hotjar|sentry|clarity\.ms|segment\.|mixpanel|fullstory|intercom|bugsnag|amplitude/i;
+
+/**
+ * Drop non-essential requests on a scrape context: static assets and third-party
+ * trackers. Login contexts are NOT trimmed (a captcha/image may be needed), only
+ * data scrapes. Best-effort — any routing error just lets the request through.
+ */
+async function trimAssets(ctx: BrowserContext): Promise<void> {
+  if (!BLOCK_ASSETS) return;
+  await ctx
+    .route('**/*', (route) => {
+      try {
+        const req = route.request();
+        if (BLOCKED_TYPES.has(req.resourceType()) || TRACKER_HOSTS.test(req.url())) return route.abort();
+        return route.continue();
+      } catch {
+        return route.continue().catch(() => {});
+      }
+    })
+    .catch(() => {});
+}
 
 function acquireSlot(): Promise<void> {
   if (active < MAX_CONTEXTS) {
@@ -78,7 +109,22 @@ async function getBrowser(): Promise<Browser> {
     browserPromise = chromium
       .launch({
         headless: true,
-        args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled'],
+        args: [
+          '--no-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-blink-features=AutomationControlled',
+          // Shed features a headless data-scrape never uses, to lower the memory
+          // and CPU footprint of the shared Chromium.
+          '--disable-gpu',
+          '--disable-extensions',
+          '--disable-background-networking',
+          '--disable-default-apps',
+          '--disable-sync',
+          '--disable-software-rasterizer',
+          '--mute-audio',
+          '--no-first-run',
+          '--renderer-process-limit=2',
+        ],
       })
       .then((b) => {
         browser = b;
@@ -116,6 +162,7 @@ export async function withPage<T>(fn: (page: Page) => Promise<T>): Promise<T> {
   try {
     const b = await getBrowser();
     ctx = await b.newContext(CONTEXT_OPTS);
+    await trimAssets(ctx);
     const page = await ctx.newPage();
     page.setDefaultTimeout(30_000);
     return await fn(page);
@@ -227,6 +274,7 @@ async function runInSession<T>(portalKey: string, fn: (page: Page) => Promise<T>
   try {
     const b = await getBrowser();
     ctx = await b.newContext({ ...CONTEXT_OPTS, storageState: sessionPath(portalKey) });
+    await trimAssets(ctx);
     // Replay captured localStorage + sessionStorage for the portal's origin.
     // storageState over CDP often misses localStorage and never has
     // sessionStorage, where some SPAs (SAJ) keep their auth token. Passed as a

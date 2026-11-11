@@ -17,6 +17,8 @@ import type {
   IngestResult,
   IngestedDocument,
   Role,
+  SolarAlertSettings,
+  PlantContacts,
   SourceCard,
   User,
 } from '@tsba/shared';
@@ -487,4 +489,33 @@ export function getSolarOverview(): Promise<SolarOverview> {
 
 export function getSolarStationDetail(provider: string, id: string): Promise<SolarStationDetail> {
   return request<SolarStationDetail>(`/api/solar/${encodeURIComponent(provider)}/stations/${encodeURIComponent(id)}/detail`);
+}
+
+// ─── Solar alert settings (admin) ───────────────────────────────────────────
+export function getAlertSettings(): Promise<{ settings: SolarAlertSettings }> {
+  return request<{ settings: SolarAlertSettings }>('/api/solar/alerts/settings');
+}
+
+export function updateAlertSettings(patch: Partial<SolarAlertSettings>): Promise<{ settings: SolarAlertSettings }> {
+  return request<{ settings: SolarAlertSettings }>('/api/solar/alerts/settings', {
+    method: 'PUT',
+    body: JSON.stringify(patch),
+  });
+}
+
+// ─── Per-plant owner/contact store ──────────────────────────────────────────
+export function getPlantContacts(): Promise<{ contacts: PlantContacts }> {
+  return request<{ contacts: PlantContacts }>('/api/solar/plant-contacts');
+}
+
+export function updatePlantContacts(contacts: PlantContacts): Promise<{ contacts: PlantContacts }> {
+  return request<{ contacts: PlantContacts }>('/api/solar/plant-contacts', {
+    method: 'PUT',
+    body: JSON.stringify({ contacts }),
+  });
+}
+
+/** Send a one-off test alert email to the configured recipients. */
+export function sendTestAlert(): Promise<{ test: boolean; sent: boolean; recipients?: string[]; detail?: string; error?: string }> {
+  return request('/api/solar/alerts/run?test=1', { method: 'POST' });
 }

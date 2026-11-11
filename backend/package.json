@@ -13,7 +13,8 @@
     "portal-login": "tsx src/scripts/portal-login.ts",
     "portal-chrome": "tsx src/scripts/portal-chrome.ts",
     "portal-capture": "tsx src/scripts/portal-capture.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check-provider": "tsx src/scripts/check-provider.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.68.0",

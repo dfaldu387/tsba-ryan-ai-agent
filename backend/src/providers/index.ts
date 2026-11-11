@@ -11,7 +11,7 @@ import { solisProvider } from './solis.js';
 import { growattProvider } from './growatt.js';
 import { sungrowProvider } from './sungrow.js';
 import { dynessProvider } from './dyness.js';
-import { elekeeperProvider } from './elekeeper.js';
+import { esolarProvider } from './esolar.js';
 import { whesProvider } from './whes.js';
 
 /**
@@ -39,7 +39,9 @@ export const PROVIDERS: SolarProvider[] = [
   growattProvider,
   sungrowProvider,
   dynessProvider,
-  withFallback(elekeeperProvider, elekeeperScraperProvider),
+  // SAJ/Elekeeper over plain HTTPS (no browser). The Chromium scraper stays as a
+  // fallback if the portal credentials are ever missing.
+  withFallback(esolarProvider, elekeeperScraperProvider),
   withFallback(whesProvider, whesScraperProvider),
   sigenProvider,
 ];
@@ -66,6 +68,24 @@ export interface AggregateResult {
 // the previous snapshot instead of blanking the provider or flashing an error.
 const lastGood = new Map<string, StationWithProvider[]>();
 
+// Hard cap on how long ONE provider may take to return its station list. Without
+// it, a single slow/hanging provider (a wedged scraper context, a provider API
+// with no timeout of its own) blocks the whole Promise.all — so the monitoring
+// page spins on the slowest platform. On timeout the provider falls back to its
+// last-good data (marked stale) or is reported as an error, and the page returns
+// promptly with every other platform's data.
+const PROVIDER_TIMEOUT_MS = 12_000;
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`timed out after ${Math.round(ms / 1000)}s`)), ms);
+    p.then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); },
+    );
+  });
+}
+
 /**
  * Fetch every station across all configured providers, in parallel, resiliently:
  * each provider gets one retry, and on failure falls back to its last-good data.
@@ -80,14 +100,19 @@ export async function aggregateStations(): Promise<AggregateResult> {
     configuredProviders().map(async (p) => {
       const attempt = () => p.listStations();
       try {
-        let list: NormalizedStation[];
-        try {
-          list = await attempt();
-        } catch {
-          // One retry after a short pause — covers a transient timeout/blip.
-          await new Promise((r) => setTimeout(r, 400));
-          list = await attempt();
-        }
+        // One retry after a short pause (covers a transient blip), with the whole
+        // attempt+retry bounded so a hanging provider can't stall the page.
+        const list = await withTimeout(
+          (async () => {
+            try {
+              return await attempt();
+            } catch {
+              await new Promise((r) => setTimeout(r, 400));
+              return await attempt();
+            }
+          })(),
+          PROVIDER_TIMEOUT_MS,
+        );
         const withProvider = list.map((s) => ({ ...s, provider: p.id }));
         lastGood.set(p.id, withProvider);
         stations.push(...withProvider);

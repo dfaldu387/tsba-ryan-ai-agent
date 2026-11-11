@@ -1041,7 +1041,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // plants, disconnected devices and active faults across all platforms. The
   // underlying fleet-wide detail scan is cached (~2 min), so this stays cheap
   // even when several admins poll it.
-  app.get('/api/solar/alerts', { preHandler: requirePermission('view') }, async () => getSolarAlerts());
+  app.get('/api/solar/alerts', { preHandler: requirePermission('view') }, async (req, reply) => {
+    try {
+      return await getSolarAlerts();
+    } catch (err) {
+      req.log.error({ err }, 'solar alerts scan failed');
+      console.error('[solar/alerts] scan failed:', (err as Error).stack || err);
+      return reply.code(500).send({ error: 'solar_alerts_failed', detail: (err as Error).message });
+    }
+  });
 
   // One station's detail bundle (realtime, devices, alerts, today's power curve)
   // from a specific provider.
@@ -1099,4 +1107,95 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const res = await captureSolarSnapshot();
     return { recorded: res != null, stations: res?.stations ?? 0 };
   });
+
+  // ── Alert settings (admin-editable, stored in the DB) ──────────────────────
+
+  // Current alert configuration (recipients, interval, delays, quiet hours, …).
+  app.get('/api/solar/alerts/settings', { preHandler: requirePermission('view') }, async () => {
+    const { getAlertSettings } = await import('../solar-alert-settings.js');
+    return { settings: await getAlertSettings() };
+  });
+
+  // Update the alert configuration. Validated + merged server-side; the monitor
+  // picks up the change on its next scan. Managers/admins only.
+  app.put<{ Body: Partial<import('@tsba/shared').SolarAlertSettings> }>(
+    '/api/solar/alerts/settings',
+    { preHandler: requirePermission('manage_connections') },
+    async (req, reply) => {
+      const { saveAlertSettings } = await import('../solar-alert-settings.js');
+      try {
+        return { settings: await saveAlertSettings(req.body ?? {}) };
+      } catch (err) {
+        return reply.code(400).send({ error: 'invalid_settings', detail: (err as Error).message });
+      }
+    },
+  );
+
+  // ── Per-plant owner/contact store (admin-maintained) ──────────────────────
+
+  app.get('/api/solar/plant-contacts', { preHandler: requirePermission('view') }, async () => {
+    const { getPlantContacts } = await import('../plant-contacts.js');
+    return { contacts: await getPlantContacts() };
+  });
+
+  app.put<{ Body: { contacts?: import('@tsba/shared').PlantContacts } }>(
+    '/api/solar/plant-contacts',
+    { preHandler: requirePermission('manage_connections') },
+    async (req, reply) => {
+      const { savePlantContacts } = await import('../plant-contacts.js');
+      try {
+        return { contacts: await savePlantContacts(req.body?.contacts ?? {}) };
+      } catch (err) {
+        return reply.code(400).send({ error: 'invalid_contacts', detail: (err as Error).message });
+      }
+    },
+  );
+
+  // Run the alert monitor now (scan → de-dupe → email due issues / recoveries).
+  // Returns what the pass did. `?test=1` instead sends a one-off sample email to
+  // the configured admin recipients, to verify the Gmail wiring without waiting
+  // for a real outage.
+  app.post<{ Querystring: { test?: string } }>(
+    '/api/solar/alerts/run',
+    { preHandler: requirePermission('ask') },
+    async (req, reply) => {
+      // Send a REAL alert email from an actual current fleet issue (real plant,
+      // owner details, reason + resolution attachment), for previewing.
+      if (req.query.test === 'real') {
+        const { sendSampleAlert } = await import('../solar-alert-monitor.js');
+        const { GmailAuthError } = await import('../google-gmail.js');
+        try {
+          return await sendSampleAlert();
+        } catch (err) {
+          const isAuth = err instanceof GmailAuthError;
+          return reply
+            .code(isAuth ? 503 : 502)
+            .send({ sent: false, error: isAuth ? 'gmail_not_connected' : 'send_failed', detail: (err as Error).message });
+        }
+      }
+      if (req.query.test === '1' || req.query.test === 'true') {
+        const { getAlertSettings } = await import('../solar-alert-settings.js');
+        const recipients = (await getAlertSettings()).admin.recipients;
+        if (!recipients.length)
+          return reply.code(400).send({ error: 'no_recipient', detail: 'No admin recipients configured.' });
+        const { sendMail, GmailAuthError } = await import('../google-gmail.js');
+        try {
+          await sendMail({
+            to: recipients.join(', '),
+            subject: '[Solar Alert] Test notification',
+            text: 'This is a test alert from the TSBA solar monitoring system. If you received it, email alerts are wired up correctly.',
+            html: '<p>This is a <strong>test alert</strong> from the TSBA solar monitoring system.</p><p>If you received it, email alerts are wired up correctly.</p>',
+          });
+          return { test: true, sent: true, recipients };
+        } catch (err) {
+          const isAuth = err instanceof GmailAuthError;
+          return reply
+            .code(isAuth ? 503 : 502)
+            .send({ test: true, sent: false, error: isAuth ? 'gmail_not_connected' : 'send_failed', detail: (err as Error).message });
+        }
+      }
+      const { runAlertMonitorOnce } = await import('../solar-alert-monitor.js');
+      return runAlertMonitorOnce();
+    },
+  );
 }

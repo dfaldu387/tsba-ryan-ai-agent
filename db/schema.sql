@@ -160,3 +160,13 @@ CREATE TABLE IF NOT EXISTS solar_fleet_readings (
 );
 CREATE INDEX IF NOT EXISTS idx_solar_fleet_readings_time
   ON solar_fleet_readings (captured_at DESC);
+
+-- ─── Generic application settings (admin-editable, JSON per key) ─────────────
+-- Currently holds the solar alert-monitor configuration under key 'solar_alerts'
+-- (see backend/src/solar-alert-settings.ts). Kept generic so other admin-tunable
+-- settings can reuse it without a migration.
+CREATE TABLE IF NOT EXISTS app_settings (
+  key        TEXT PRIMARY KEY,
+  value      JSONB NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

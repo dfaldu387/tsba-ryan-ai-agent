@@ -192,6 +192,13 @@ interface SemsPacResult {
   pacs?: SemsPac[];
 }
 
+/** Coerce a possibly-string coordinate to a finite number, else undefined. */
+function coord(v: string | number | undefined): number | undefined {
+  if (v == null || v === '') return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) && n !== 0 ? n : undefined;
+}
+
 function toStation(s: SemsStation): NormalizedStation {
   return {
     id: s.powerstation_id,
@@ -203,6 +210,8 @@ function toStation(s: SemsStation): NormalizedStation {
     totalEnergyKwh: s.etotal,
     capacityKw: s.capacity,
     location: s.location,
+    lat: coord(s.latitude),
+    lng: coord(s.longitude),
   };
 }
 

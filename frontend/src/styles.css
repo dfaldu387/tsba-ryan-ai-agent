@@ -1629,3 +1629,75 @@ a.icon-btn { text-decoration: none; }
   .solar-kpi-row { grid-template-columns: repeat(2, 1fr); }
   .solar-refresh-bar { justify-content: space-between; }
 }
+
+/* ─── Solar alert settings form ──────────────────────────────────────────── */
+.al-banner { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 13px 16px; border-radius: 11px; background: var(--sunk); border: 1px solid var(--line); }
+.al-banner[data-on="true"] { background: var(--ok-soft); border-color: transparent; }
+.al-banner-main { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.al-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+.al-banner[data-on="true"] .al-dot { background: var(--ok); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 28%, transparent); }
+.al-banner-title { font-size: 14px; font-weight: 700; font-family: var(--f-display); }
+.al-banner-sub { color: var(--muted); font-size: 12.5px; }
+.al-banner[data-on="true"] .al-banner-sub { color: color-mix(in srgb, var(--ok) 72%, var(--ink)); }
+
+.al-group { border-top: 1px solid var(--line); padding-top: 16px; display: flex; flex-direction: column; gap: 14px; }
+.al-group-h { display: flex; align-items: center; gap: 8px; font-family: var(--f-mono); font-size: 11px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--muted); }
+.al-group-h::after { content: ""; flex: 1; height: 1px; background: var(--line); opacity: 0.6; }
+
+.al-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 560px) { .al-fields { grid-template-columns: 1fr; } }
+
+.al-num { position: relative; }
+.al-num input { padding-right: 48px; }
+.al-num .unit { position: absolute; right: 13px; top: 50%; transform: translateY(-50%); color: var(--muted); font-size: 13px; pointer-events: none; font-family: var(--f-mono); }
+
+.al-hint { color: var(--muted); font-weight: 400; font-size: 12.5px; }
+
+/* Multi-email chip input */
+.al-chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; border: 1px solid var(--line); border-radius: 10px; padding: 8px; background: var(--sunk); min-height: 48px; transition: border-color 0.15s, box-shadow 0.15s, background 0.15s; cursor: text; }
+.al-chips:focus-within { outline: none; border-color: var(--accent); background: var(--surface); box-shadow: 0 0 0 3px var(--accent-soft); }
+.al-chips.is-disabled { cursor: default; opacity: 0.8; }
+.al-chip { display: inline-flex; align-items: center; gap: 4px; background: var(--accent-soft); color: var(--accent-strong); border-radius: 999px; padding: 5px 6px 5px 12px; font-size: 13px; font-weight: 600; max-width: 100%; }
+.al-chip > :first-child, .al-chip { overflow-wrap: anywhere; }
+.al-chip button { border: 0; background: transparent; color: inherit; cursor: pointer; width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; font-size: 15px; line-height: 1; opacity: 0.7; flex: none; padding: 0; }
+.al-chip button:hover { opacity: 1; background: color-mix(in srgb, var(--accent) 28%, transparent); }
+.al-chip-input { flex: 1 1 140px; min-width: 120px; border: 0; background: transparent; padding: 6px 4px; font: inherit; font-size: 15px; color: var(--ink); }
+.al-chip-input:focus { outline: none; }
+.al-chip-err { color: var(--flag); font-size: 12.5px; margin-top: 6px; display: block; }
+
+/* iOS-style switch */
+.switch { position: relative; display: inline-flex; flex: none; width: 42px; height: 24px; }
+.switch input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+.switch-track { position: absolute; inset: 0; background: var(--line); border-radius: 999px; transition: background 0.15s; }
+.switch-track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; transition: transform 0.15s; box-shadow: 0 1px 2px rgba(0,0,0,0.35); }
+.switch input:checked + .switch-track { background: var(--accent); }
+.switch input:checked + .switch-track::after { transform: translateX(18px); }
+.switch input:focus-visible + .switch-track { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.al-toggle-row { display: flex; align-items: center; gap: 12px; cursor: pointer; }
+.al-toggle-row .al-toggle-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.al-toggle-row .al-toggle-text strong { font-size: 14px; font-weight: 600; }
+.al-toggle-row .al-toggle-text span { color: var(--muted); font-size: 12.5px; }
+
+.al-actions { display: flex; align-items: center; gap: 12px; border-top: 1px solid var(--line); padding-top: 16px; flex-wrap: wrap; }
+.al-saved { color: var(--muted); font-size: 12.5px; margin-left: auto; }
+.al-saved.ok { color: var(--ok); }
+.al-indent { margin-left: 54px; }
+@media (max-width: 560px) { .al-indent { margin-left: 0; } }
+
+/* Resolution rule rows */
+.al-rule { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+.al-rule-kw { flex: 1 1 180px; }
+.al-rule-doc { flex: 1 1 200px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font: inherit; font-size: 14px; color: var(--ink); background: var(--sunk); }
+.al-rule-doc:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.al-rule .btn.sm { flex: none; }
+
+/* Plant owner contacts editor */
+.pc-list { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
+.pc-row { border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: var(--sunk); }
+.pc-plant { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.pc-name { font-weight: 600; font-size: 14px; }
+.pc-meta { font-family: var(--f-mono); font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); }
+.pc-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.pc-fields input { font-size: 14px; padding: 9px 11px; }
+@media (max-width: 560px) { .pc-fields { grid-template-columns: 1fr; } }
