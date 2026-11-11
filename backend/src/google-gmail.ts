@@ -203,6 +203,100 @@ function base64Url(s: string): string {
   return Buffer.from(s, 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
+/** Encode a header value that may contain non-ASCII (RFC 2047 "encoded-word"). */
+function encodeHeader(value: string): string {
+  // eslint-disable-next-line no-control-regex
+  return /^[\x00-\x7F]*$/.test(value)
+    ? value
+    : `=?UTF-8?B?${Buffer.from(value, 'utf8').toString('base64')}?=`;
+}
+
+/**
+ * Send a fresh email (new thread) from the connected Gmail account. Used by the
+ * solar monitoring alerter to notify an operator when a plant/inverter goes
+ * offline. Supports an optional HTML body (a plain-text part is always included
+ * as a fallback). Requires the gmail.send scope. Throws GmailAuthError when
+ * Gmail isn't connected, so the caller can degrade gracefully.
+ */
+export interface MailAttachment {
+  filename: string;
+  content: Buffer;
+  contentType: string;
+}
+
+/** Base64-encode a buffer in 76-char lines (RFC 2045) for a MIME body part. */
+function base64Mime(buf: Buffer): string {
+  return buf.toString('base64').replace(/(.{76})/g, '$1\r\n');
+}
+
+export async function sendMail(args: {
+  to: string;
+  subject: string;
+  text: string;
+  html?: string;
+  attachments?: MailAttachment[];
+}): Promise<{ id: string; threadId: string }> {
+  const headers = [`To: ${args.to}`, `Subject: ${encodeHeader(args.subject)}`, 'MIME-Version: 1.0'];
+
+  // The body (text + optional html) as a single MIME entity, so it can either be
+  // the whole message or one part of a multipart/mixed when attachments exist.
+  const altBoundary = `tsba_alt_${Date.now().toString(36)}`;
+  const buildBody = (): { contentType: string; body: string } => {
+    if (args.html) {
+      return {
+        contentType: `multipart/alternative; boundary="${altBoundary}"`,
+        body: [
+          `--${altBoundary}`,
+          'Content-Type: text/plain; charset="UTF-8"',
+          'Content-Transfer-Encoding: 8bit',
+          '',
+          args.text,
+          `--${altBoundary}`,
+          'Content-Type: text/html; charset="UTF-8"',
+          'Content-Transfer-Encoding: 8bit',
+          '',
+          args.html,
+          `--${altBoundary}--`,
+          '',
+        ].join('\r\n'),
+      };
+    }
+    return { contentType: 'text/plain; charset="UTF-8"', body: args.text };
+  };
+
+  let raw: string;
+  const attachments = args.attachments ?? [];
+  if (attachments.length) {
+    const mixed = `tsba_mix_${Date.now().toString(36)}`;
+    const { contentType, body } = buildBody();
+    headers.push(`Content-Type: multipart/mixed; boundary="${mixed}"`);
+    const parts: string[] = [
+      `--${mixed}`,
+      `Content-Type: ${contentType}`,
+      '',
+      body,
+    ];
+    for (const a of attachments) {
+      const name = a.filename.replace(/["\r\n]/g, '');
+      parts.push(
+        `--${mixed}`,
+        `Content-Type: ${a.contentType}; name="${name}"`,
+        'Content-Transfer-Encoding: base64',
+        `Content-Disposition: attachment; filename="${name}"`,
+        '',
+        base64Mime(a.content),
+      );
+    }
+    parts.push(`--${mixed}--`, '');
+    raw = base64Url(`${headers.join('\r\n')}\r\n${parts.join('\r\n')}`);
+  } else {
+    const { contentType, body } = buildBody();
+    headers.push(`Content-Type: ${contentType}`);
+    raw = base64Url(`${headers.join('\r\n')}\r\n\r\n${body}`);
+  }
+  return apiPost<{ id: string; threadId: string }>('/messages/send', { raw });
+}
+
 /**
  * Send a plain-text reply to a message's thread. `to` is the original sender,
  * `subject` is prefixed with "Re:" if needed, and the reply is threaded via the

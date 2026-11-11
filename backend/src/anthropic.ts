@@ -261,6 +261,58 @@ export async function suggestFollowups(
 }
 
 /**
+ * Write a short, practical resolution for a monitoring fault/outage, grounded in
+ * the knowledge-base snippets when they cover it, otherwise standard best
+ * practice for that fault type. Used by the alert emailer to include a solution
+ * next to the failure reason. Best-effort → null on failure / no API key.
+ */
+export async function faultSolution(
+  issue: string,
+  context: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  if (!client) return null;
+  try {
+    const message = await client.messages.create(
+      {
+        model: env.anthropicModel,
+        max_tokens: 600,
+        // Disable extended thinking: on the Claude 5 models it otherwise consumes
+        // the whole token budget on this short, deterministic task and returns no
+        // text answer. A direct answer is what we want here.
+        thinking: { type: 'disabled' },
+        system:
+          'You are a senior solar PV & battery monitoring support engineer. ' +
+          'Given a plant/inverter fault or outage and optional reference material, write a SHORT, practical ' +
+          'resolution an installer or operator can act on. Rules:\n' +
+          '- 3 to 6 concise numbered steps, ordered from most likely/safest first.\n' +
+          '- Plain text only. No preamble, no sign-off, no markdown headings.\n' +
+          '- Ground it in the reference material when it is relevant; otherwise use standard best practice ' +
+          'for that fault type.\n' +
+          '- Do NOT invent model-specific part numbers, menu paths or figures that are not in the reference.\n' +
+          '- If the fault needs an on-site electrician or the manufacturer, say so as the final step.',
+        messages: [
+          {
+            role: 'user',
+            content: `Fault / issue: ${issue}\n\nReference material from our knowledge base (may be partial or empty):\n${context || '(none available)'}\n\nWrite the resolution steps now.`,
+          },
+        ],
+      },
+      { signal },
+    );
+    recordFromUsage('alert_solution', env.anthropicModel, message.usage);
+    const text = message.content
+      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+      .map((b) => b.text)
+      .join('')
+      .trim();
+    return text || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Generate opening suggestion questions for an empty chat, grounded in the
  * products actually present in the knowledge base. Best-effort → [] on failure.
  */

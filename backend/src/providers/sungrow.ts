@@ -280,6 +280,13 @@ function sungrowDeviceType(code?: number | string, name?: string): string | unde
   return name || (code != null ? String(code) : undefined);
 }
 
+/** Coerce a possibly-string coordinate to a finite, non-zero number, else undefined. */
+function coord(v: string | number | undefined): number | undefined {
+  if (v == null || v === '') return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) && n !== 0 ? n : undefined;
+}
+
 function toStation(s: SungrowStation): NormalizedStation {
   return {
     id: String(s.ps_id),
@@ -290,6 +297,8 @@ function toStation(s: SungrowStation): NormalizedStation {
     totalEnergyKwh: energyKwh(s.total_energy),
     capacityKw: capacityKw(s.total_capcity),
     location: s.ps_location,
+    lat: coord(s.latitude),
+    lng: coord(s.longitude),
   };
 }
 

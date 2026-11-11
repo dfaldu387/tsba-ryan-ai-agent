@@ -13,7 +13,8 @@ export type UsageActivity =
   | 'voice_chat' // Voice agent conversational turn
   | 'followups' // follow-up suggestions
   | 'starters' // opening suggestions
-  | 'pdf_extract'; // Claude PDF text extraction (ingest/OCR)
+  | 'pdf_extract' // Claude PDF text extraction (ingest/OCR)
+  | 'alert_solution'; // monitoring-alert resolution text
 
 export const USAGE_ACTIVITY_LABELS: Record<UsageActivity, string> = {
   draft: 'Draft reply',
@@ -21,6 +22,7 @@ export const USAGE_ACTIVITY_LABELS: Record<UsageActivity, string> = {
   followups: 'Follow-up suggestions',
   starters: 'Opening suggestions',
   pdf_extract: 'PDF extraction',
+  alert_solution: 'Alert solution',
 };
 
 export interface UsageEvent {

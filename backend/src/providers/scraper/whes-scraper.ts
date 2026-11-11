@@ -4,16 +4,23 @@ import { SessionExpiredError } from './browser.js';
 import { createScraperProvider } from './scraper-provider.js';
 
 /**
- * WHES / ECOS Hub scraper — portal ecos-hub.whes.com (eCactus / WeiHeng). No API,
- * so we read the device list from the web portal with a captured session. The
+ * WHES / ECOS Hub scraper — the ECOS Hub portal (eCactus / WeiHeng). No API, so
+ * we read the device list from the web portal with a captured session. The
  * device-list page (#/device-list/index) fetches /api/service/hybridSinglePhase/page;
  * we capture that response. The SPA boots slowly, so we retry with reloads.
+ *
+ * The portal origin is regional (AU: ecoshub.whes.com.au). It defaults to the AU
+ * instance and can be overridden with WHES_PORTAL_URL. The API/auth matches below
+ * are path-only (host-agnostic), so only the origin changes between regions. The
+ * captured session must come from signing in at this SAME origin — cookies are
+ * domain-scoped, so a session from a different whes domain won't authenticate.
  *
  * This is a device-management list: it carries identity, state and nameplate +
  * battery SOC, but not live generation power/energy (those aren't exposed here).
  */
 
-const DEVICE_URL = 'https://ecos-hub.whes.com/#/device-list/index';
+const PORTAL_ORIGIN = (process.env.WHES_PORTAL_URL || 'https://ecoshub.whes.com.au').replace(/\/+$/, '');
+const DEVICE_URL = `${PORTAL_ORIGIN}/#/device-list/index`;
 const LIST_MATCH = '/hybridSinglePhase/page';
 const AUTH_MATCH = '/user/authentication';
 

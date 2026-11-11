@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>API Access Request — Email Drafts</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --panel: #1a2332;
+    --panel-2: #141c28;
+    --border: #2a3646;
+    --accent: #2dd4bf;
+    --accent-2: #38bdf8;
+    --text: #e6edf3;
+    --muted: #8b9bb0;
+    --chip: #233044;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  @media print {
+    body { padding: 0; }
+    @page { margin: 14mm; }
+    .card, .steps, .self { break-inside: avoid; }
+    .shot { break-inside: avoid; page-break-inside: avoid; }
+    h2 { break-after: avoid; }
+    button.copy { display: none; }
+  }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 40px 20px;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  header {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 24px;
+    margin-bottom: 32px;
+  }
+  h1 { margin: 0 0 6px; font-size: 26px; letter-spacing: -0.3px; }
+  .sub { color: var(--muted); font-size: 14px; }
+  h2 {
+    font-size: 19px;
+    margin: 40px 0 8px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px; height: 28px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: #04121a;
+    font-size: 14px;
+    font-weight: 700;
+    flex: none;
+  }
+  .meta {
+    font-size: 13px;
+    color: var(--muted);
+    margin: 0 0 14px 38px;
+  }
+  .meta .tag {
+    display: inline-block;
+    background: var(--chip);
+    color: var(--accent);
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    margin-left: 6px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    overflow: hidden;
+    margin: 0 0 8px 38px;
+  }
+  .card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 16px;
+    background: var(--panel-2);
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .fields { padding: 4px 16px; }
+  .field {
+    display: grid;
+    grid-template-columns: 90px 1fr;
+    gap: 10px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 14px;
+  }
+  .field:last-child { border-bottom: none; }
+  .field .label { color: var(--muted); font-weight: 600; }
+  .body-text {
+    white-space: pre-wrap;
+    font-family: "SF Mono", "Cascadia Code", Consolas, monospace;
+    font-size: 13.5px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin: 12px 16px 16px;
+    color: #d7e2ee;
+  }
+  .placeholder { color: var(--accent); font-weight: 600; }
+  button.copy {
+    background: var(--chip);
+    color: var(--accent);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 14px;
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background .15s, color .15s;
+  }
+  button.copy:hover { background: var(--accent); color: #04121a; }
+  button.copy.done { background: var(--accent); color: #04121a; }
+  .note {
+    margin: 10px 16px 18px;
+    padding: 12px 14px;
+    background: rgba(56,189,248,.08);
+    border-left: 3px solid var(--accent-2);
+    border-radius: 6px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .note strong { color: var(--text); }
+  .self {
+    background: var(--panel-2);
+    border: 1px dashed var(--border);
+    border-radius: 12px;
+    padding: 16px 18px;
+    margin: 0 0 8px 38px;
+    font-size: 14px;
+    color: var(--muted);
+  }
+  .self strong { color: var(--text); }
+  .steps {
+    margin: 0 0 8px 38px;
+    padding: 18px 20px 8px;
+    background: var(--panel-2);
+    border: 1px dashed var(--border);
+    border-radius: 12px;
+    font-size: 14px;
+  }
+  .steps ol { margin: 0 0 6px; padding-left: 20px; }
+  .steps li { margin-bottom: 8px; }
+  .shot {
+    display: block;
+    width: 100%;
+    max-width: 760px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin: 14px 0 6px;
+  }
+  .caption {
+    font-size: 12.5px;
+    color: var(--muted);
+    margin: 0 0 20px;
+    font-style: italic;
+  }
+  footer {
+    margin-top: 48px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+    font-size: 12.5px;
+    color: var(--muted);
+  }
+  code { background: var(--chip); padding: 1px 6px; border-radius: 5px; font-size: 12.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>API Access Request — Email Drafts</h1>
+    <div class="sub">Solar monitoring platform integrations · TSBA AI Agent · Prepared 2026-11-06</div>
+  </header>
+
+  <p class="sub" style="margin-bottom:28px;">
+    Two providers require a support request to unlock API access. The drafts below are ready to send
+    &mdash; replace the <span class="placeholder">highlighted placeholders</span> and send each
+    <strong>from the account's registered email address</strong> so support can verify ownership.
+    SolisCloud and Elekeeper are self-service and need no email (summarised at the bottom).
+  </p>
+
+  <!-- WHEC Echo-Hub -->
+  <h2><span class="num">3</span> WHEC Echo-Hub</h2>
+  <div class="meta">OpenAPI enablement <span class="tag">Support request</span></div>
+  <div class="card">
+    <div class="card-head">
+      <span>Email draft</span>
+      <button class="copy" data-target="whec">Copy email</button>
+    </div>
+    <div class="fields">
+      <div class="field"><span class="label">To</span><span>WHEC Echo-Hub Support &lt;<span class="placeholder">[support email]</span>&gt;</span></div>
+      <div class="field"><span class="label">From</span><span class="placeholder">[Registered Account Email]</span></div>
+      <div class="field"><span class="label">Subject</span><span>Request to Enable OpenAPI Access on Our Account</span></div>
+    </div>
+    <div class="body-text" id="whec">Dear WHEC Echo-Hub Support Team,
+
+We would like to request that <span class="placeholder">OpenAPI access</span> be enabled on our account.
+
+Account details:
+  - Account name / ID: <span class="placeholder">[Account Name / ID]</span>
+  - Registered email: <span class="placeholder">[Registered Account Email]</span>
+  - Company: <span class="placeholder">[Company Name]</span>
+
+We intend to use the OpenAPI to integrate our plant and device monitoring data
+into our internal energy-management platform.
+
+Please let us know if any additional verification or documentation is required
+to proceed. We look forward to receiving the API credentials and documentation.
+
+Thank you for your assistance.
+
+Best regards,
+<span class="placeholder">[Your Name]</span>
+<span class="placeholder">[Company Name]</span>
+<span class="placeholder">[Contact Phone]</span></div>
+    <div class="note">
+      <strong>Send from the registered email.</strong> Identity is verified against the account's
+      registered address &mdash; sending from any other mailbox will likely delay or reject the request.
+    </div>
+  </div>
+
+  <!-- Solarman -->
+  <h2><span class="num">4</span> Solarman</h2>
+  <div class="meta">Developer / OpenAPI activation <span class="tag">Support request</span></div>
+  <div class="card">
+    <div class="card-head">
+      <span>Email draft</span>
+      <button class="copy" data-target="solarman">Copy email</button>
+    </div>
+    <div class="fields">
+      <div class="field"><span class="label">To</span><span>Solarman Support &lt;<span class="placeholder">[support email]</span>&gt;</span></div>
+      <div class="field"><span class="label">From</span><span class="placeholder">[Registered Account Email]</span></div>
+      <div class="field"><span class="label">Subject</span><span>Request to Activate Developer / OpenAPI Access</span></div>
+    </div>
+    <div class="body-text" id="solarman">Dear Solarman Support Team,
+
+We would like to request activation of the <span class="placeholder">Developer option / OpenAPI access</span>
+for our account.
+
+Account details:
+  - Account name / ID: <span class="placeholder">[Account Name / ID]</span>
+  - Registered email: <span class="placeholder">[Registered Account Email]</span>
+  - Company: <span class="placeholder">[Company Name]</span>
+
+We plan to integrate our plant monitoring data (production, device status, and
+historical generation) into our internal platform via the OpenAPI.
+
+Please advise on any additional steps, agreements, or verification needed to
+enable developer access, and provide the App ID / App Secret and API
+documentation once activated.
+
+Thank you for your support.
+
+Best regards,
+<span class="placeholder">[Your Name]</span>
+<span class="placeholder">[Company Name]</span>
+<span class="placeholder">[Contact Phone]</span></div>
+    <div class="note">
+      <strong>Send from the registered email.</strong> Solarman activates developer/OpenAPI access
+      manually after verifying account ownership from the registered address.
+    </div>
+  </div>
+
+  <!-- Self-service -->
+  <h2 style="margin-top:44px;">Self-service platforms (no email required)</h2>
+  <div class="steps" style="margin-bottom:10px;">
+    <strong>1 · SolisCloud</strong>
+    <span class="caption" style="display:block;margin:4px 0 2px;">Only available to organization leaders (owner / administrator account).</span>
+    <ol>
+      <li>Log in with the owner/administrator account. In the left sidebar open <code>Service</code>, then select
+          <code>API Management</code>.</li>
+      <li>On the <strong>SolisCloud Plant Monitoring API</strong> panel (status: <em>Nonactivated</em>), click
+          <code>Activate now</code>.</li>
+      <li>Complete <strong>Email Verification</strong>: click <code>Verification code</code>, enter the code sent to
+          the associated email, then click <code>OK</code>.</li>
+      <li>The status changes to <em>Activated</em>. Click <code>View Key</code> to open the credentials.</li>
+      <li>Copy the <strong>KeyID</strong>, <strong>KeySecret</strong>, and <strong>API URL</strong> &mdash; these are
+          used to authenticate against the SolisCloud API.</li>
+    </ol>
+    <img class="shot" src="images/solis-1-api-management.png"
+         alt="SolisCloud — Service menu, API Management selected">
+    <p class="caption">Step 1 — <strong>Service → API Management</strong>.</p>
+    <img class="shot" src="images/solis-2-activate-now.png"
+         alt="SolisCloud — Activate now button on the Plant Monitoring API panel">
+    <p class="caption">Step 2 — Click <strong>Activate now</strong>.</p>
+    <img class="shot" src="images/solis-3-email-verification.png"
+         alt="SolisCloud — Authentication dialog with email verification code">
+    <p class="caption">Step 3 — Email verification: request the code and confirm.</p>
+    <img class="shot" src="images/solis-4-view-key.png"
+         alt="SolisCloud — API activated, View Key button">
+    <p class="caption">Step 4 — Status <strong>Activated</strong>; click <strong>View Key</strong>.</p>
+    <img class="shot" src="images/solis-5-api-credentials.png"
+         alt="SolisCloud — View API Key dialog showing KeyID, KeySecret and API URL">
+    <p class="caption">Step 5 — Copy <strong>KeyID</strong>, <strong>KeySecret</strong> and <strong>API URL</strong>.</p>
+    <div class="note" style="margin-left:0;margin-right:0;">
+      <strong>Keep these credentials secret.</strong> Store the KeyID / KeySecret in <code>.env</code> or a secrets
+      manager &mdash; never commit them to version control.
+    </div>
+  </div>
+  <div class="steps">
+    <strong>2 · Elekeeper (SAJ)</strong>
+    <ol>
+      <li>Log in to the Elekeeper portal.</li>
+      <li>In the <strong>top-right toolbar</strong>, click the <strong>apps / grid icon</strong> (⊞) and select
+          <code>Open Platform</code> from the dropdown.</li>
+      <li>On the <strong>Developer Platform</strong> page, under <em>Autonomous Account</em>, click
+          <code>Create Developer Organization</code> and complete the setup to obtain development resources
+          (API credentials).
+          <br><span class="caption">Use <em>Third-Party Account → Select third-party developers</em> only to
+          authorize an existing external developer.</span></li>
+    </ol>
+    <img class="shot" src="images/elekeeper-open-platform.png"
+         alt="Elekeeper dashboard — apps menu open showing the Open Platform option highlighted">
+    <p class="caption">Step 2 — Apps menu (top-right): select <strong>Open Platform</strong>.</p>
+    <img class="shot" src="images/elekeeper-create-developer-org.png"
+         alt="Elekeeper Developer Platform page — Create Developer Organization button highlighted">
+    <p class="caption">Step 3 — Developer Platform: click <strong>Create Developer Organization</strong>.</p>
+  </div>
+
+  <footer>
+    Generated for the TSBA AI Agent solar monitoring integration. Keep account IDs and issued API
+    secrets out of version control &mdash; store them in <code>.env</code> / a secrets manager.
+  </footer>
+</div>
+
+<script>
+  document.querySelectorAll('button.copy').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var el = document.getElementById(btn.dataset.target);
+      var text = el.innerText;
+      navigator.clipboard.writeText(text).then(function () {
+        var original = btn.textContent;
+        btn.textContent = 'Copied ✓';
+        btn.classList.add('done');
+        setTimeout(function () {
+          btn.textContent = original;
+          btn.classList.remove('done');
+        }, 1600);
+      });
+    });
+  });
+</script>
+</body>
+</html>

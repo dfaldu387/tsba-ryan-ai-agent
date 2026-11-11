@@ -28,6 +28,28 @@ export interface SolarAlertsResult {
 
 const SCAN_TTL_MS = 120_000;
 
+// Hard cap per plant's detail call so one slow/hanging provider (a wedged scraper
+// context, a provider HTTP call with no timeout of its own) can't stall the whole
+// fleet scan — which would make /api/solar/alerts hang and the alert monitor never
+// complete a pass. A timed-out plant is simply skipped for this scan.
+const DETAIL_CALL_TIMEOUT_MS = 20_000;
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('detail_timeout')), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      },
+    );
+  });
+}
+
 // Cap how many plant-detail scans run at once. Most providers derive detail
 // from the cached station list (cheap), but some (e.g. Elekeeper) open a live
 // browser context per plant — an unbounded fan-out across a large fleet could
@@ -47,7 +69,11 @@ async function mapLimit<T>(items: T[], limit: number, worker: (item: T) => Promi
 }
 
 export function getSolarAlerts(): Promise<SolarAlertsResult> {
-  return cached('solar:alerts', SCAN_TTL_MS, collectSolarAlerts);
+  // Stale-while-revalidate: once primed, an expired scan is served instantly and
+  // refreshed in the background, so this endpoint never blocks a request on the
+  // multi-second (cold: multi-minute) fleet detail scan. The very first call
+  // still computes; it's primed at boot (see index.ts) so users never hit it.
+  return cached('solar:alerts', SCAN_TTL_MS, collectSolarAlerts, { swr: true });
 }
 
 async function collectSolarAlerts(): Promise<SolarAlertsResult> {
@@ -65,6 +91,8 @@ async function collectSolarAlerts(): Promise<SolarAlertsResult> {
         plantId: s.id,
         title: `${s.name} is offline`,
         detail: 'The plant is not reporting to its monitoring platform.',
+        lat: s.lat,
+        lng: s.lng,
       });
     } else if (s.status === 'partial') {
       alerts.push({
@@ -75,6 +103,8 @@ async function collectSolarAlerts(): Promise<SolarAlertsResult> {
         plantId: s.id,
         title: `${s.name} is partially down`,
         detail: 'The plant reports a partial or fault state.',
+        lat: s.lat,
+        lng: s.lng,
       });
     }
   }
@@ -90,7 +120,7 @@ async function collectSolarAlerts(): Promise<SolarAlertsResult> {
       const provider = getProvider(s.provider);
       if (!provider) return;
       try {
-        const detail = await provider.stationDetail(s.id);
+        const detail = await withTimeout(provider.stationDetail(s.id), DETAIL_CALL_TIMEOUT_MS);
         // Fleet device tally (JS is single-threaded, so these increments are safe
         // across the concurrent workers).
         totalDevices += detail.devices.length;
@@ -106,6 +136,8 @@ async function collectSolarAlerts(): Promise<SolarAlertsResult> {
               title: `${d.type || 'Device'} offline at ${s.name}`,
               detail: `Device ${d.sn} is not communicating.`,
               deviceSn: d.sn,
+              lat: s.lat,
+              lng: s.lng,
             });
           }
         }
@@ -120,6 +152,8 @@ async function collectSolarAlerts(): Promise<SolarAlertsResult> {
             detail: a.code ? `Fault code ${a.code}` : undefined,
             deviceSn: a.deviceSn,
             at: a.start,
+            lat: s.lat,
+            lng: s.lng,
           });
         }
       } catch {

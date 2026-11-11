@@ -64,6 +64,14 @@ async function main(): Promise<void> {
     app.log.error({ err }, 'could not start solar recorder');
   }
 
+  // Email alerts when a plant/inverter goes offline or a fault is reported.
+  try {
+    const { startSolarAlertMonitor } = await import('./solar-alert-monitor.js');
+    startSolarAlertMonitor();
+  } catch (err) {
+    app.log.error({ err }, 'could not start solar alert monitor');
+  }
+
   await app.listen({ port: env.port, host: '0.0.0.0' });
   console.log(
     `TSBA preview API listening on http://localhost:${env.port}  (env: ${env.nodeEnv}, storage: ${env.storage})`,
@@ -81,6 +89,25 @@ async function main(): Promise<void> {
       app.log.warn({ err }, 'solar cache warm failed (non-fatal)');
     }
   })();
+
+  // Prime the heavier fleet ALERT scan (plant + device health = one detail call
+  // per plant) only AFTER a short delay, so it doesn't compete with users' first
+  // monitoring-page loads for the same provider rate limits / scraper contexts.
+  // This keeps the page fast after a restart while still warming the alerts cache.
+  setTimeout(() => {
+    void (async () => {
+      try {
+        const { getSolarAlerts } = await import('./solar-alerts.js');
+        const primed = await getSolarAlerts().catch((err) => {
+          app.log.warn({ err }, 'solar alert prime failed (non-fatal)');
+          return null;
+        });
+        if (primed) console.log(`Solar alert scan primed (${primed.alerts.length} alerts, ${primed.scannedPlants} plants).`);
+      } catch (err) {
+        app.log.warn({ err }, 'deferred alert prime failed (non-fatal)');
+      }
+    })();
+  }, 20_000).unref?.();
 
   const shutdown = async () => {
     await app.close();
