@@ -111,7 +111,8 @@ import {
 import { isLowQualityExtract, looksCorrupted } from '../text-quality.js';
 import type { TextQuality } from '@tsba/shared';
 import { removeIngestedDocument } from '../documents-service.js';
-import { GmailAuthError, getMessage, listInbox, listLabels, sendReply } from '../google-gmail.js';
+import { GmailAuthError, getMessage, listInbox, listLabels } from '../google-gmail.js';
+import { sendReply } from '../smtp-mailer.js';
 import { scanLabel } from '../gmail-ingest.js';
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
@@ -1155,30 +1156,49 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // Returns what the pass did. `?test=1` instead sends a one-off sample email to
   // the configured admin recipients, to verify the Gmail wiring without waiting
   // for a real outage.
-  app.post<{ Querystring: { test?: string } }>(
+  app.post<{ Querystring: { test?: string; to?: string } }>(
     '/api/solar/alerts/run',
     { preHandler: requirePermission('ask') },
     async (req, reply) => {
       // Send a REAL alert email from an actual current fleet issue (real plant,
       // owner details, reason + resolution attachment), for previewing.
+      if (req.query.test === 'digest') {
+        const { sendSampleDigest } = await import('../solar-alert-monitor.js');
+        const { MailSendError } = await import('../smtp-mailer.js');
+        try {
+          return await sendSampleDigest();
+        } catch (err) {
+          const isSmtp = err instanceof MailSendError;
+          return reply
+            .code(isSmtp ? 503 : 502)
+            .send({ sent: false, error: isSmtp ? 'smtp_not_configured' : 'send_failed', detail: (err as Error).message });
+        }
+      }
       if (req.query.test === 'real') {
         const { sendSampleAlert } = await import('../solar-alert-monitor.js');
-        const { GmailAuthError } = await import('../google-gmail.js');
+        const { MailSendError } = await import('../smtp-mailer.js');
         try {
           return await sendSampleAlert();
         } catch (err) {
-          const isAuth = err instanceof GmailAuthError;
+          const isSmtp = err instanceof MailSendError;
           return reply
-            .code(isAuth ? 503 : 502)
-            .send({ sent: false, error: isAuth ? 'gmail_not_connected' : 'send_failed', detail: (err as Error).message });
+            .code(isSmtp ? 503 : 502)
+            .send({ sent: false, error: isSmtp ? 'smtp_not_configured' : 'send_failed', detail: (err as Error).message });
         }
       }
       if (req.query.test === '1' || req.query.test === 'true') {
-        const { getAlertSettings } = await import('../solar-alert-settings.js');
-        const recipients = (await getAlertSettings()).admin.recipients;
+        // Recipients default to the configured admin list, but an optional `?to=`
+        // override lets ops send a one-off test to any address.
+        let recipients: string[];
+        if (req.query.to && req.query.to.trim()) {
+          recipients = req.query.to.split(',').map((s) => s.trim()).filter(Boolean);
+        } else {
+          const { getAlertSettings } = await import('../solar-alert-settings.js');
+          recipients = (await getAlertSettings()).admin.recipients;
+        }
         if (!recipients.length)
-          return reply.code(400).send({ error: 'no_recipient', detail: 'No admin recipients configured.' });
-        const { sendMail, GmailAuthError } = await import('../google-gmail.js');
+          return reply.code(400).send({ error: 'no_recipient', detail: 'No recipient configured (set admin recipients or pass ?to=).' });
+        const { sendMail, MailSendError } = await import('../smtp-mailer.js');
         try {
           await sendMail({
             to: recipients.join(', '),
@@ -1188,10 +1208,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           });
           return { test: true, sent: true, recipients };
         } catch (err) {
-          const isAuth = err instanceof GmailAuthError;
+          const isSmtp = err instanceof MailSendError;
           return reply
-            .code(isAuth ? 503 : 502)
-            .send({ test: true, sent: false, error: isAuth ? 'gmail_not_connected' : 'send_failed', detail: (err as Error).message });
+            .code(isSmtp ? 503 : 502)
+            .send({ test: true, sent: false, error: isSmtp ? 'smtp_not_configured' : 'send_failed', detail: (err as Error).message });
         }
       }
       const { runAlertMonitorOnce } = await import('../solar-alert-monitor.js');

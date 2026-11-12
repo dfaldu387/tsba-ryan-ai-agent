@@ -480,6 +480,24 @@ export interface AlertResolutionRule {
 }
 
 /**
+ * Scheduled digest delivery. When enabled, admin alerts are not emailed one per
+ * plant as they trip; instead every open issue is held and sent as ONE combined
+ * digest email at the configured clock times, capped per day. This is what keeps
+ * the inbox from filling with a separate email per plant.
+ */
+export interface AlertScheduleConfig {
+  /** On → batch into scheduled digests. Off → the legacy one-email-per-plant flow. */
+  enabled: boolean;
+  /** 24-hour "HH:MM" times (in `timezone`) at which a digest is sent. The count
+   *  of times listed is "how many times a day". */
+  times: string[];
+  /** IANA timezone the `times` are read in, e.g. "Australia/Sydney". */
+  timezone: string;
+  /** Hard cap on digests per day regardless of `times` — a safety limit. */
+  maxPerDay: number;
+}
+
+/**
  * Configuration for the background solar alert monitor. Persisted in the DB and
  * edited in the admin UI; the monitor reads it live (no restart needed).
  */
@@ -504,6 +522,8 @@ export interface SolarAlertSettings {
   /** Keyword→document rules, evaluated in order; first match wins. Falls back to
    *  automatic KB retrieval when no rule matches and attachResolution is on. */
   resolutionRules: AlertResolutionRule[];
+  /** Scheduled digest delivery (times + daily cap). */
+  schedule: AlertScheduleConfig;
   /** ISO timestamp of the last save (server-set). */
   updatedAt?: string;
 }

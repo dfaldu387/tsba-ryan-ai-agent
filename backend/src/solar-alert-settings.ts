@@ -25,6 +25,15 @@ export const DEFAULT_ALERT_SETTINGS: SolarAlertSettings = {
   includeSolution: true,
   attachResolution: false,
   resolutionRules: [],
+  // Batch alerts into two combined digests a day (Sydney time) by default, so the
+  // admin inbox gets one summary email at ~9am and ~5pm instead of a stream of
+  // one-per-plant alerts. Turn `enabled` off to restore the legacy per-plant flow.
+  schedule: {
+    enabled: true,
+    times: ['09:00', '17:00'],
+    timezone: 'Australia/Sydney',
+    maxPerDay: 4,
+  },
 };
 
 // In-memory fallback for STORAGE=memory (no database).
@@ -52,6 +61,12 @@ function withDefaults(stored: Partial<SolarAlertSettings> | null): SolarAlertSet
     includeSolution: stored.includeSolution ?? d.includeSolution,
     attachResolution: stored.attachResolution ?? d.attachResolution,
     resolutionRules: stored.resolutionRules ?? d.resolutionRules,
+    schedule: {
+      enabled: stored.schedule?.enabled ?? d.schedule.enabled,
+      times: stored.schedule?.times ?? d.schedule.times,
+      timezone: stored.schedule?.timezone ?? d.schedule.timezone,
+      maxPerDay: stored.schedule?.maxPerDay ?? d.schedule.maxPerDay,
+    },
     updatedAt: stored.updatedAt,
   };
 }
@@ -97,6 +112,7 @@ export async function saveAlertSettings(patch: Partial<SolarAlertSettings>): Pro
     includeSolution: patch.includeSolution ?? current.includeSolution,
     attachResolution: patch.attachResolution ?? current.attachResolution,
     resolutionRules: patch.resolutionRules != null ? normaliseRules(patch.resolutionRules) : current.resolutionRules,
+    schedule: patch.schedule != null ? normaliseSchedule(patch.schedule, current.schedule) : current.schedule,
     updatedAt: new Date().toISOString(),
   };
 
@@ -104,6 +120,9 @@ export async function saveAlertSettings(patch: Partial<SolarAlertSettings>): Pro
   if (!Number.isFinite(next.lng) || next.lng < -180 || next.lng > 180) throw new Error('Longitude must be between -180 and 180.');
   if (next.enabled && next.admin.recipients.length === 0) {
     throw new Error('Add at least one admin recipient email, or turn alerts off.');
+  }
+  if (next.schedule.enabled && next.schedule.times.length === 0) {
+    throw new Error('Add at least one send time, or turn scheduled digests off.');
   }
 
   if (env.storage === 'postgres') await setSetting(KEY, next);
@@ -124,6 +143,50 @@ function normaliseRules(list: unknown): import('@tsba/shared').AlertResolutionRu
     out.push({ keywords, documentId, documentTitle: String(r?.documentTitle ?? '').trim() });
   }
   return out;
+}
+
+const TIME_RE = /^([01]?\d|2[0-3]):([0-5]\d)$/;
+
+/** Validate + normalise the scheduled-digest config, merging over the current one. */
+function normaliseSchedule(
+  patch: Partial<import('@tsba/shared').AlertScheduleConfig>,
+  current: import('@tsba/shared').AlertScheduleConfig,
+): import('@tsba/shared').AlertScheduleConfig {
+  const enabled = patch.enabled ?? current.enabled;
+
+  let times = current.times;
+  if (patch.times != null) {
+    if (!Array.isArray(patch.times)) throw new Error('Send times must be a list of "HH:MM" values.');
+    const seen = new Set<string>();
+    times = [];
+    for (const raw of patch.times) {
+      const t = String(raw).trim();
+      if (!t) continue;
+      const m = TIME_RE.exec(t);
+      if (!m) throw new Error(`"${raw}" is not a valid 24-hour time (use HH:MM, e.g. 09:00 or 17:30).`);
+      const norm = `${m[1].padStart(2, '0')}:${m[2]}`; // zero-pad the hour
+      if (!seen.has(norm)) {
+        seen.add(norm);
+        times.push(norm);
+      }
+    }
+    times.sort(); // chronological, since "HH:MM" sorts lexically
+  }
+
+  let timezone = current.timezone;
+  if (patch.timezone != null) {
+    const tz = String(patch.timezone).trim();
+    try {
+      // Throws RangeError for an unknown IANA zone.
+      new Intl.DateTimeFormat('en-US', { timeZone: tz });
+      timezone = tz;
+    } catch {
+      throw new Error(`"${patch.timezone}" is not a valid IANA timezone (e.g. Australia/Sydney).`);
+    }
+  }
+
+  const maxPerDay = patch.maxPerDay != null ? clampInt(patch.maxPerDay, 1, 48, current.maxPerDay) : current.maxPerDay;
+  return { enabled, times, timezone, maxPerDay };
 }
 
 /** Trim, de-dupe and validate a recipients list; throws on a malformed address. */

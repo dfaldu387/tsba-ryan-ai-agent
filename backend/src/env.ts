@@ -82,6 +82,17 @@ export const env = {
   deliveryWebhookToken: process.env.DELIVERY_WEBHOOK_TOKEN ?? '',
   deliveryTimeoutMs: Number(optional('DELIVERY_TIMEOUT_MS', '10000')),
 
+  // ─── Email sending (SMTP / Postmark) ──────────────────────────────────────
+  // All outbound mail goes through this SMTP server. Postmark uses the same
+  // server token for both user and pass. Port 587 = STARTTLS (465 would be
+  // implicit TLS). From-address must be a verified sender/domain in Postmark.
+  smtpHost: process.env.SMTP_HOST ?? '',
+  smtpPort: Number(optional('SMTP_PORT', '587')),
+  smtpUser: process.env.SMTP_USER ?? '',
+  smtpPass: process.env.SMTP_PASS ?? '',
+  smtpFromName: optional('SMTP_FROM_NAME', 'TSBA Australia'),
+  smtpFromEmail: process.env.SMTP_FROM_EMAIL ?? '',
+
   // ─── Google OAuth (Drive + Gmail connectors) ──────────────────────────────
   // One OAuth client in Google Cloud serves both connectors (different scopes).
   // Leave blank to run the app with the connectors shown as "not configured".
@@ -210,6 +221,11 @@ export function elekeeperConfigured(): boolean {
 }
 export function whesConfigured(): boolean {
   return Boolean(env.whesBaseUrl);
+}
+
+/** True once SMTP (Postmark) is configured — gates outbound email sending. */
+export function smtpConfigured(): boolean {
+  return Boolean(env.smtpHost && env.smtpUser && env.smtpPass && env.smtpFromEmail);
 }
 
 /** True once a Google OAuth client is configured — gates the connect buttons. */

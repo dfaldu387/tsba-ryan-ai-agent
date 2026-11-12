@@ -114,7 +114,7 @@ function EmailChips({
 
 /** Signature for dirty-tracking. */
 const sig = (s: SolarAlertSettings, recipients: string[]): string =>
-  JSON.stringify([s.enabled, s.intervalMin, s.recovery, s.quietNight, s.lat, s.lng, s.admin.delayMin, s.customer.enabled, s.customer.delayMin, s.includeSolution, s.attachResolution, s.resolutionRules, recipients.join(',')]);
+  JSON.stringify([s.enabled, s.intervalMin, s.recovery, s.quietNight, s.lat, s.lng, s.admin.delayMin, s.customer.enabled, s.customer.delayMin, s.includeSolution, s.attachResolution, s.resolutionRules, recipients.join(','), s.schedule.enabled, s.schedule.times.join(','), s.schedule.timezone, s.schedule.maxPerDay]);
 
 export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; onAuthError: () => void }) {
   const canEdit = user.permissions.includes('manage_connections');
@@ -126,12 +126,15 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
   const [status, setStatus] = useState('');
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  // Raw text buffer for the send-times field, so typing commas isn't fought by re-render.
+  const [timesText, setTimesText] = useState('');
 
   useEffect(() => {
     getAlertSettings()
       .then(({ settings }) => {
         setS(settings);
         setRecipients(settings.admin.recipients);
+        setTimesText(settings.schedule.times.join(', '));
         setBaseline(sig(settings, settings.admin.recipients));
       })
       .catch((err) => {
@@ -157,6 +160,11 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
   }
 
   const patch = <K extends keyof SolarAlertSettings>(k: K, v: SolarAlertSettings[K]) => setS({ ...s, [k]: v });
+  const patchSchedule = (p: Partial<SolarAlertSettings['schedule']>) => setS({ ...s, schedule: { ...s.schedule, ...p } });
+  const onTimesChange = (txt: string) => {
+    setTimesText(txt);
+    patchSchedule({ times: txt.split(',').map((t) => t.trim()).filter(Boolean) });
+  };
 
   async function save() {
     if (!s) return;
@@ -176,9 +184,11 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
         includeSolution: s.includeSolution,
         attachResolution: s.attachResolution,
         resolutionRules: s.resolutionRules,
+        schedule: s.schedule,
       });
       setS(settings);
       setRecipients(settings.admin.recipients);
+      setTimesText(settings.schedule.times.join(', '));
       setBaseline(sig(settings, settings.admin.recipients));
       setStatus('Saved · applies on the next scan');
     } catch (err) {
@@ -226,6 +236,7 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
         </div>
         <div className="set-list">
           <div className="set-row"><span className="set-label">Admin recipients</span><span className="set-value">{recipients.join(', ') || '—'}</span></div>
+          <div className="set-row"><span className="set-label">Delivery schedule</span><span className="set-value">{s.schedule.enabled ? `Digest at ${s.schedule.times.join(', ')} (${s.schedule.timezone}) · max ${s.schedule.maxPerDay}/day` : 'One email per plant'}</span></div>
           <div className="set-row"><span className="set-label">Sunset quiet hours</span><span className="set-value">{s.quietNight ? 'On' : 'Off'}</span></div>
           <div className="set-row"><span className="set-label">Recovery emails</span><span className="set-value">{s.recovery ? 'On' : 'Off'}</span></div>
           <div className="set-row"><span className="set-label">Customer alerts</span><span className="set-value">{s.customer.enabled ? `On · after ${s.customer.delayMin} min` : 'Off'}</span></div>
@@ -254,7 +265,7 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
             <div className="al-banner-title">{s.enabled ? 'Alerts active' : 'Alerts disabled'}</div>
             <div className="al-banner-sub">
               {s.enabled
-                ? `Scanning every ${s.intervalMin} min · ${recipients.length} recipient${recipients.length === 1 ? '' : 's'} · ${s.quietNight ? 'quiet hours on' : 'always on'}`
+                ? `Scanning every ${s.intervalMin} min · ${recipients.length} recipient${recipients.length === 1 ? '' : 's'} · ${s.schedule.enabled ? `digest at ${s.schedule.times.join(', ') || '—'}` : 'per-plant emails'} · ${s.quietNight ? 'quiet hours on' : 'always on'}`
                 : 'No emails will be sent while disabled'}
             </div>
           </div>
@@ -293,6 +304,61 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
           </div>
         </div>
         <ToggleRow checked={s.recovery} onChange={(v) => patch('recovery', v)} title="Recovery emails" desc="Send a note when a previously-reported issue clears" />
+      </div>
+
+      {/* Delivery schedule — batch into digests */}
+      <div className="al-group">
+        <div className="al-group-h">Delivery schedule</div>
+        <ToggleRow
+          checked={s.schedule.enabled}
+          onChange={(v) => patchSchedule({ enabled: v })}
+          title="Batch alerts into scheduled digests"
+          desc="Instead of one email per plant as issues trip, hold everything and send one combined digest at the times below"
+        />
+        {s.schedule.enabled && (
+          <div className="al-indent">
+            <p className="al-hint" style={{ marginBottom: 10 }}>
+              At each send time, every plant with an open issue goes into a single email. The number of times
+              you list is how many digests you’ll get per day (capped below). Times are read in the timezone shown.
+            </p>
+            <div className="field" style={{ marginBottom: 12 }}>
+              <label htmlFor="al-times">Send times <span className="al-hint">· 24-hour, comma-separated (e.g. 09:00, 17:00)</span></label>
+              <input
+                id="al-times"
+                type="text"
+                placeholder="09:00, 17:00"
+                value={timesText}
+                onChange={(e) => onTimesChange(e.target.value)}
+              />
+            </div>
+            <div className="al-fields">
+              <div className="field">
+                <label htmlFor="al-tz">Timezone <span className="al-hint">· IANA name</span></label>
+                <input
+                  id="al-tz"
+                  type="text"
+                  placeholder="Australia/Sydney"
+                  value={s.schedule.timezone}
+                  onChange={(e) => patchSchedule({ timezone: e.target.value })}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="al-max">Max digests per day</label>
+                <div className="al-num">
+                  <input
+                    id="al-max"
+                    type="number"
+                    min={1}
+                    max={48}
+                    value={s.schedule.maxPerDay}
+                    onChange={(e) => patchSchedule({ maxPerDay: Number(e.target.value) })}
+                  />
+                  <span className="unit">/day</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Quiet hours */}

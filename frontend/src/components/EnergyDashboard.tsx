@@ -24,6 +24,7 @@ const CO2_KG_PER_TREE_YEAR = 21; // CO2 a mature tree sequesters per year
 const OVERVIEW_POLL_MS = 60_000; // live numbers refresh
 const ALERTS_POLL_MS = 120_000; // alert scan refresh (cached ~2 min server-side)
 const MONTHLY_POLL_MS = 1_800_000; // monthly trend barely moves — refresh every 30 min
+const ALERTS_RENDER_CAP = 200; // max alert rows in the DOM at once (keeps the panel snappy)
 
 /* Earth texture (dark/night look). Loaded at runtime from CDN; the globe still
    renders (atmosphere + markers) if it can't be fetched. */
@@ -118,6 +119,22 @@ function useCountUp(target: number, duration = 800): number {
   return val;
 }
 
+/** A short, de-duplicated status line for an alert row (the plant name is shown
+ *  separately, so we avoid repeating it here). Faults keep the provider wording. */
+function shortStatus(a: SolarMonitorAlert): string {
+  switch (a.severity) {
+    case 'offline':
+      return 'Offline — not reporting';
+    case 'partial':
+      return 'Partially down';
+    case 'device':
+      return a.deviceSn ? `Device offline (${a.deviceSn})` : 'Device offline';
+    default:
+      // Fault/alert: strip a trailing "— <plant>" the scan appends, to avoid echoing the name.
+      return a.title.replace(/\s*—\s*[^—]*$/, '').trim() || a.title;
+  }
+}
+
 interface Props {
   onExit: () => void;
   onAuthError: () => void;
@@ -133,6 +150,9 @@ export function EnergyDashboard({ onExit, onAuthError }: Props) {
   const [providers, setProviders] = useState<SolarProviderInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [lastUpdate, setLastUpdate] = useState<number>(Date.now());
+  // Real-time Alerts panel filters: by monitoring platform and by plant name.
+  const [alertPlatform, setAlertPlatform] = useState<string>('all');
+  const [alertPlant, setAlertPlant] = useState('');
 
   const globeMountRef = useRef<HTMLDivElement>(null);
   const globeRef = useRef<ReturnType<typeof Globe> | null>(null);
@@ -197,6 +217,42 @@ export function EnergyDashboard({ onExit, onAuthError }: Props) {
     const m = new Map(providers.map((p) => [p.id, p.name]));
     return (id: string) => m.get(id) ?? id;
   }, [providers]);
+
+  // ── Real-time Alerts: one row per plant (its latest/most-severe issue) ───────
+  // The raw scan emits many rows per plant (plant-level + one per offline device
+  // + each fault). We collapse to a single latest row per plant so the list shows
+  // the plant once, keeping a count of how many issues that plant has.
+  const latestPerPlant = useMemo(() => {
+    const byPlant = new Map<string, { alert: SolarMonitorAlert; count: number }>();
+    for (const a of alerts) {
+      const k = `${a.provider}:${a.plantId}`;
+      const e = byPlant.get(k);
+      // `alerts` arrives pre-sorted most-severe first, so the first row seen for a
+      // plant is its most-severe (latest) issue; later rows just bump the count.
+      if (e) e.count++;
+      else byPlant.set(k, { alert: a, count: 1 });
+    }
+    return [...byPlant.values()];
+  }, [alerts]);
+
+  // Platforms present in the (collapsed) alerts, with a per-platform plant count.
+  const alertPlatforms = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const e of latestPerPlant) counts.set(e.alert.provider, (counts.get(e.alert.provider) ?? 0) + 1);
+    return [...counts.entries()]
+      .map(([id, count]) => ({ id, name: providerName(id), count }))
+      .sort((a, b) => b.count - a.count);
+  }, [latestPerPlant, providerName]);
+
+  // Apply the platform + plant filters.
+  const filteredAlerts = useMemo(() => {
+    const q = alertPlant.trim().toLowerCase();
+    return latestPerPlant.filter(
+      (e) =>
+        (alertPlatform === 'all' || e.alert.provider === alertPlatform) &&
+        (!q || e.alert.plant.toLowerCase().includes(q)),
+    );
+  }, [latestPerPlant, alertPlatform, alertPlant]);
 
   // ── Derived metrics ──────────────────────────────────────────────────────
   const m = useMemo(() => {
@@ -508,20 +564,75 @@ export function EnergyDashboard({ onExit, onAuthError }: Props) {
           </section>
 
           <section className="nrg-panel" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-            <h2 className="nrg-panel-title">Real-time Alerts <small>{alerts.length}</small></h2>
+            <h2 className="nrg-panel-title">
+              Real-time Alerts{' '}
+              <small>
+                {filteredAlerts.length}
+                {filteredAlerts.length !== latestPerPlant.length ? ` / ${latestPerPlant.length}` : ''} plants
+              </small>
+            </h2>
+            {latestPerPlant.length > 0 && (
+              <div className="nrg-alert-filters">
+                <select
+                  className="nrg-filter"
+                  value={alertPlatform}
+                  onChange={(e) => setAlertPlatform(e.target.value)}
+                  aria-label="Filter alerts by platform"
+                >
+                  <option value="all">All platforms ({latestPerPlant.length})</option>
+                  {alertPlatforms.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name} ({p.count})
+                    </option>
+                  ))}
+                </select>
+                <input
+                  className="nrg-filter"
+                  type="search"
+                  placeholder="Filter by plant…"
+                  value={alertPlant}
+                  onChange={(e) => setAlertPlant(e.target.value)}
+                  aria-label="Filter alerts by plant name"
+                />
+              </div>
+            )}
             <div className="nrg-alerts">
-              {alerts.length === 0 ? (
+              {latestPerPlant.length === 0 ? (
                 <div className="nrg-empty">
                   <div className="nrg-empty-orb" />
                   No active alerts
                 </div>
+              ) : filteredAlerts.length === 0 ? (
+                <div className="nrg-empty">No alerts match this filter</div>
               ) : (
-                alerts.map((a) => (
-                  <div className={`nrg-alert-row sev-${a.severity}`} key={a.id}>
-                    <span className="nrg-alert-plant">{a.plant}</span>
-                    <span className="nrg-alert-info">{a.title}{a.detail ? ` — ${a.detail}` : ''}</span>
-                  </div>
-                ))
+                <>
+                  {filteredAlerts.slice(0, ALERTS_RENDER_CAP).map(({ alert: a, count }) => (
+                    <div
+                      className={`nrg-alert-row sev-${a.severity}`}
+                      key={`${a.provider}:${a.plantId}`}
+                      title={`${a.plant} · ${a.title}${a.detail ? ` — ${a.detail}` : ''}${count > 1 ? ` · ${count} issues on this plant` : ''}`}
+                    >
+                      <span className="nrg-alert-dot" />
+                      <div className="nrg-alert-main">
+                        <span className="nrg-alert-plant">{a.plant}</span>
+                        <span className="nrg-alert-info">{shortStatus(a)}</span>
+                      </div>
+                      <div className="nrg-alert-meta">
+                        {alertPlatform === 'all' && <span className="nrg-alert-plat">{providerName(a.provider)}</span>}
+                        {count > 1 && (
+                          <span className="nrg-alert-count" title={`${count} issues on this plant (devices / faults)`}>
+                            {count}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  {filteredAlerts.length > ALERTS_RENDER_CAP && (
+                    <div className="nrg-alert-more">
+                      +{filteredAlerts.length - ALERTS_RENDER_CAP} more — narrow the filter to see them
+                    </div>
+                  )}
+                </>
               )}
             </div>
           </section>
