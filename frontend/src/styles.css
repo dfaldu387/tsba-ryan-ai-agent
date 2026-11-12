@@ -481,6 +481,10 @@ a.doc-title { color: var(--accent-strong); }
 .notif-item-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .notif-item-q { font-size: 13px; font-weight: 600; color: var(--ink); line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .notif-item-meta { font-size: 11.5px; color: var(--muted); text-transform: capitalize; }
+/* Scrollable monitoring-alerts list (so approvals below stay reachable) */
+.notif-scroll { max-height: 240px; overflow-y: auto; margin: 0 -2px; }
+.notif-count { display: inline-block; margin-left: 7px; font-size: 10.5px; font-weight: 700; color: var(--muted); background: color-mix(in srgb, var(--muted) 16%, var(--surface)); border-radius: 9px; padding: 1px 7px; vertical-align: 1px; text-transform: none; }
+.notif-more { justify-content: center; color: var(--accent-strong); font-size: 12px; font-weight: 600; }
 .content-body { padding: 24px 28px 56px; width: 100%; max-width: none; }
 .content-body main.wrap { padding: 0; max-width: none; }
 

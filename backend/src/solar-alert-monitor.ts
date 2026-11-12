@@ -1,7 +1,7 @@
 import type { SolarAlertSettings } from '@tsba/shared';
 import { getProvider, aggregateStations } from './providers/index.js';
 import { getSolarAlerts } from './solar-alerts.js';
-import { sendMail, GmailAuthError } from './google-gmail.js';
+import { sendMail, MailSendError } from './smtp-mailer.js';
 import { isNight } from './sun.js';
 import { getAlertSettings } from './solar-alert-settings.js';
 import { resolveAttachment, resolveSolution } from './solar-alert-resolution.js';
@@ -44,6 +44,42 @@ const active = new Map<string, Tracked>();
 // Issues that were alerted to admins and have since cleared, owed a recovery
 // email that was deferred (night) — flushed at sunrise.
 const recoveredPending = new Map<string, SolarMonitorAlert>();
+
+// ─── Scheduled-digest bookkeeping (in-memory) ─────────────────────────────────
+// When schedule.enabled is on, admin alerts are not emailed per-plant; they are
+// held and flushed as ONE combined digest at the configured clock times, capped
+// per day. We track, for the current local day, which time-slots have already
+// fired and how many digests we've sent (for the cap). Resetting on restart is
+// fine: the next due slot simply sends a fresh digest of whatever's still open.
+let digestDay = ''; // 'YYYY-MM-DD' in the configured timezone
+const digestSentSlots = new Set<string>(); // "HH:MM" slots already consumed today
+let digestSends = 0; // digests actually emailed today (enforces maxPerDay)
+
+/** Current { date:'YYYY-MM-DD', minutes:sinceMidnight } in an IANA timezone. */
+function localNow(tz: string): { date: string; minutes: number } {
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(new Date());
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
+    const hour = Number(get('hour')) % 24; // en-CA can emit '24' at midnight
+    return { date: `${get('year')}-${get('month')}-${get('day')}`, minutes: hour * 60 + Number(get('minute')) };
+  } catch {
+    const d = new Date(); // unknown tz → fall back to UTC
+    return { date: d.toISOString().slice(0, 10), minutes: d.getUTCHours() * 60 + d.getUTCMinutes() };
+  }
+}
+
+const slotMinutes = (hhmm: string): number => {
+  const [h, m] = hhmm.split(':').map(Number);
+  return h * 60 + m;
+};
 
 let timer: NodeJS.Timeout | null = null;
 let running = false;
@@ -239,6 +275,118 @@ function buildRecoveryEmail(
   return { subject, text, html };
 }
 
+/**
+ * Build the combined digest email: every open plant-issue (grouped by plant)
+ * plus any recoveries, as one message. This replaces the stream of per-plant
+ * emails when scheduled digests are enabled.
+ */
+function buildDigestEmail(
+  due: Tracked[],
+  recovered: SolarMonitorAlert[],
+  contacts: Map<string, { name?: string; phone?: string; email?: string }>,
+  now: { date: string; minutes: number },
+): { subject: string; text: string; html: string } {
+  // Group the due issues by plant, keeping the most-severe issue first.
+  const groups = new Map<string, Tracked[]>();
+  for (const t of due) {
+    const k = plantKey(t.alert);
+    (groups.get(k) ?? groups.set(k, []).get(k)!).push(t);
+  }
+  const plantCount = groups.size;
+  const hhmm = `${String(Math.floor(now.minutes / 60)).padStart(2, '0')}:${String(now.minutes % 60).padStart(2, '0')}`;
+  const stamp = `${now.date} ${hhmm}`;
+
+  const ageLabel = (t: Tracked): string => {
+    const mins = ageMin(t);
+    if (mins < 90) return `${Math.round(mins)} min`;
+    const hrs = mins / 60;
+    return hrs < 48 ? `${Math.round(hrs)} hr` : `${Math.round(hrs / 24)} day`;
+  };
+  const contactStr = (a: SolarMonitorAlert): string => {
+    const c = contacts.get(plantKey(a));
+    if (!c) return '';
+    return [c.name, c.phone, c.email].filter(Boolean).join(' · ');
+  };
+
+  const subject =
+    plantCount > 0
+      ? `[Solar Alert] ${plantCount} plant${plantCount === 1 ? '' : 's'} need attention`
+      : `[Solar Recovered] ${recovered.length} issue${recovered.length === 1 ? '' : 's'} cleared`;
+
+  // ─── Plain text ───
+  const textRows: string[] = [];
+  for (const [, items] of groups) {
+    const worst = items[0].alert;
+    const oldest = items.reduce((p, c) => (c.firstSeen < p.firstSeen ? c : p), items[0]);
+    const issues = items.map((t) => t.alert.title).join('; ');
+    const who = contactStr(worst);
+    textRows.push(
+      `  • ${worst.plant} (${providerName(worst.provider)}) — ${issues} [down ${ageLabel(oldest)}]${who ? `\n      Owner: ${who}` : ''}`,
+    );
+  }
+  const recRows = recovered.map((a) => `  • ${a.plant} (${providerName(a.provider)}) — ${a.title}`);
+  const text = [
+    `Solar monitoring digest — ${stamp}.`,
+    plantCount ? `\n${plantCount} plant(s) with open issues:` : '',
+    ...(plantCount ? textRows : []),
+    recovered.length ? `\nRecovered since the last digest:` : '',
+    ...(recovered.length ? recRows : []),
+    '',
+    'This is an automated digest from the TSBA solar monitoring system.',
+  ]
+    .filter((l) => l !== '')
+    .join('\n');
+
+  // ─── HTML ───
+  const td = 'padding:7px 10px;border-bottom:1px solid #eef2f7;font-size:13px;vertical-align:top';
+  const rowsHtml = [...groups.values()]
+    .map((items) => {
+      const worst = items[0].alert;
+      const oldest = items.reduce((p, c) => (c.firstSeen < p.firstSeen ? c : p), items[0]);
+      const issues = items.map((t) => escapeHtml(t.alert.title)).join('<br>');
+      const who = contactStr(worst);
+      return `<tr>
+      <td style="${td}"><strong>${escapeHtml(worst.plant)}</strong>${who ? `<br><span style="color:#64748b;font-size:12px">${escapeHtml(who)}</span>` : ''}</td>
+      <td style="${td};color:#334155">${escapeHtml(providerName(worst.provider))}</td>
+      <td style="${td};color:#b91c1c">${issues}</td>
+      <td style="${td};color:#64748b;white-space:nowrap">${escapeHtml(ageLabel(oldest))}</td>
+    </tr>`;
+    })
+    .join('\n');
+
+  const recHtml = recovered.length
+    ? `<h3 style="margin:18px 0 6px;font-size:14px;color:#15803d">✓ Recovered since last digest</h3>
+    <ul style="margin:0 0 8px;padding-left:20px;font-size:13px">
+      ${recovered.map((a) => `<li style="margin-bottom:3px">${escapeHtml(a.plant)} <span style="color:#94a3b8">(${escapeHtml(providerName(a.provider))})</span> — ${escapeHtml(a.title)}</li>`).join('\n      ')}
+    </ul>`
+    : '';
+
+  const html = `<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:720px;color:#0f172a">
+  <div style="background:#b91c1c;color:#fff;padding:14px 18px;border-radius:8px 8px 0 0;font-size:16px;font-weight:600">
+    ⚠ Solar monitoring digest — ${escapeHtml(String(plantCount))} plant${plantCount === 1 ? '' : 's'} need attention
+  </div>
+  <div style="border:1px solid #e2e8f0;border-top:none;border-radius:0 0 8px 8px;padding:18px">
+    ${
+      plantCount
+        ? `<table style="border-collapse:collapse;width:100%">
+      <thead><tr>
+        <th style="text-align:left;padding:6px 10px;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#94a3b8;border-bottom:2px solid #e2e8f0">Plant / Owner</th>
+        <th style="text-align:left;padding:6px 10px;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#94a3b8;border-bottom:2px solid #e2e8f0">Platform</th>
+        <th style="text-align:left;padding:6px 10px;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#94a3b8;border-bottom:2px solid #e2e8f0">Issue</th>
+        <th style="text-align:left;padding:6px 10px;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#94a3b8;border-bottom:2px solid #e2e8f0">Down</th>
+      </tr></thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>`
+        : '<p style="margin:0 0 8px;color:#15803d">No new open issues.</p>'
+    }
+    ${recHtml}
+    <p style="margin:14px 0 0;color:#94a3b8;font-size:12px">Digest generated ${escapeHtml(stamp)} · Automated summary from the TSBA solar monitoring system.</p>
+  </div>
+</div>`;
+
+  return { subject, text, html };
+}
+
 /** Group alerts by plant (provider:plantId), preserving severity order. */
 function groupByPlant(alerts: SolarMonitorAlert[]): Map<string, SolarMonitorAlert[]> {
   const groups = new Map<string, SolarMonitorAlert[]>();
@@ -341,7 +489,8 @@ export async function runAlertMonitorOnce(): Promise<MonitorRunResult> {
   // Admin alert emails: open issues past the debounce that haven't been sent,
   // grouped by plant. Each plant's quiet hours are judged at ITS OWN location —
   // a plant in night is held and retried once it's daytime there.
-  if (recipients.length) {
+  // (Legacy one-email-per-plant flow — used only when scheduled digests are OFF.)
+  if (recipients.length && !settings.schedule.enabled) {
     const to = recipients.join(', ');
     const due = [...active.values()].filter((t) => !t.adminNotified && ageMin(t) >= settings.admin.delayMin);
     for (const [, issues] of groupByPlant(due.map((t) => t.alert))) {
@@ -365,8 +514,8 @@ export async function runAlertMonitorOnce(): Promise<MonitorRunResult> {
           if (t) t.adminNotified = true;
         }
       } catch (err) {
-        if (err instanceof GmailAuthError) {
-          console.warn('[solar-alert] Gmail not connected — alert emails held:', err.message);
+        if (err instanceof MailSendError) {
+          console.warn('[solar-alert] SMTP send failed — alert emails held:', err.message);
           break;
         }
         console.error(`[solar-alert] failed to email alert for ${plant.plant}:`, (err as Error).message);
@@ -388,8 +537,8 @@ export async function runAlertMonitorOnce(): Promise<MonitorRunResult> {
           emailsSent++;
           for (const i of issues) recoveredPending.delete(i.id);
         } catch (err) {
-          if (err instanceof GmailAuthError) {
-            console.warn('[solar-alert] Gmail not connected — recovery emails held:', err.message);
+          if (err instanceof MailSendError) {
+            console.warn('[solar-alert] SMTP send failed — recovery emails held:', err.message);
             break;
           }
           console.error(`[solar-alert] failed to email recovery for ${plant.plant}:`, (err as Error).message);
@@ -398,10 +547,101 @@ export async function runAlertMonitorOnce(): Promise<MonitorRunResult> {
     }
   }
 
+  // Scheduled-digest flow: hold everything and emit ONE combined email at the
+  // configured clock times (capped per day). This is what prevents the inbox
+  // filling with a separate email per plant.
+  if (recipients.length && settings.schedule.enabled) {
+    const digest = await runScheduledDigest(settings, recipients, plantNight);
+    emailsSent += digest.sent;
+    if (digest.reason) base.reason = digest.reason;
+  }
+
   base.emailsSent = emailsSent;
   base.deferredPlants = deferredPlants;
   if (deferredPlants) base.reason = `${deferredPlants} plant(s) held — night at their location`;
   return base;
+}
+
+/**
+ * The scheduled-digest sender. Called each scan when schedule.enabled is on.
+ * Fires at most one combined email, and only when the local clock has crossed a
+ * configured send time that hasn't fired yet today and the daily cap allows it.
+ * Returns how many emails were sent (0 or 1) and an optional status reason.
+ */
+async function runScheduledDigest(
+  settings: SolarAlertSettings,
+  recipients: string[],
+  plantNight: (a: SolarMonitorAlert) => boolean,
+): Promise<{ sent: number; reason?: string }> {
+  const { times, timezone, maxPerDay } = settings.schedule;
+  if (!times.length) return { sent: 0, reason: 'scheduled digests on but no send times configured' };
+
+  // Roll over to a new local day → reset the per-day slot/cap bookkeeping.
+  const now = localNow(timezone);
+  if (now.date !== digestDay) {
+    digestDay = now.date;
+    digestSentSlots.clear();
+    digestSends = 0;
+  }
+
+  // Which configured times are due (reached today) but not yet consumed?
+  const dueSlots = times.filter((t) => slotMinutes(t) <= now.minutes && !digestSentSlots.has(t));
+  if (!dueSlots.length) {
+    const next = times.find((t) => slotMinutes(t) > now.minutes);
+    return { sent: 0, reason: next ? `digest held — next send ${next} ${timezone}` : 'digest held — next send tomorrow' };
+  }
+
+  // Consume the due slots regardless of whether we end up sending, so we don't
+  // re-evaluate them every scan for the rest of the day.
+  for (const s of dueSlots) digestSentSlots.add(s);
+
+  if (digestSends >= maxPerDay) {
+    return { sent: 0, reason: `daily digest cap reached (${maxPerDay}/day)` };
+  }
+
+  // Everything owed to admins: open issues past the debounce, not already sent,
+  // and not in their own night; plus any pending recoveries.
+  const due = [...active.values()].filter(
+    (t) => !t.adminNotified && ageMin(t) >= settings.admin.delayMin && !plantNight(t.alert),
+  );
+  const recovered = settings.recovery ? [...recoveredPending.values()] : [];
+  if (!due.length && !recovered.length) {
+    return { sent: 0, reason: 'scheduled digest due — nothing open to report' };
+  }
+
+  // Best-effort owner/contact lookup (local store) for each affected plant.
+  const contacts = new Map<string, { name?: string; phone?: string; email?: string }>();
+  try {
+    const { getPlantContact } = await import('./plant-contacts.js');
+    const keys = new Set([...due.map((t) => t.alert), ...recovered].map(plantKey));
+    await Promise.all(
+      [...due.map((t) => t.alert), ...recovered].map(async (a) => {
+        const k = plantKey(a);
+        if (contacts.has(k) || !keys.has(k)) return;
+        const c = await getPlantContact(a.provider, a.plantId);
+        if (c) contacts.set(k, { name: c.name, phone: c.phone, email: c.email });
+      }),
+    );
+  } catch {
+    /* contact store unavailable — the digest still lists plants without owners */
+  }
+
+  const { subject, text, html } = buildDigestEmail(due, recovered, contacts, now);
+  try {
+    await sendMail({ to: recipients.join(', '), subject, text, html });
+  } catch (err) {
+    // Send failed → roll the slots back so the next scan retries this digest.
+    for (const s of dueSlots) digestSentSlots.delete(s);
+    if (err instanceof MailSendError) console.warn('[solar-alert] SMTP send failed — digest held:', err.message);
+    else console.error('[solar-alert] failed to send digest:', (err as Error).message);
+    return { sent: 0, reason: 'digest send failed — will retry next scan' };
+  }
+
+  // Mark everything reported, consume one daily send, and clear recoveries.
+  for (const t of due) t.adminNotified = true;
+  for (const a of recovered) recoveredPending.delete(a.id);
+  digestSends++;
+  return { sent: 1, reason: `digest sent — ${due.length} plant-issue(s), ${recovered.length} recovered` };
 }
 
 /**
@@ -490,6 +730,57 @@ export async function sendCustomAlert(issues: SolarMonitorAlert[]): Promise<{
     hasSolution: Boolean(solution),
     recipients,
   };
+}
+
+/**
+ * Send a preview of the combined DIGEST email (subject prefixed [TEST]). Uses
+ * real currently-open issues when there are any; otherwise a couple of synthetic
+ * rows so the format is still visible. Does not touch de-dupe/schedule state.
+ */
+export async function sendSampleDigest(): Promise<{
+  sent: boolean;
+  plants?: number;
+  synthetic?: boolean;
+  recipients: string[];
+  reason?: string;
+}> {
+  const settings = await getAlertSettings();
+  const recipients = settings.admin.recipients;
+  if (!recipients.length) return { sent: false, recipients, reason: 'no admin recipients configured' };
+
+  // Prefer real open issues; fall back to a fresh scan; finally synthesize.
+  let pool: SolarMonitorAlert[] = [...active.values()].map((t) => t.alert);
+  if (!pool.length) pool = (await getSolarAlerts()).alerts;
+  let synthetic = false;
+  if (!pool.length) {
+    synthetic = true;
+    pool = [
+      { id: 'sample-1', severity: 'offline', provider: 'deye', plant: 'Sample Plant — 12 Example St', plantId: 's1', title: 'Plant offline' },
+      { id: 'sample-2', severity: 'partial', provider: 'goodwe', plant: 'Sample Plant — 7 Demo Rd', plantId: 's2', title: 'Partially down (1 of 2 inverters)' },
+      { id: 'sample-3', severity: 'fault', provider: 'sungrow', plant: 'Sample Plant — 3 Test Ave', plantId: 's3', title: 'Grid over-frequency' },
+    ];
+  }
+
+  const due: Tracked[] = pool.map((a) => ({ alert: a, firstSeen: Date.now() - 3 * 3_600_000, adminNotified: false, customerNotified: false }));
+  const contacts = new Map<string, { name?: string; phone?: string; email?: string }>();
+  if (!synthetic) {
+    try {
+      const { getPlantContact } = await import('./plant-contacts.js');
+      await Promise.all(
+        [...new Map(due.map((t) => [plantKey(t.alert), t.alert])).values()].map(async (a) => {
+          const c = await getPlantContact(a.provider, a.plantId);
+          if (c) contacts.set(plantKey(a), { name: c.name, phone: c.phone, email: c.email });
+        }),
+      );
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  const now = localNow(settings.schedule.timezone);
+  const { subject, text, html } = buildDigestEmail(due, [], contacts, now);
+  await sendMail({ to: recipients.join(', '), subject: `[TEST] ${subject}`, text, html });
+  return { sent: true, plants: new Set(due.map((t) => plantKey(t.alert))).size, synthetic, recipients };
 }
 
 async function tick(): Promise<void> {

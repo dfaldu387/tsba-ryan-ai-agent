@@ -237,13 +237,35 @@ function flattenDevices(nodes: SajDeviceNode[], out: NormalizedDevice[] = []): N
 
 interface SajAlarm {
   alarmId?: string | number;
+  alarmID?: string | number;
   id?: string | number;
   alarmName?: string;
+  alarmCauses?: string;
   alarmMsg?: string;
   deviceSn?: string;
   alarmCode?: string;
+  eventNo?: string | number;
+  // SAJ returns US-format datetimes, e.g. "11/11/2026 00:31:33".
   alarmStartTime?: string;
+  alarmUpdateTime?: string;
   startTime?: string;
+  alarmLevelName?: string;
+  alarmLevel?: number;
+  alarmDuration?: string;
+}
+
+/** Parse a SAJ datetime to epoch seconds. SAJ sends US format
+ *  ("MM/DD/YYYY HH:MM:SS"); also accepts ISO and numeric epochs. */
+function sajTimeToEpochSec(v?: string | number): number | undefined {
+  if (v == null || v === '') return undefined;
+  if (typeof v === 'number' || /^\d+$/.test(String(v))) {
+    const n = Number(v);
+    return n > 1e12 ? Math.floor(n / 1000) : n; // ms → s
+  }
+  const s = String(v).trim();
+  let t = Date.parse(s); // handles "MM/DD/YYYY HH:MM:SS" (US) natively
+  if (Number.isNaN(t)) t = Date.parse(s.replace(' ', 'T')); // handles "YYYY-MM-DD HH:MM:SS"
+  return Number.isNaN(t) ? undefined : Math.floor(t / 1000);
 }
 
 function infoFromPlant(p: SajPlant): StationInfoItem[] {
@@ -310,11 +332,12 @@ export const esolarProvider: SolarProvider = {
       );
       const rows = a.rows ?? a.list ?? a.records ?? [];
       alerts = rows.map((r, i) => ({
-        id: String(r.alarmId ?? r.id ?? `${stationId}:${i}`),
-        name: r.alarmName || r.alarmMsg || 'Alarm',
+        id: String(r.alarmID ?? r.alarmId ?? r.id ?? r.eventNo ?? `${stationId}:${i}`),
+        name: r.alarmName || r.alarmCauses || r.alarmMsg || 'Alarm',
         code: r.alarmCode,
         deviceSn: r.deviceSn,
-        start: undefined,
+        start: sajTimeToEpochSec(r.alarmStartTime ?? r.startTime ?? r.alarmUpdateTime),
+        level: r.alarmLevelName || (r.alarmLevel != null ? String(r.alarmLevel) : undefined),
       }));
     } catch {
       /* alarms unavailable — fall back to the plant's summary alarm line */

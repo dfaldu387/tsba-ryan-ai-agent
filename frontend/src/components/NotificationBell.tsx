@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Draft } from '@tsba/shared';
 import { AuthError, getSolarAlerts, listDrafts, type SolarMonitorAlert } from '../api';
+
+const ALERTS_SHOWN = 25; // max plant rows rendered in the notification panel
 
 // A header notification panel: surfaces replies awaiting approval (and recent
 // activity) so an admin sees what needs attention without opening every tab.
@@ -95,21 +97,41 @@ export function NotificationBell({
     return () => window.removeEventListener('keydown', onKey);
   }, [open]);
 
+  // Collapse the raw scan (many rows per plant: plant-level + each device + each
+  // fault) to ONE row per plant — its most-severe issue — with the plant's total
+  // issue count and most-recent alert time. Keeps the panel readable.
+  const plantGroups = useMemo(() => {
+    const m = new Map<string, { rep: SolarMonitorAlert; count: number; latestAt?: number }>();
+    for (const a of alerts) {
+      const k = `${a.provider}:${a.plantId}`;
+      const e = m.get(k);
+      // `alerts` arrives most-severe first, so the first row per plant is its rep.
+      if (e) {
+        e.count++;
+        if (a.at && (e.latestAt == null || a.at > e.latestAt)) e.latestAt = a.at;
+      } else {
+        m.set(k, { rep: a, count: 1, latestAt: a.at });
+      }
+    }
+    return [...m.values()];
+  }, [alerts]);
+
   const pending = drafts.filter((d) => d.status === 'pending');
   const recent = drafts
     .filter((d) => d.status !== 'pending' && d.decided_at)
     .sort((a, b) => (b.decided_at ?? '').localeCompare(a.decided_at ?? ''))
     .slice(0, 5);
 
-  // Badge counts pending approvals + monitoring alerts the user hasn't yet
-  // acknowledged by opening the panel. Alerts are tracked by id (their set
+  // Badge counts pending approvals + affected plants the user hasn't yet
+  // acknowledged by opening the panel. Plants are tracked by key (their set
   // changes as issues resolve/appear), drafts by count.
-  const unreadAlerts = alerts.filter((a) => !seenAlerts.has(a.id)).length;
+  const plantKey = (a: SolarMonitorAlert) => `${a.provider}:${a.plantId}`;
+  const unreadAlerts = plantGroups.filter((g) => !seenAlerts.has(plantKey(g.rep))).length;
   const unread = Math.max(0, pending.length - seenCount) + unreadAlerts;
 
   const markSeen = () => {
     setSeenCount(pending.length);
-    const ids = alerts.map((a) => a.id);
+    const ids = plantGroups.map((g) => plantKey(g.rep));
     setSeenAlerts(new Set(ids));
     try {
       localStorage.setItem(SEEN_KEY, String(pending.length));
@@ -163,30 +185,48 @@ export function NotificationBell({
               </button>
             </div>
 
-            {alerts.length > 0 && (
+            {plantGroups.length > 0 && (
               <>
-                <div className="notif-section-title">Monitoring alerts ({alerts.length})</div>
-                {alerts.slice(0, 8).map((a) => (
-                  <button
-                    key={a.id}
-                    type="button"
-                    className="notif-item"
-                    role="menuitem"
-                    onClick={() => {
-                      onNavigate('solar');
-                      setOpen(false);
-                    }}
-                  >
-                    <span className={`notif-dot alert-${a.severity}`} aria-hidden="true" />
-                    <span className="notif-item-body">
-                      <span className="notif-item-q">{a.title}</span>
-                      <span className="notif-item-meta">
-                        {SEVERITY_LABEL[a.severity]} · {a.provider}
-                        {a.at ? ` · ${relativeTime(new Date(a.at * 1000).toISOString())}` : ''}
+                <div className="notif-section-title">Monitoring alerts ({plantGroups.length} plants)</div>
+                <div className="notif-scroll">
+                  {plantGroups.slice(0, ALERTS_SHOWN).map(({ rep: a, count, latestAt }) => (
+                    <button
+                      key={plantKey(a)}
+                      type="button"
+                      className="notif-item"
+                      role="menuitem"
+                      title={count > 1 ? `${count} issues on this plant` : undefined}
+                      onClick={() => {
+                        onNavigate('solar');
+                        setOpen(false);
+                      }}
+                    >
+                      <span className={`notif-dot alert-${a.severity}`} aria-hidden="true" />
+                      <span className="notif-item-body">
+                        <span className="notif-item-q">
+                          {a.plant}
+                          {count > 1 && <span className="notif-count">{count}</span>}
+                        </span>
+                        <span className="notif-item-meta">
+                          {SEVERITY_LABEL[a.severity]} · {a.provider}
+                          {latestAt ? ` · ${relativeTime(new Date(latestAt * 1000).toISOString())}` : ''}
+                        </span>
                       </span>
-                    </span>
-                  </button>
-                ))}
+                    </button>
+                  ))}
+                  {plantGroups.length > ALERTS_SHOWN && (
+                    <button
+                      type="button"
+                      className="notif-item static notif-more"
+                      onClick={() => {
+                        onNavigate('solar');
+                        setOpen(false);
+                      }}
+                    >
+                      +{plantGroups.length - ALERTS_SHOWN} more — open Solar monitoring
+                    </button>
+                  )}
+                </div>
               </>
             )}
 
