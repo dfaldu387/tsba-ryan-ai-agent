@@ -1,4 +1,4 @@
-import type { NormalizedStation, SolarProvider } from './types.js';
+import { ProviderError, type NormalizedStation, type SolarProvider } from './types.js';
 import { deyeProvider } from './deye-provider.js';
 import { goodweProvider } from './goodwe.js';
 import { solarmanProvider } from './solarman.js';
@@ -25,8 +25,15 @@ function withFallback(primary: SolarProvider, secondary: SolarProvider): SolarPr
     id: primary.id,
     name: primary.name,
     configured: () => primary.configured() || secondary.configured(),
+    optional: primary.optional || secondary.optional,
     listStations: () => active().listStations(),
     stationDetail: (id) => active().stationDetail(id),
+    // Forward the rich Overview to whichever backend is active and supports it.
+    overview: (id) => {
+      const a = active();
+      if (!a.overview) throw new ProviderError(`${a.id}_overview_unsupported`);
+      return a.overview(id);
+    },
   };
 }
 
@@ -62,6 +69,9 @@ export interface AggregateResult {
   errors: { provider: string; name: string; error: string }[];
   /** Providers currently served from the last-good cache (a transient failure). */
   stale: string[];
+  /** Optional/unverified providers that couldn't return data (shown as
+   *  "awaiting verification", not a hard error). */
+  unavailable: string[];
 }
 
 // Last successful station list per provider — lets a transient network blip serve
@@ -95,6 +105,7 @@ export async function aggregateStations(): Promise<AggregateResult> {
   const stations: StationWithProvider[] = [];
   const errors: AggregateResult['errors'] = [];
   const stale: string[] = [];
+  const unavailable: string[] = [];
 
   await Promise.all(
     configuredProviders().map(async (p) => {
@@ -121,6 +132,9 @@ export async function aggregateStations(): Promise<AggregateResult> {
         if (cached) {
           stations.push(...cached);
           stale.push(p.id);
+        } else if (p.optional) {
+          // Known-incomplete/unverified integration — don't raise a fleet error.
+          unavailable.push(p.id);
         } else {
           errors.push({ provider: p.id, name: p.name, error: (err as Error).message });
         }
@@ -128,7 +142,7 @@ export async function aggregateStations(): Promise<AggregateResult> {
     }),
   );
 
-  return { stations, errors, stale };
+  return { stations, errors, stale, unavailable };
 }
 
 export * from './types.js';

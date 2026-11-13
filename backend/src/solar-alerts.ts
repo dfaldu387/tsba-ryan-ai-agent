@@ -142,6 +142,11 @@ async function collectSolarAlerts(): Promise<SolarAlertsResult> {
           }
         }
         for (const a of detail.alerts) {
+          // Detail line: fault code and provider-reported handling status, when known.
+          const detailBits = [
+            a.code ? `Fault code ${a.code}` : null,
+            a.status ? `Status: ${a.status}` : null,
+          ].filter(Boolean);
           alerts.push({
             id: `${s.provider}:${s.id}:alert:${a.id}`,
             severity: 'alert',
@@ -149,9 +154,12 @@ async function collectSolarAlerts(): Promise<SolarAlertsResult> {
             plant: s.name,
             plantId: s.id,
             title: `${a.name}${a.deviceSn ? ` (${a.deviceSn})` : ''} — ${s.name}`,
-            detail: a.code ? `Fault code ${a.code}` : undefined,
+            detail: detailBits.length ? detailBits.join(' · ') : undefined,
             deviceSn: a.deviceSn,
             at: a.start,
+            // Carry the provider's own remediation + status through to the email.
+            solution: a.solution,
+            status: a.status,
             lat: s.lat,
             lng: s.lng,
           });

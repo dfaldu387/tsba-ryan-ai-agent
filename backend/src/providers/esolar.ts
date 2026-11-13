@@ -3,12 +3,19 @@ import { portalCreds } from './scraper/credentials.js';
 import { cached } from './cache.js';
 import {
   ProviderError,
+  type ChartData,
+  type ChartSeries,
+  type EnergyFlow,
+  type EnergyStat,
+  type Environmental,
   type NormalizedAlert,
   type NormalizedDetail,
   type NormalizedDevice,
   type NormalizedStation,
+  type SelfUseBreakdown,
   type SolarProvider,
   type StationInfoItem,
+  type StationOverview,
   type StationStatus,
 } from './types.js';
 
@@ -65,7 +72,9 @@ function envCode(e: Envelope<unknown>): string {
 function commonBody(): Record<string, unknown> {
   return {
     appProjectName: 'elekeeper',
-    clientDate: new Date().toISOString(),
+    // Date-only (YYYY-MM-DD), matching the SPA. The chart endpoints reject a full
+    // ISO datetime here with "Incorrect date format"; date-only is accepted by all.
+    clientDate: new Date().toISOString().slice(0, 10),
     lang: 'en',
     timeStamp: Date.now(),
     clientId: 'esolar-monitor-admin',
@@ -241,10 +250,18 @@ interface SajAlarm {
   id?: string | number;
   alarmName?: string;
   alarmCauses?: string;
+  alarmContent?: string;
   alarmMsg?: string;
+  /** Numbered remediation steps, ';'-separated, e.g. "1. Check …;2. Check …". */
+  solutions?: string;
   deviceSn?: string;
+  deviceTypeName?: string;
   alarmCode?: string;
+  /** Portal "Alarm Code" (e.g. "51"); the API has no separate alarmCode field. */
   eventNo?: string | number;
+  /** Handling state: alarmState 1 = Pending, and alarmStateName is its label. */
+  alarmState?: number;
+  alarmStateName?: string;
   // SAJ returns US-format datetimes, e.g. "11/11/2026 00:31:33".
   alarmStartTime?: string;
   alarmUpdateTime?: string;
@@ -252,6 +269,23 @@ interface SajAlarm {
   alarmLevelName?: string;
   alarmLevel?: number;
   alarmDuration?: string;
+}
+
+/**
+ * Tidy SAJ's `solutions` string into one step per line. SAJ ships numbered steps
+ * joined by ';' ("1. …;2. …") with stray double-spaces around emphasised terms;
+ * we collapse the whitespace and break before each "<n>." so the steps render as
+ * a readable list in the UI and emails. Returns undefined for an empty value.
+ */
+function formatSolution(raw?: string): string | undefined {
+  if (!raw) return undefined;
+  const cleaned = raw.replace(/\s+/g, ' ').trim();
+  if (!cleaned) return undefined;
+  const steps = cleaned
+    .replace(/;\s*(?=\d+\.\s)/g, '\n') // break before "2." etc.
+    .replace(/\s*;\s*$/, '') // drop a trailing ';'
+    .trim();
+  return steps;
 }
 
 /** Parse a SAJ datetime to epoch seconds. SAJ sends US format
@@ -299,6 +333,191 @@ async function listStationsRaw(): Promise<SajPlant[]> {
   return data.rows ?? data.list ?? data.records ?? [];
 }
 
+// ─── Rich Overview (detail dashboard) ────────────────────────────────────────
+// The SAJ plant-detail page keys its flow/KPI/chart calls on the plant's master
+// inverter serial (`sn` + snType:1), fetched from the capability endpoint. Passing
+// plantUid alone returns null — the sn is required. See docs/saj-overview-endpoints.json.
+
+interface SajCapability {
+  // NB: masterInverterSerial is a MODEL code here (e.g. "h21030k"), NOT a serial —
+  // don't use it as `sn`. The real inverter serial is in invreterSnList / snList[].sn.
+  masterInverterSerial?: string;
+  snList?: Array<{ sn?: string; snType?: number; inverterTag?: string }>;
+  invreterSnList?: string[];
+}
+
+/** The plant's inverter serial + snType, needed as the `sn` key for flow/stats/charts. */
+async function inverterSn(stationId: string): Promise<{ sn: string; snType: number } | undefined> {
+  try {
+    const cap = await post<SajCapability>('/monitor/plant/getPlantCapabilityV3', {
+      plantUid: stationId,
+      versionOf3d: 1,
+    });
+    const first = cap.snList?.find((d) => d.sn);
+    const sn = first?.sn || cap.invreterSnList?.[0];
+    if (!sn) return undefined;
+    return { sn, snType: first?.snType ?? 1 };
+  } catch {
+    return undefined;
+  }
+}
+
+interface SajFlow {
+  totalPvPower?: number;
+  totalLoadPowerwatt?: number;
+  sysGridPowerwatt?: number;
+  batPower?: number;
+  batEnergyPercent?: number;
+  batteryDirectionName?: string;
+  gridDirectionName?: string;
+  genPowerwatt?: number;
+  hasPv?: number;
+  hasGrid?: number;
+  hasBattery?: number;
+  hasGen?: number;
+  systemPower?: number;
+  runningStateName?: string;
+  userModeName?: string;
+  todayPvEnergy?: number;
+  dataTime?: string;
+}
+
+function mapFlow(f: SajFlow): EnergyFlow {
+  return {
+    pvPowerW: f.totalPvPower,
+    loadPowerW: f.totalLoadPowerwatt,
+    gridPowerW: f.sysGridPowerwatt,
+    batteryPowerW: f.batPower,
+    batterySoc: f.batEnergyPercent,
+    batteryDirection: f.batteryDirectionName || undefined,
+    gridDirection: f.gridDirectionName || undefined,
+    hasPv: f.hasPv === 1,
+    hasGrid: f.hasGrid === 1,
+    hasBattery: f.hasBattery === 1,
+    hasGenerator: f.hasGen === 1,
+    generatorPowerW: f.genPowerwatt,
+    systemPowerKw: f.systemPower,
+    runningState: f.runningStateName || undefined,
+    userMode: f.userModeName || undefined,
+    todayPvEnergyKwh: f.todayPvEnergy,
+    dataTime: f.dataTime || undefined,
+  };
+}
+
+interface SajEnergyDatum {
+  dataType?: string;
+  energy1Today?: number | null;
+  energy1Total?: number | null;
+  energy2Today?: number | null;
+  energy2Total?: number | null;
+  selfUsePercentage?: number | null;
+}
+interface SajStatistics {
+  energyDataList?: SajEnergyDatum[];
+  environmentalInformation?: unknown;
+  userModeName?: string;
+}
+
+function mapStats(list: SajEnergyDatum[]): EnergyStat[] {
+  const out: EnergyStat[] = [];
+  const num = (v: number | null | undefined) => (v == null ? undefined : v);
+  for (const d of list) {
+    const t = (d.dataType || '').toUpperCase();
+    if (t.includes('PV')) {
+      out.push({ kind: 'pv', todayKwh: num(d.energy1Today), totalKwh: num(d.energy1Total), selfUsePercentage: num(d.selfUsePercentage) });
+    } else if (t.includes('LOAD')) {
+      out.push({ kind: 'load', todayKwh: num(d.energy1Today), totalKwh: num(d.energy1Total) });
+    } else if (t.includes('BUY') || t.includes('SELL') || t.includes('GRID')) {
+      // energy1 = buy/import, energy2 = sell/export
+      out.push({ kind: 'grid', todayKwh: num(d.energy1Today), totalKwh: num(d.energy1Total), today2Kwh: num(d.energy2Today), total2Kwh: num(d.energy2Total) });
+    } else if (t.includes('BAT') || t.includes('CHARGE')) {
+      // energy1 = charge, energy2 = discharge
+      out.push({ kind: 'battery', todayKwh: num(d.energy1Today), totalKwh: num(d.energy1Total), today2Kwh: num(d.energy2Today), total2Kwh: num(d.energy2Total) });
+    }
+  }
+  // Stable card order.
+  const order: Record<EnergyStat['kind'], number> = { pv: 0, load: 1, grid: 2, battery: 3 };
+  return out.sort((a, b) => order[a.kind] - order[b.kind]);
+}
+
+/** Pull CO2/trees/coal from the statistics' environmentalInformation, whatever
+ *  shape it takes (array of {name,value} or a flat object). Best-effort. */
+function mapEnvironmental(env: unknown): Environmental | undefined {
+  if (!env) return undefined;
+  const pick = (re: RegExp): number | undefined => {
+    const scan = (entries: [string, unknown][]) => {
+      for (const [k, v] of entries) {
+        if (re.test(k)) {
+          const n = typeof v === 'number' ? v : parseFloat(String(v));
+          if (!Number.isNaN(n)) return n;
+        }
+      }
+      return undefined;
+    };
+    if (Array.isArray(env)) {
+      // SAJ shape: [{describe:"CO₂ emissions reduced (t)", value, unit, iconUrl}, …].
+      const pairs = env
+        .map((e) => {
+          const o = e as Record<string, unknown>;
+          const key = String(o.describe ?? o.name ?? o.label ?? o.key ?? o.type ?? '');
+          return [key, o.value ?? o.num ?? o.data] as [string, unknown];
+        })
+        .filter(([k]) => k);
+      return scan(pairs);
+    }
+    if (typeof env === 'object') return scan(Object.entries(env as Record<string, unknown>));
+    return undefined;
+  };
+  const co2 = pick(/co2|carbon|reduceCo2|emission/i);
+  const trees = pick(/tree|forest|plant/i);
+  const coal = pick(/coal/i);
+  if (co2 == null && trees == null && coal == null) return undefined;
+  return { co2SavedT: co2, treesEquivalent: trees, coalSavedT: coal };
+}
+
+interface SajSelfUse {
+  pvEnergy?: number; loadEnergy?: number; sellEnergy?: number; buyEnergy?: number;
+  chargeEnergy?: number; dischargeEnergy?: number;
+  pvSelfConsumedEnergy?: number; loadSelfConsumedEnergy?: number;
+  pvSelfConsumedRate?: number; pvSellRate?: number;
+  loadSelfConsumedRate?: number; loadBuyRate?: number;
+  energyUnit?: string;
+}
+function mapSelfUse(s: SajSelfUse): SelfUseBreakdown {
+  return {
+    pvEnergy: s.pvEnergy, loadEnergy: s.loadEnergy, sellEnergy: s.sellEnergy, buyEnergy: s.buyEnergy,
+    chargeEnergy: s.chargeEnergy, dischargeEnergy: s.dischargeEnergy,
+    pvSelfConsumedEnergy: s.pvSelfConsumedEnergy, loadSelfConsumedEnergy: s.loadSelfConsumedEnergy,
+    pvSelfConsumedRate: s.pvSelfConsumedRate, pvSellRate: s.pvSellRate,
+    loadSelfConsumedRate: s.loadSelfConsumedRate, loadBuyRate: s.loadBuyRate,
+    unit: s.energyUnit,
+  };
+}
+
+interface SajChart {
+  showType?: string;
+  xAxis?: { coordinateList?: string[] };
+  yAxis?: Array<{ dataList?: string[]; color?: string; groupName?: string; legendName?: string; tagName?: string; unit?: string }>;
+}
+function mapChart(c: SajChart): ChartData | undefined {
+  const x = c.xAxis?.coordinateList ?? [];
+  const ys = c.yAxis ?? [];
+  if (!x.length || !ys.length) return undefined;
+  const series: ChartSeries[] = ys.map((y) => {
+    const unit = y.unit || '';
+    return {
+      name: y.groupName || y.tagName || y.legendName || 'Series',
+      color: y.color || undefined,
+      unit,
+      secondaryAxis: /%/.test(unit) || /soc/i.test(y.groupName || y.tagName || ''),
+      data: (y.dataList ?? []).map((v) => (v === '' || v == null ? null : Number(v))),
+    };
+  });
+  return { kind: c.showType === 'line' ? 'line' : 'bar', xLabels: x, series };
+}
+
+const todayStr = () => new Date().toISOString().slice(0, 10);
+
 export const esolarProvider: SolarProvider = {
   id: 'elekeeper',
   name: 'Elekeeper (SAJ)',
@@ -334,10 +553,14 @@ export const esolarProvider: SolarProvider = {
       alerts = rows.map((r, i) => ({
         id: String(r.alarmID ?? r.alarmId ?? r.id ?? r.eventNo ?? `${stationId}:${i}`),
         name: r.alarmName || r.alarmCauses || r.alarmMsg || 'Alarm',
-        code: r.alarmCode,
+        // The API has no alarmCode; the portal's "Alarm Code" is eventNo (e.g. "51").
+        code: r.alarmCode ?? (r.eventNo != null && r.eventNo !== '' ? String(r.eventNo) : undefined),
         deviceSn: r.deviceSn,
         start: sajTimeToEpochSec(r.alarmStartTime ?? r.startTime ?? r.alarmUpdateTime),
         level: r.alarmLevelName || (r.alarmLevel != null ? String(r.alarmLevel) : undefined),
+        reason: r.alarmCauses || r.alarmContent || undefined,
+        solution: formatSolution(r.solutions),
+        status: r.alarmStateName || undefined,
       }));
     } catch {
       /* alarms unavailable — fall back to the plant's summary alarm line */
@@ -358,6 +581,43 @@ export const esolarProvider: SolarProvider = {
       devices,
       alerts,
       power: [],
+    };
+  },
+
+  /**
+   * Rich Overview dashboard: live energy flow, KPI cards, curve-analysis
+   * breakdown, the day power/SOC curve, the energy-comparison bars and the
+   * environmental tiles. Every call is keyed on the master inverter serial
+   * (`sn` + snType:1) — without it SAJ returns null. All sections are
+   * best-effort and resolved in parallel; a failed one is simply omitted.
+   */
+  async overview(stationId: string): Promise<StationOverview> {
+    const inv = await inverterSn(stationId);
+    const day = todayStr();
+    const snp = inv ? { sn: inv.sn, snType: inv.snType } : {};
+
+    const [flow, stats, selfUse, powerCurve, comparison] = await Promise.all([
+      post<SajFlow>('/monitor/plantHome/getDeviceEnergyFlowDiagram', { plantUid: stationId, ...snp }).then(mapFlow).catch(() => undefined),
+      post<SajStatistics>('/monitor/plantHome/getPlantEnergyStatistics', { plantUid: stationId, ...snp }).catch(() => undefined),
+      post<SajSelfUse>('/monitor/plant/chart/getSelfUseEnergyData', {
+        plantUid: stationId, chartDateType: 1, chartDay: day, showSelfUse: 1, version2: true, ...snp,
+      }).then(mapSelfUse).catch(() => undefined),
+      post<SajChart>('/monitor/plant/chart/getCommonChartData', {
+        plantUid: stationId, chartDateType: 1, chartDay: day, commonChartType: 2, ...snp,
+      }).then(mapChart).catch(() => undefined),
+      post<SajChart>('/monitor/plant/chart/getCommonChartData', {
+        plantUid: stationId, chartCompareType: '1', commonChartType: 4, ...snp,
+      }).then(mapChart).catch(() => undefined),
+    ]);
+
+    return {
+      flow,
+      stats: stats?.energyDataList?.length ? mapStats(stats.energyDataList) : undefined,
+      selfUse,
+      powerCurve,
+      comparison,
+      environmental: mapEnvironmental(stats?.environmentalInformation),
+      strategy: flow?.userMode || stats?.userModeName || undefined,
     };
   },
 };

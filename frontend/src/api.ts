@@ -391,6 +391,8 @@ export interface SolarProviderInfo {
 export interface SolarOverview {
   stations: SolarStation[];
   errors: { provider: string; name: string; error: string }[];
+  /** Optional/unverified providers that returned no data (awaiting verification). */
+  unavailable?: string[];
   providerCount: number;
 }
 
@@ -407,6 +409,12 @@ export interface SolarAlert {
   deviceSn?: string;
   start?: number;
   level?: string;
+  /** Provider-reported root cause (e.g. SAJ alarmCauses). */
+  reason?: string;
+  /** Provider-reported remediation steps, one per line (e.g. SAJ solutions). */
+  solution?: string;
+  /** Provider-reported handling state (e.g. SAJ "Pending"). */
+  status?: string;
 }
 
 export interface SolarPowerPoint {
@@ -464,6 +472,90 @@ export interface SolarAlertsResult {
   /** Of totalDevices, how many are communicating. */
   onlineDevices?: number;
   errors: { provider: string; name: string; error: string }[];
+}
+
+// ─── Rich plant Overview (detail dashboard) ──────────────────────────────────
+
+export interface EnergyFlow {
+  pvPowerW?: number;
+  loadPowerW?: number;
+  gridPowerW?: number;
+  batteryPowerW?: number;
+  batterySoc?: number;
+  batteryDirection?: string;
+  gridDirection?: string;
+  hasPv?: boolean;
+  hasGrid?: boolean;
+  hasBattery?: boolean;
+  hasGenerator?: boolean;
+  generatorPowerW?: number;
+  systemPowerKw?: number;
+  runningState?: string;
+  userMode?: string;
+  todayPvEnergyKwh?: number;
+  dataTime?: string;
+}
+export interface EnergyStat {
+  kind: 'pv' | 'load' | 'grid' | 'battery';
+  todayKwh?: number;
+  totalKwh?: number;
+  today2Kwh?: number;
+  total2Kwh?: number;
+  selfUsePercentage?: number;
+}
+export interface SelfUseBreakdown {
+  pvEnergy?: number;
+  loadEnergy?: number;
+  sellEnergy?: number;
+  buyEnergy?: number;
+  chargeEnergy?: number;
+  dischargeEnergy?: number;
+  pvSelfConsumedEnergy?: number;
+  loadSelfConsumedEnergy?: number;
+  pvSelfConsumedRate?: number;
+  pvSellRate?: number;
+  loadSelfConsumedRate?: number;
+  loadBuyRate?: number;
+  unit?: string;
+}
+export interface ChartSeries {
+  name: string;
+  color?: string;
+  unit?: string;
+  secondaryAxis?: boolean;
+  data: (number | null)[];
+}
+export interface ChartData {
+  kind: 'line' | 'bar';
+  xLabels: string[];
+  series: ChartSeries[];
+}
+export interface Environmental {
+  co2SavedT?: number;
+  treesEquivalent?: number;
+  coalSavedT?: number;
+}
+export interface StationOverview {
+  provider: string;
+  stationId: string;
+  flow?: EnergyFlow;
+  stats?: EnergyStat[];
+  selfUse?: SelfUseBreakdown;
+  powerCurve?: ChartData;
+  comparison?: ChartData;
+  environmental?: Environmental;
+  strategy?: string;
+}
+
+/** Rich Overview dashboard for one plant. Resolves null when the provider doesn't
+ *  expose it (HTTP 501) so the UI falls back to the basic detail. */
+export async function getStationOverview(provider: string, id: string): Promise<StationOverview | null> {
+  try {
+    return await request<StationOverview>(`/api/solar/${provider}/stations/${encodeURIComponent(id)}/overview`);
+  } catch (err) {
+    if (err instanceof AuthError) throw err;
+    return null; // 501/unsupported or transient — caller shows basic detail
+  }
 }
 
 export function getSolarProviders(): Promise<{ providers: SolarProviderInfo[] }> {

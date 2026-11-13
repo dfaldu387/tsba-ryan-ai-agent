@@ -55,6 +55,13 @@ export interface NormalizedAlert {
   /** Epoch seconds. */
   start?: number;
   level?: string;
+  /** Provider-reported root cause of the fault, when exposed (e.g. SAJ alarmCauses). */
+  reason?: string;
+  /** Provider-reported remediation steps for this fault, when exposed (e.g. SAJ
+   *  solutions). Already whitespace-tidied and one step per line. */
+  solution?: string;
+  /** Provider-reported handling state, when exposed (e.g. SAJ "Pending"/"Recovered"). */
+  status?: string;
 }
 
 export interface NormalizedPowerPoint {
@@ -91,6 +98,106 @@ export interface NormalizedDetail {
   info: StationInfoItem[];
 }
 
+// ─── Rich plant "Overview" (detail dashboard) ────────────────────────────────
+// Optional, provider-specific data powering the full monitoring detail page
+// (energy-flow diagram, KPI cards, curve analysis, charts, environmental tiles).
+// Only providers that expose it implement SolarProvider.overview(); the UI shows
+// each section only when its data is present.
+
+/** Live energy-flow snapshot: instantaneous power at each node + battery state. */
+export interface EnergyFlow {
+  pvPowerW?: number;
+  loadPowerW?: number;
+  gridPowerW?: number;
+  batteryPowerW?: number;
+  batterySoc?: number; // %
+  /** Battery flow label, e.g. "Charge" / "Discharge". */
+  batteryDirection?: string;
+  /** Grid flow label, e.g. "Import" / "Export". */
+  gridDirection?: string;
+  hasPv?: boolean;
+  hasGrid?: boolean;
+  hasBattery?: boolean;
+  hasGenerator?: boolean;
+  generatorPowerW?: number;
+  systemPowerKw?: number;
+  runningState?: string;
+  /** Work/strategy mode, e.g. "Self-use mode". */
+  userMode?: string;
+  todayPvEnergyKwh?: number;
+  /** As-of timestamp reported by the platform. */
+  dataTime?: string;
+}
+
+/** One KPI-card figure group. `kind` picks the card; secondary fields are used
+ *  by the two-row cards (grid = import/export, battery = charge/discharge). */
+export interface EnergyStat {
+  kind: 'pv' | 'load' | 'grid' | 'battery';
+  todayKwh?: number;
+  totalKwh?: number;
+  /** Secondary row (grid: export; battery: discharge). */
+  today2Kwh?: number;
+  total2Kwh?: number;
+  /** PV only: self-consumption %. */
+  selfUsePercentage?: number;
+}
+
+/** Curve-analysis self-consumption / self-sufficiency breakdown for a period. */
+export interface SelfUseBreakdown {
+  pvEnergy?: number;
+  loadEnergy?: number;
+  sellEnergy?: number;
+  buyEnergy?: number;
+  chargeEnergy?: number;
+  dischargeEnergy?: number;
+  pvSelfConsumedEnergy?: number;
+  loadSelfConsumedEnergy?: number;
+  /** Rates as fractions (0–1). */
+  pvSelfConsumedRate?: number;
+  pvSellRate?: number;
+  loadSelfConsumedRate?: number;
+  loadBuyRate?: number;
+  unit?: string;
+}
+
+/** A generic multi-series chart: x-axis labels + named series. */
+export interface ChartSeries {
+  name: string;
+  color?: string;
+  unit?: string;
+  /** Right-axis series (e.g. SOC %) drawn on a secondary scale. */
+  secondaryAxis?: boolean;
+  data: (number | null)[];
+}
+export interface ChartData {
+  kind: 'line' | 'bar';
+  xLabels: string[];
+  series: ChartSeries[];
+}
+
+/** Environmental savings tiles. */
+export interface Environmental {
+  co2SavedT?: number;
+  treesEquivalent?: number;
+  coalSavedT?: number;
+}
+
+/** The full rich detail-page bundle (all sections optional / best-effort). */
+export interface StationOverview {
+  flow?: EnergyFlow;
+  /** The KPI cards (generated / consumption / grid / battery). */
+  stats?: EnergyStat[];
+  /** Self-consumption + self-sufficiency breakdown for the selected period. */
+  selfUse?: SelfUseBreakdown;
+  /** Day power + SOC time-series. */
+  powerCurve?: ChartData;
+  /** Energy comparison bars (monthly / quarter / annual). */
+  comparison?: ChartData;
+  environmental?: Environmental;
+  /** Plant strategy / work-mode label. */
+  strategy?: string;
+}
+
 /** Severity of a monitoring notification, most to least severe. */
 export type SolarAlertSeverity = 'offline' | 'partial' | 'fault' | 'alert' | 'device';
 
@@ -111,6 +218,11 @@ export interface SolarMonitorAlert {
   deviceSn?: string;
   /** Epoch seconds, when known (e.g. a fault's start time). */
   at?: number;
+  /** Provider-reported remediation steps for this fault, when exposed (e.g. SAJ).
+   *  Preferred over an AI-generated solution in alert emails. */
+  solution?: string;
+  /** Provider-reported handling state, when exposed (e.g. SAJ "Pending"). */
+  status?: string;
   /** Plant coordinates (decimal degrees), when known — for per-plant quiet hours. */
   lat?: number;
   lng?: number;
@@ -123,10 +235,25 @@ export interface SolarProvider {
   name: string;
   /** True once this provider has the credentials it needs. */
   configured(): boolean;
+  /**
+   * Optional/unverified integration: when it fails with no cached data, the
+   * aggregator reports it as "unavailable" (awaiting verification) rather than a
+   * hard error, so a known-incomplete platform (e.g. a placeholder or a scraper
+   * with no live session yet) doesn't spam the fleet view with error banners.
+   */
+  optional?: boolean;
   /** All stations visible to the configured account. */
   listStations(): Promise<NormalizedStation[]>;
   /** Devices, alerts, realtime snapshot and today's power curve for one station. */
   stationDetail(stationId: string): Promise<NormalizedDetail>;
+  /**
+   * Rich "Overview" dashboard data (energy flow, KPI cards, curve analysis,
+   * power/energy charts, environmental). Optional — only providers that expose
+   * it implement this; the detail page shows the Overview when present and falls
+   * back to the basic detail otherwise. Kept separate from stationDetail() so the
+   * fleet alert scan (which calls stationDetail per plant) stays lightweight.
+   */
+  overview?(stationId: string): Promise<StationOverview>;
 }
 
 export class ProviderError extends Error {

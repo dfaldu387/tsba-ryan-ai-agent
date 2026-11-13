@@ -196,7 +196,18 @@ export async function resolveSolution(
   issues: SolarMonitorAlert[],
   settings: SolarAlertSettings,
 ): Promise<string | null> {
-  if (!settings.includeSolution || !issues.length || !anthropicConfigured()) return null;
+  if (!settings.includeSolution || !issues.length) return null;
+
+  // Prefer the provider's OWN remediation steps when it supplies them (e.g. SAJ/
+  // Elekeeper's `solutions`). These are authoritative, equipment-specific and free,
+  // so they take precedence over the AI/KB-generated fallback below. Combine the
+  // distinct solutions across this plant's issues (usually one).
+  const provided = Array.from(
+    new Set(issues.map((i) => i.solution?.trim()).filter((s): s is string => Boolean(s))),
+  );
+  if (provided.length) return provided.join('\n\n');
+
+  if (!anthropicConfigured()) return null;
   const sigKey = issues.map((i) => i.title.toLowerCase()).join('|');
   try {
     const { brand, model } = await plantEquipment(issues);

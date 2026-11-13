@@ -23,6 +23,7 @@ import {
 } from '../providers/index.js';
 import { SOLAR_TOOLS, executeSolarTool, solarToolsAvailable } from '../solar-tools.js';
 import { getSolarAlerts } from '../solar-alerts.js';
+import { cached as providerCache } from '../providers/cache.js';
 
 // Appended to the chat system prompt when a monitoring platform is connected, so
 // the agent knows it can read live plant data (and must not invent figures).
@@ -1034,8 +1035,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // in parallel and resiliently (one retry + last-good fallback per provider), so
   // a transient blip on one platform neither blanks it nor flashes an error.
   app.get('/api/solar/overview', { preHandler: requirePermission('view') }, async () => {
-    const { stations, errors, stale } = await aggregateStations();
-    return { stations, errors, stale, providerCount: configuredProviders().length };
+    const { stations, errors, stale, unavailable } = await aggregateStations();
+    return { stations, errors, stale, unavailable, providerCount: configuredProviders().length };
   });
 
   // Fleet health alerts for the header notification panel: offline/partial
@@ -1073,6 +1074,32 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         return { provider: provider.id, stationId: req.params.id, ...detail };
       } catch (err) {
         req.log.error({ err, provider: provider.id }, 'solar station detail failed');
+        return solarFail(reply, err);
+      }
+    },
+  );
+
+  // Rich "Overview" dashboard data (energy flow, KPI cards, curve analysis,
+  // power/energy charts, environmental). Only providers that implement
+  // provider.overview() return data; others yield 501 so the UI shows the basic
+  // detail instead. Cached briefly so repeated opens don't re-hit the platform.
+  app.get<{ Params: { provider: string; id: string } }>(
+    '/api/solar/:provider/stations/:id/overview',
+    { preHandler: requirePermission('view') },
+    async (req, reply) => {
+      const provider = getProvider(req.params.provider);
+      if (!provider) return reply.code(404).send({ error: 'unknown_provider' });
+      if (!provider.configured()) return reply.code(503).send({ error: 'provider_not_configured' });
+      if (!provider.overview) return reply.code(501).send({ error: 'overview_unsupported' });
+      try {
+        const overview = await providerCache(
+          `solar:overview:${provider.id}:${req.params.id}`,
+          60_000,
+          () => provider.overview!(req.params.id),
+        );
+        return { provider: provider.id, stationId: req.params.id, ...overview };
+      } catch (err) {
+        req.log.error({ err, provider: provider.id }, 'solar station overview failed');
         return solarFail(reply, err);
       }
     },

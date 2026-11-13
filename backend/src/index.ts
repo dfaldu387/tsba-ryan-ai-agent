@@ -27,8 +27,13 @@ async function main(): Promise<void> {
   // SPA fallback so the standalone page isn't swallowed by the catch-all.
   await registerUsageRoutes(app);
 
-  // Prod: serve the built SPA from the same origin so the password gate covers it.
-  if (env.isProd && existsSync(frontendDist)) {
+  // Serve the built SPA from the same origin whenever a build exists, so the app
+  // (and its client-side routes) work on the backend port — not just in prod. In
+  // dev the Vite server on :5173 is still the live/HMR origin; this makes the
+  // canonical :8080 URL (which the password gate and OAuth redirect use) serve the
+  // app too, with an index.html fallback so deep links / refreshes don't 404.
+  // (If there's no build yet, run `npm run build` in frontend/, or use :5173.)
+  if (existsSync(frontendDist)) {
     await app.register(fastifyStatic, { root: frontendDist });
     app.setNotFoundHandler((req, reply) => {
       if (req.raw.url?.startsWith('/api/')) return reply.code(404).send({ error: 'not_found' });

@@ -17,6 +17,10 @@ export const whesProvider: SolarProvider = {
   id: 'whes',
   name: 'WHES (ECOS Hub)',
   configured: whesConfigured,
+  // No public API, and the portal scraper only works with a freshly captured
+  // ECOS Hub session. Marked optional so a failed/expired scrape degrades to
+  // "unavailable (awaiting verification)" instead of a fleet-wide error banner.
+  optional: true,
 
   async listStations(): Promise<NormalizedStation[]> {
     throw new ProviderError(
