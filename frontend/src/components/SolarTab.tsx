@@ -1,314 +1,66 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+// Solar Monitoring shell: owns the shared fleet data (providers, overview,
+// alerts) and the 60s polling, hosts the six sub-section views behind a sub-nav,
+// and manages plant-detail selection (persisted in the URL so reloads/back keep
+// the open plant). Each section lives in ./solar/*.
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AuthError,
+  getSolarAlerts,
   getSolarOverview,
   getSolarProviders,
   getSolarStationDetail,
-  type SolarAlert,
-  type SolarDevice,
-  type SolarInfoItem,
+  getStationOverview,
+  type SolarAlertsResult,
   type SolarOverview,
-  type SolarPowerPoint,
   type SolarProviderInfo,
   type SolarStation,
   type SolarStationDetail,
-  type StationStatus,
+  type StationOverview,
 } from '../api';
+import { StationDetail } from './solar/StationDetail';
+import { RefreshBar, SOLAR_VIEWS, SubNav, type SolarView } from './solar/ui';
+import type { SolarViewProps } from './solar/types';
+import { OverviewView } from './solar/OverviewView';
+import { PlantsView } from './solar/PlantsView';
+import { AnalyticsView } from './solar/AnalyticsView';
+import { DevicesView } from './solar/DevicesView';
+import { AlertsView } from './solar/AlertsView';
+import { IntegrationsView } from './solar/IntegrationsView';
 
-// ─── Formatting helpers ──────────────────────────────────────────────────────
-
-/** Watts → "1.24 kW" / "820 W". */
-function fmtPower(w?: number): string {
-  if (w == null || Number.isNaN(w)) return '—';
-  if (Math.abs(w) >= 1000) return `${(w / 1000).toFixed(2)} kW`;
-  return `${Math.round(w)} W`;
-}
-
-/** kWh → "738.5 kWh" / "62.49 MWh". */
-function fmtEnergy(kwh?: number): string {
-  if (kwh == null || Number.isNaN(kwh)) return '—';
-  if (Math.abs(kwh) >= 1000) return `${(kwh / 1000).toFixed(2)} MWh`;
-  return `${kwh.toFixed(1)} kWh`;
-}
-
-function fmtCapacity(kw?: number): string {
-  if (kw == null || Number.isNaN(kw)) return '—';
-  return `${kw.toFixed(2)} kWp`;
-}
-
-function fmtPct(v?: number): string {
-  return v == null || Number.isNaN(v) ? '—' : `${Math.round(v)}%`;
-}
-
-function fmtTime(epochSec?: number): string {
-  if (!epochSec) return '—';
-  const d = new Date(epochSec * 1000);
-  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString();
-}
-
-function fmtClock(epochSec?: number): string {
-  if (!epochSec) return '';
-  const d = new Date(epochSec * 1000);
-  return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-
-const STATUS_META: Record<StationStatus, { cls: string; label: string }> = {
-  online: { cls: 'ok', label: 'Online' },
-  waiting: { cls: 'mid', label: 'Waiting' },
-  partial: { cls: 'mid', label: 'Partial' },
-  offline: { cls: 'flag', label: 'Offline' },
-  unknown: { cls: 'muted', label: 'Unknown' },
-};
-
-/** Status chips render in this order, skipping any status with no stations. */
-const STATUS_ORDER: StationStatus[] = ['online', 'waiting', 'partial', 'offline', 'unknown'];
-
-type SortKey = 'default' | 'power' | 'daily' | 'capacity' | 'name';
-
-const SORT_OPTIONS: { value: SortKey; label: string }[] = [
-  { value: 'default', label: 'Default order' },
-  { value: 'power', label: 'Power (high → low)' },
-  { value: 'daily', label: 'Today’s energy (high → low)' },
-  { value: 'capacity', label: 'Capacity (high → low)' },
-  { value: 'name', label: 'Name (A → Z)' },
-];
-
-// Stable empty reference so provider-scoping memos don't re-run every render.
 const EMPTY_STATIONS: SolarStation[] = [];
+const POLL_MS = 60_000;
 
-// ─── Intraday power chart (inline SVG) ───────────────────────────────────────
+const isView = (v: unknown): v is SolarView => SOLAR_VIEWS.includes(v as SolarView);
 
-function PowerChart({ points }: { points: SolarPowerPoint[] }) {
-  const series = points.filter((p) => p.t > 0).sort((a, b) => a.t - b.t);
-  if (series.length < 2) return <p className="solar-empty">No intraday power data available for this station.</p>;
-
-  const W = 560;
-  const H = 160;
-  const padX = 8;
-  const padY = 10;
-  const max = Math.max(...series.map((s) => s.powerW), 1);
-  const minT = series[0].t;
-  const maxT = series[series.length - 1].t;
-  const spanT = Math.max(maxT - minT, 1);
-  const x = (t: number) => padX + ((t - minT) / spanT) * (W - padX * 2);
-  const y = (v: number) => padY + (1 - v / max) * (H - padY * 2);
-  const line = series.map((s, i) => `${i === 0 ? 'M' : 'L'}${x(s.t).toFixed(1)},${y(s.powerW).toFixed(1)}`).join(' ');
-  const area = `${line} L${x(maxT).toFixed(1)},${(H - padY).toFixed(1)} L${x(minT).toFixed(1)},${(H - padY).toFixed(1)} Z`;
-  const peak = series.reduce((m, s) => (s.powerW > m.powerW ? s : m), series[0]);
-
-  return (
-    <div className="solar-chart">
-      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label="Today's generation power">
-        <path d={area} className="solar-chart-area" />
-        <path d={line} className="solar-chart-line" />
-        <circle cx={x(peak.t)} cy={y(peak.powerW)} r={3.5} className="solar-chart-peak" />
-      </svg>
-      <div className="solar-chart-axis">
-        <span>{fmtClock(minT)}</span>
-        <span className="solar-chart-peak-label">Peak {fmtPower(peak.powerW)} · {fmtClock(peak.t)}</span>
-        <span>{fmtClock(maxT)}</span>
-      </div>
-    </div>
-  );
+function initialView(): SolarView {
+  try {
+    const v = new URLSearchParams(window.location.search).get('view');
+    if (isView(v)) return v;
+  } catch { /* ignore */ }
+  return 'overview';
 }
-
-/** Base plant details from the station record, used when a provider returns no `info`. */
-function fallbackInfo(s: SolarStation): SolarInfoItem[] {
-  const items: [string, string | undefined][] = [
-    ['Status', STATUS_META[s.status].label],
-    ['Location', s.location],
-    ['Installed capacity', s.capacityKw != null ? fmtCapacity(s.capacityKw) : undefined],
-    ['Battery SOC', s.batterySoc != null ? fmtPct(s.batterySoc) : undefined],
-    ['Today', s.dailyEnergyKwh != null ? fmtEnergy(s.dailyEnergyKwh) : undefined],
-    ['This month', s.monthlyEnergyKwh != null ? fmtEnergy(s.monthlyEnergyKwh) : undefined],
-    ['Total', s.totalEnergyKwh != null ? fmtEnergy(s.totalEnergyKwh) : undefined],
-    ['Last update', s.lastUpdate ? fmtTime(s.lastUpdate) : undefined],
-    ['Station ID', s.id],
-  ];
-  return items.filter(([, v]) => v).map(([label, value]) => ({ label, value: value as string }));
-}
-
-function Metric({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
-  return (
-    <div className={`solar-metric ${accent ? 'accent' : ''}`}>
-      <span className="solar-metric-value">{value}</span>
-      <span className="solar-metric-label">{label}</span>
-    </div>
-  );
-}
-
-// ─── Station detail panel ────────────────────────────────────────────────────
-
-function StationDetail({
-  station,
-  providerName,
-  detail,
-  loading,
-  error,
-  onClose,
-}: {
-  station: SolarStation;
-  providerName: string;
-  detail: SolarStationDetail | null;
-  loading: boolean;
-  error: string;
-  onClose: () => void;
-}) {
-  const latest = detail?.latest ?? null;
-  const devices: SolarDevice[] = detail?.devices ?? [];
-  const alerts: SolarAlert[] = detail?.alerts ?? [];
-
-  return (
-    <section className="card solar-detail">
-      <div className="card-h">
-        <div>
-          <h2>{station.name}</h2>
-          <span className="eyebrow">
-            <span className="solar-provider-tag">{providerName}</span> · Station {station.id}
-          </span>
-        </div>
-        <button type="button" className="ghost" onClick={onClose}>
-          ← Back to stations
-        </button>
-      </div>
-
-      {loading && <p className="solar-empty">Loading station data…</p>}
-      {error && <span className="err">{error}</span>}
-
-      {!loading && !error && (
-        <>
-          <div className="solar-metric-grid">
-            <Metric label="Current power" value={fmtPower(latest?.currentPowerW ?? station.currentPowerW)} accent />
-            <Metric label="Today" value={fmtEnergy(latest?.dailyEnergyKwh ?? station.dailyEnergyKwh)} />
-            <Metric label="This month" value={fmtEnergy(latest?.monthlyEnergyKwh ?? station.monthlyEnergyKwh)} />
-            <Metric label="Total" value={fmtEnergy(latest?.totalEnergyKwh ?? station.totalEnergyKwh)} />
-            <Metric label="Capacity" value={fmtCapacity(station.capacityKw)} />
-            {(latest?.batterySoc ?? station.batterySoc) != null && (
-              <Metric label="Battery SOC" value={fmtPct(latest?.batterySoc ?? station.batterySoc)} />
-            )}
-            {latest?.consumptionPowerW != null && <Metric label="Consumption" value={fmtPower(latest.consumptionPowerW)} />}
-            {latest?.gridPowerW != null && <Metric label="Grid" value={fmtPower(latest.gridPowerW)} />}
-            {latest?.batteryPowerW != null && <Metric label="Battery" value={fmtPower(latest.batteryPowerW)} />}
-          </div>
-
-          {(() => {
-            const info = detail?.info?.length ? detail.info : fallbackInfo(station);
-            return info.length > 0 ? (
-              <div className="solar-section">
-                <h3 className="solar-h3">Plant details</h3>
-                <div className="solar-info-grid">
-                  {info.map((it) => (
-                    <div className="solar-info-item" key={it.label}>
-                      <span className="solar-info-label">{it.label}</span>
-                      <span className="solar-info-value">{it.value}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : null;
-          })()}
-
-          <div className="solar-section">
-            <h3 className="solar-h3">Today’s generation</h3>
-            <PowerChart points={detail?.power ?? []} />
-          </div>
-
-          <div className="solar-section">
-            <h3 className="solar-h3">Devices ({devices.length})</h3>
-            {devices.length === 0 ? (
-              <p className="solar-empty">No device data exposed by this provider.</p>
-            ) : (
-              <div className="solar-table-wrap">
-                <table className="solar-table">
-                  <thead>
-                    <tr>
-                      <th>Serial</th>
-                      <th>Type</th>
-                      <th>State</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {devices.map((d, i) => (
-                      <tr key={d.sn || i}>
-                        <td className="solar-mono">{d.sn || '—'}</td>
-                        <td>{d.type || '—'}</td>
-                        <td>
-                          <span className={`solar-dot ${d.online ? 'ok' : 'flag'}`} />
-                          {d.online ? 'Online' : 'Offline'}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-
-          <div className="solar-section">
-            <h3 className="solar-h3">
-              Active alerts
-              {alerts.length > 0 && <span className="solar-badge flag">{alerts.length}</span>}
-            </h3>
-            {alerts.length === 0 ? (
-              <p className="solar-empty">No active alerts.</p>
-            ) : (
-              <ul className="solar-alert-list">
-                {alerts.map((a, i) => (
-                  <li key={a.id || i} className="solar-alert">
-                    <div className="solar-alert-head">
-                      <strong>{a.name}</strong>
-                      {a.code && <code className="solar-mono">{a.code}</code>}
-                    </div>
-                    <div className="solar-alert-meta">
-                      {a.deviceSn && <span>{a.deviceSn}</span>}
-                      {a.start && <span>Since {fmtTime(a.start)}</span>}
-                      {a.level && <span>Level {a.level}</span>}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        </>
-      )}
-    </section>
-  );
-}
-
-function SolarKpi({ value, label, accent }: { value: string; label: string; accent?: boolean }) {
-  return (
-    <div className={`solar-kpi ${accent ? 'accent' : ''}`}>
-      <span className="solar-kpi-value">{value}</span>
-      <span className="solar-kpi-label">{label}</span>
-    </div>
-  );
-}
-
-// ─── Main tab ────────────────────────────────────────────────────────────────
 
 export function SolarTab({ onAuthError }: { onAuthError: () => void }) {
   const [providers, setProviders] = useState<SolarProviderInfo[] | null>(null);
   const [overview, setOverview] = useState<SolarOverview | null>(null);
+  const [alerts, setAlerts] = useState<SolarAlertsResult | null>(null);
+  const [alertsLoading, setAlertsLoading] = useState(true);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState<string>('all');
-  const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | StationStatus>('all');
-  const [sortBy, setSortBy] = useState<SortKey>('default');
+  const [view, setView] = useState<SolarView>(initialView);
 
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const canPoll = useRef(false);
+
+  // Plant detail selection.
   const [selected, setSelected] = useState<SolarStation | null>(null);
   const [detail, setDetail] = useState<SolarStationDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState('');
+  const [ovData, setOvData] = useState<StationOverview | null>(null);
 
-  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
-  // True once at least one provider is connected — gates background polling.
-  const canPoll = useRef(false);
-
-  const POLL_MS = 60_000;
-
-  /** Re-fetch the overview. Keeps the last good data on a transient failure. */
+  // ── Shared data refresh (overview + fleet alert scan). Keeps last good data. ──
   const refresh = useCallback(async () => {
     setRefreshing(true);
     try {
@@ -318,14 +70,15 @@ export function SolarTab({ onAuthError }: { onAuthError: () => void }) {
       setError('');
     } catch (err) {
       if (err instanceof AuthError) onAuthError();
-      // else: silent — keep showing the last snapshot until the next tick.
     } finally {
       setRefreshing(false);
     }
+    getSolarAlerts()
+      .then((a) => setAlerts(a))
+      .catch((err) => { if (err instanceof AuthError) onAuthError(); })
+      .finally(() => setAlertsLoading(false));
   }, [onAuthError]);
 
-  // Initial load (providers + first overview), then poll every 60s while the
-  // tab is visible.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -339,6 +92,12 @@ export function SolarTab({ onAuthError }: { onAuthError: () => void }) {
           if (cancelled) return;
           setOverview(ov);
           setLastUpdated(Date.now());
+          getSolarAlerts()
+            .then((a) => !cancelled && setAlerts(a))
+            .catch((err) => { if (err instanceof AuthError) onAuthError(); })
+            .finally(() => !cancelled && setAlertsLoading(false));
+        } else {
+          setAlertsLoading(false);
         }
       } catch (err) {
         if (cancelled) return;
@@ -362,9 +121,36 @@ export function SolarTab({ onAuthError }: { onAuthError: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const openStation = (s: SolarStation) => {
+  // ── URL: sub-view (?view=) is reload-safe (replace, no history spam). ──
+  const changeView = (v: SolarView) => {
+    setView(v);
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (v === 'overview') params.delete('view');
+      else params.set('view', v);
+      params.delete('station');
+      const qs = params.toString();
+      window.history.replaceState({}, '', window.location.pathname + (qs ? `?${qs}` : ''));
+    } catch { /* ignore */ }
+  };
+
+  // ── URL: plant selection (?station=provider:id) survives reload / back. ──
+  const writeStationParam = (value: string | null, push: boolean) => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (value) params.set('station', value);
+      else params.delete('station');
+      const qs = params.toString();
+      const url = window.location.pathname + (qs ? `?${qs}` : '');
+      if (push) window.history.pushState({}, '', url);
+      else window.history.replaceState({}, '', url);
+    } catch { /* ignore */ }
+  };
+
+  const loadStationData = (s: SolarStation) => {
     setSelected(s);
     setDetail(null);
+    setOvData(null);
     setDetailError('');
     setDetailLoading(true);
     getSolarStationDetail(s.provider, s.id)
@@ -374,82 +160,57 @@ export function SolarTab({ onAuthError }: { onAuthError: () => void }) {
         setDetailError('Couldn’t load this station’s data.');
       })
       .finally(() => setDetailLoading(false));
+    getStationOverview(s.provider, s.id)
+      .then(setOvData)
+      .catch((err) => { if (err instanceof AuthError) onAuthError(); });
+  };
+
+  const openStation = (s: SolarStation) => {
+    writeStationParam(`${s.provider}:${s.id}`, true);
+    loadStationData(s);
+  };
+  const closeStation = () => {
+    setSelected(null);
+    writeStationParam(null, true);
   };
 
   const providerName = (id: string) => providers?.find((p) => p.id === id)?.name ?? id;
   const configured = providers?.filter((p) => p.configured) ?? [];
   const stations = overview?.stations ?? EMPTY_STATIONS;
 
-  // Provider-scoped set: drives the portfolio KPI tiles and the filter counts.
-  const scoped = useMemo(
-    () => (filter === 'all' ? stations : stations.filter((s) => s.provider === filter)),
-    [stations, filter],
-  );
-
-  // Status chips — only for statuses that actually appear in the scoped set.
-  const statusCounts = useMemo(
-    () =>
-      STATUS_ORDER.map((status) => ({ status, count: scoped.filter((s) => s.status === status).length })).filter(
-        (x) => x.count > 0,
-      ),
-    [scoped],
-  );
-
-  // Displayed set: scoped + status filter + text search + sort.
-  const shown = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    const list = scoped.filter((s) => {
-      if (statusFilter !== 'all' && s.status !== statusFilter) return false;
-      if (q && !`${s.name} ${s.location ?? ''}`.toLowerCase().includes(q)) return false;
-      return true;
-    });
-    const num = (v?: number) => (v == null || Number.isNaN(v) ? -Infinity : v);
-    const sorted = [...list];
-    switch (sortBy) {
-      case 'power':
-        sorted.sort((a, b) => num(b.currentPowerW) - num(a.currentPowerW));
-        break;
-      case 'daily':
-        sorted.sort((a, b) => num(b.dailyEnergyKwh) - num(a.dailyEnergyKwh));
-        break;
-      case 'capacity':
-        sorted.sort((a, b) => num(b.capacityKw) - num(a.capacityKw));
-        break;
-      case 'name':
-        sorted.sort((a, b) => a.name.localeCompare(b.name));
-        break;
-      default:
-        break;
-    }
-    return sorted;
-  }, [scoped, statusFilter, search, sortBy]);
-
-  const filtersActive = statusFilter !== 'all' || search.trim() !== '';
-
-  const summary = useMemo(() => {
-    const sum = (list: SolarStation[], f: (s: SolarStation) => number | undefined) =>
-      list.reduce((acc, s) => acc + (f(s) ?? 0), 0);
-    // Real-time power: exclude offline plants — they report stale/last-known
-    // power, which the platform header leaves out of the live total.
-    const generating = scoped.filter((s) => s.status !== 'offline');
-    // Installed capacity: exclude offline plants that never report power
-    // (non-commissioned), matching the platform's installed-capacity figure.
-    const commissioned = scoped.filter((s) => !(s.status === 'offline' && s.currentPowerW == null));
-    return {
-      count: scoped.length,
-      online: scoped.filter((s) => s.status === 'online').length,
-      power: sum(generating, (s) => s.currentPowerW),
-      daily: sum(scoped, (s) => s.dailyEnergyKwh),
-      monthly: sum(scoped, (s) => s.monthlyEnergyKwh),
-      total: sum(scoped, (s) => s.totalEnergyKwh),
-      capacity: sum(commissioned, (s) => s.capacityKw),
+  // Restore open plant from the URL once stations load; sync with back/forward.
+  useEffect(() => {
+    const fromUrl = (): SolarStation | null => {
+      try {
+        const raw = new URLSearchParams(window.location.search).get('station');
+        if (!raw) return null;
+        const i = raw.indexOf(':');
+        if (i < 0) return null;
+        return stations.find((s) => s.provider === raw.slice(0, i) && s.id === raw.slice(i + 1)) ?? null;
+      } catch {
+        return null;
+      }
     };
-  }, [scoped]);
+    if (!selected) {
+      const match = fromUrl();
+      if (match) loadStationData(match);
+    }
+    const onPop = () => {
+      const match = fromUrl();
+      if (match) loadStationData(match);
+      else setSelected(null);
+      const v = new URLSearchParams(window.location.search).get('view');
+      setView(isView(v) ? v : 'overview');
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stations]);
 
   // ── Nothing configured ──
   if (!loading && providers && configured.length === 0) {
     return (
-      <div className="col">
+      <div className="col solar-root">
         <section className="card solar-setup">
           <div className="card-h">
             <h2>Connect a monitoring platform</h2>
@@ -483,184 +244,58 @@ GOODWE_REGION=au       # au | eu | us | global`}</pre>
 
   if (loading) {
     return (
-      <div className="col">
+      <div className="col solar-root">
         <p className="how">Loading solar monitoring…</p>
       </div>
     );
   }
 
+  // Plant detail takes over the whole Solar area.
   if (selected) {
     return (
-      <div className="col">
+      <div className="col solar-root">
         <StationDetail
           station={selected}
           providerName={providerName(selected.provider)}
           detail={detail}
+          overview={ovData}
           loading={detailLoading}
           error={detailError}
-          onClose={() => setSelected(null)}
+          onClose={closeStation}
         />
       </div>
     );
   }
 
+  const viewProps: SolarViewProps = {
+    providers: providers ?? [],
+    overview,
+    stations,
+    alerts,
+    alertsLoading,
+    lastUpdated,
+    refreshing,
+    refresh,
+    providerName,
+    openStation,
+    goTo: changeView,
+  };
+
   return (
-    <div className="col">
+    <div className="col solar-shell solar-root">
       {error && <span className="err">{error}</span>}
 
-      {/* Per-provider errors (e.g. one platform's credentials failing) */}
-      {overview?.errors.map((e) => (
-        <div key={e.provider} className="solar-provider-error">
-          <strong>{e.name}</strong> couldn’t be reached: {e.error}
-        </div>
-      ))}
-
-      {/* Last-updated indicator + manual refresh (auto-refreshes every 60s) */}
-      <div className="solar-refresh-bar">
-        <span className="solar-updated">
-          {refreshing
-            ? 'Updating…'
-            : lastUpdated
-              ? `Updated ${new Date(lastUpdated).toLocaleTimeString()} · auto every 60s`
-              : ''}
-        </span>
-        <button type="button" className="ghost solar-refresh-btn" onClick={() => void refresh()} disabled={refreshing}>
-          <span className={`solar-refresh-ico ${refreshing ? 'spin' : ''}`} aria-hidden="true">↻</span> Refresh
-        </button>
+      <div className="solar-shell-head">
+        <SubNav active={view} onChange={changeView} alertCount={alerts?.alerts.length} />
+        <RefreshBar lastUpdated={lastUpdated} refreshing={refreshing} onRefresh={() => void refresh()} />
       </div>
 
-      {/* Portfolio production tiles (reflect the active filter) */}
-      <div className="solar-kpi-row">
-        <SolarKpi value={fmtPower(summary.power)} label="Real-time power" accent />
-        <SolarKpi value={fmtCapacity(summary.capacity)} label="Installed capacity" />
-        <SolarKpi value={fmtEnergy(summary.daily)} label="Daily production" />
-        <SolarKpi value={fmtEnergy(summary.monthly)} label="Monthly production" />
-        <SolarKpi value={fmtEnergy(summary.total)} label="Total production" />
-      </div>
-
-      {/* Provider filter (only when more than one is connected) */}
-      {configured.length > 1 && (
-        <div className="solar-filter">
-          <button type="button" className={`solar-chip ${filter === 'all' ? 'active' : ''}`} onClick={() => setFilter('all')}>
-            All ({stations.length})
-          </button>
-          {configured.map((p) => (
-            <button
-              key={p.id}
-              type="button"
-              className={`solar-chip ${filter === p.id ? 'active' : ''}`}
-              onClick={() => setFilter(p.id)}
-            >
-              {p.name} ({stations.filter((s) => s.provider === p.id).length})
-            </button>
-          ))}
-        </div>
-      )}
-
-      <section className="card">
-        <div className="card-h">
-          <h2>Stations</h2>
-          <span className="eyebrow">
-            {filtersActive ? `${shown.length} of ${scoped.length}` : `${summary.count} total`} ·{' '}
-            {shown.filter((s) => s.status === 'online').length} online
-          </span>
-        </div>
-
-        {/* Search · status · sort toolbar */}
-        {scoped.length > 0 && (
-          <div className="solar-toolbar">
-            <div className="solar-search">
-              <svg className="solar-search-ico" width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="2" />
-                <line x1="16.5" y1="16.5" x2="21" y2="21" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-              </svg>
-              <input
-                type="search"
-                className="solar-search-input"
-                placeholder="Search by name or location…"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                aria-label="Search stations"
-              />
-              {search && (
-                <button type="button" className="solar-search-clear" onClick={() => setSearch('')} aria-label="Clear search">
-                  ×
-                </button>
-              )}
-            </div>
-
-            {statusCounts.length > 1 && (
-              <div className="solar-status-chips">
-                <button
-                  type="button"
-                  className={`solar-chip sm ${statusFilter === 'all' ? 'active' : ''}`}
-                  onClick={() => setStatusFilter('all')}
-                >
-                  All ({scoped.length})
-                </button>
-                {statusCounts.map(({ status, count }) => (
-                  <button
-                    key={status}
-                    type="button"
-                    className={`solar-chip sm ${statusFilter === status ? 'active' : ''}`}
-                    onClick={() => setStatusFilter(status)}
-                  >
-                    {STATUS_META[status].label} ({count})
-                  </button>
-                ))}
-              </div>
-            )}
-
-            <label className="solar-sort">
-              <span>Sort</span>
-              <select value={sortBy} onChange={(e) => setSortBy(e.target.value as SortKey)}>
-                {SORT_OPTIONS.map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-        )}
-
-        {shown.length === 0 && (
-          <p className="solar-empty">
-            {scoped.length === 0
-              ? filter === 'all'
-                ? 'No stations found on the connected account(s).'
-                : `${providerName(filter)} is connected, but this account has no plants yet.`
-              : 'No stations match the current search or status filter.'}
-          </p>
-        )}
-
-        {shown.length > 0 && (
-          <div className="solar-grid">
-            {shown.map((s) => {
-              const meta = STATUS_META[s.status];
-              return (
-                <button key={`${s.provider}:${s.id}`} type="button" className="solar-card" onClick={() => openStation(s)}>
-                  <div className="solar-card-head">
-                    <span className="solar-card-name">{s.name}</span>
-                    <span className={`solar-badge ${meta.cls}`}>{meta.label}</span>
-                  </div>
-                  <div className="solar-card-power">{fmtPower(s.currentPowerW)}</div>
-                  <div className="solar-card-sub">
-                    <span>{fmtEnergy(s.dailyEnergyKwh)} today</span>
-                    <span>•</span>
-                    <span>{fmtCapacity(s.capacityKw)}</span>
-                  </div>
-                  {s.location && <div className="solar-card-loc">{s.location}</div>}
-                  <div className="solar-card-foot">
-                    <span className="solar-provider-tag">{providerName(s.provider)}</span>
-                    {s.batterySoc != null && <span className="solar-card-soc">SOC {fmtPct(s.batterySoc)}</span>}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        )}
-      </section>
+      {view === 'overview' && <OverviewView {...viewProps} />}
+      {view === 'plants' && <PlantsView {...viewProps} />}
+      {view === 'analytics' && <AnalyticsView {...viewProps} />}
+      {view === 'devices' && <DevicesView {...viewProps} />}
+      {view === 'alerts' && <AlertsView {...viewProps} />}
+      {view === 'integrations' && <IntegrationsView {...viewProps} />}
     </div>
   );
 }

@@ -1,0 +1,475 @@
+[
+  {
+    "path": "/sys/common/aboutUs/getInfo",
+    "method": "POST",
+    "status": 200,
+    "params": {
+      "appProjectName": "elekeeper",
+      "clientDate": "2026-11-13",
+      "lang": "en",
+      "timeStamp": 1794558872640,
+      "clientId": "esolar-monitor-admin",
+      "clientCode": "organization",
+      "themeColor": "dark"
+    },
+    "respKeys": "{address,aiChatH5Url,aiChatIconUrl,aiChatTitle,aiSavingCourse,aiSavingCourseUrl,aiSavingGuidePageName,aiSavingGuidePageUrl,aiSavingUseTerm,aiSavingUseTermUrl,androidDownloadUrl,backgroundUrl,baseMapUrl,callCenter,cancelAgreementName,cancelAgreementUrl,companyBrief,companyName,copyright,copyrightInfo,country,customerManagementUrl,developerPlatformUrl,distributorPrivacyAgreementName,distributorPrivacyAgreementUrl,email,emailPushAgreementName,emailPushAgreementUrl,faviconUrl,fax,heatPumpAiLinkageGuidePageUrl,heatPumpAiLinkageUseTerm,heatPumpAiLinkageUseTermUrl,heatPumpAuthAndCommitmentName,heatPumpAuthAndCommitmentUrl,heatPumpPersonalDataConsentFormName,heatPumpPersonalDataConsentFormUrl,icpNo,introduce,iosDownloadUrl,largeModelImgUrl,largeModelTtsUrl,largeModelUrl,largeModelVoiceUrl,logo,logo2Url,logoMini,logoUrl,moreProductInformationUrl,oauth2AuthAndCommitmentName,oauth2AuthAndCommitmentUrl,oauth2PersonalDataConsentFormName,oauth2PersonalDataConsentFormUrl,oldWebPortalUrl,ownerPrivacyAgreementName,ownerPrivacyAgreementUrl,platformName,platformNameEn,platformUsageAgreementName,platformUsageAgreementUrl,postal,privacyAgreementName,privacyAgreementUrl,privacyPolicyName,privacyPolicyUrl,pvHeatKeeperAgreementName,pvHeatKeeperAgreementUrl,qrCodeUrl,registrationAgreementName,registrationAgreementUrl,salesPhone,serviceProviderProtocol,serviceProviderProtocolUrl,subTitle,supportLang,thirdPartyInfoSharingListName,thirdPartyInfoSharingListUrl,thirdPartySdkCatalogName,thirdPartySdkCatalogUrl,userNewAIKeeper,webDomain}",
+    "respSample": "{\"address\":\"\",\"aiChatH5Url\":\"https://chat.saj-electric.cn/api/application/embed?protocol=https&host=chat.saj-electric.cn&token=0139ce09352cc84a\",\"aiChatIconUrl\":\"https://d2otv047q8nwsc.cloudfront.net/monitorftp/menu/newIcons/assistant1.png\",\"aiChatTitle\":\"AI Keeper\",\"aiSavingCourse\":\"Tutorial\",\"aiSavingCourseUrl\":\"https://esaj-home-topic.saj-electric.com/#/tutorial?lang=en\",\"aiSavingGuidePageName\":\"Introduction to AI saving\",\"aiSavingGuidePageUrl\":\"https://hs-lead.saj-electric.com/ai-saving?lang=en\",\"aiSavingUseTerm\":\"Terms of Use\",\"aiSavingUseTermUrl\":\"https://esolar-images-f.jtaiyang.com/monitorftp/upload/oas/img/AI Saving Feature Experience Service Agreement_1770711395511.pdf\",\"androidDow"
+  },
+  {
+    "path": "/sys/user/settings/getInfo",
+    "method": "POST",
+    "status": 200,
+    "params": {
+      "appProjectName": "elekeeper",
+      "clientDate": "2026-11-13",
+      "lang": "en",
+      "timeStamp": 1794558872985,
+      "clientId": "esolar-monitor-admin",
+      "clientCode": "organization",
+      "themeColor": "dark",
+      "orgCode": "2tCA"
+    },
+    "respKeys": "{aiChatShow,aiKeeperConsent,aiKeeperConsentTime,dateFormat,dateFormatType,energyFlowDynamicEffects,mapKey,mapSecurityJsCode,mapType,numType,numTypeName,pushActivityMsg,pushAlarm,pushDeviceLog,pushMsg,pushPlantReport,pushServiceMsg,tempType,tempTypeName,unitType,unitTypeName}",
+    "respSample": "{\"aiChatShow\":1,\"aiKeeperConsent\":0,\"aiKeeperConsentTime\":\"2026-04-14 13:41:29\",\"dateFormat\":\"dd/MM/yyyy HH:mm:ss\",\"dateFormatType\":3,\"energyFlowDynamicEffects\":1,\"mapKey\":\"5c822e46b60d201de5fd80944f915d08d596fd03d3c08470801c7f97d4070d078b05ccef1a4966ed915a086da29fb5dc\",\"mapSecurityJsCode\":\"d779074acff1ceb5b6601be6328ec9a8\",\"mapType\":1,\"numType\":null,\"numTypeName\":\"\",\"pushActivityMsg\":1,\"pushAlarm\":1,\"pushDeviceLog\":0,\"pushMsg\":1,\"pushPlantReport\":0,\"pushServiceMsg\":1,\"tempType\":1,\"tempTypeName\":\"Degrees Celsius ℃\",\"unitType\":1,\"unitTypeName\":\"Metric system\"}"
+  },
+  {
+    "path": "/monitor/plant/getPlantParallelInfo",
+    "method": "POST",
+    "status": 200,
+    "params": {
+      "plantUid": "7915B3F186C143F0BF114AA1E1C7A022",
+      "appProjectName": "elekeeper",
+      "clientDate": "2026-11-13",
+      "lang": "en",
+      "timeStamp": 1794558873612,
+      "clientId": "esolar-monitor-admin",
+      "clientCode": "organization",
+      "themeColor": "dark",
+      "orgCode": "2tCA"
+    },
+    "respKeys": "{deviceParalle,plantParalle,tips}",
+    "respSample": "{\"deviceParalle\":false,\"plantParalle\":false,\"tips\":\"\"}"
+  },
+  {
+    "path": "/monitor/plantHome/checkPlantShowAiSaving",
+    "method": "POST",
+    "status": 200,
+    "params": {
+      "plantUid": "7915B3F186C143F0BF114AA1E1C7A022",
+      "appProjectName": "elekeeper",
+      "clientDate": "2026-11-13",
+      "lang": "en",
+      "timeStamp": 1794558873610,
+      "clientId": "esolar-monitor-admin",
+      "clientCode": "organization",
+      "themeColor": "dark",
+      "orgCode": "2tCA"
+    },
+    "respKeys": "{aiSavingBetaShow,aiSavingBetaUrl,aiSavingSwitch,aiServiceVersion,enableShowAiBill,enableShowAiSavingBtn,enableShowLoadForecast,enableShowPeakShaving,enableShowPowerCompareChart,enableShowPvForecast,jumpPage,offGridPlant,savingBtnName,scheduleByVpp,scheduleSwitch,supportAiMode}",
+    "respSample": "{\"aiSavingBetaShow\":0,\"aiSavingBetaUrl\":\"https://esolar-images.jtaiyang.com/monitorftp/upload/oas/esolarHome/file/ai-saving-beta.png\",\"aiSavingSwitch\":0,\"aiServiceVersion\":2,\"enableShowAiBill\":0,\"enableShowAiSavingBtn\":0,\"enableShowLoadForecast\":null,\"enableShowPeakShaving\":0,\"enableShowPowerCompareChart\":null,\"enableShowPvForecast\":null,\"jumpPage\":0,\"offGridPlant\":0,\"savingBtnName\":\"AI Saving 3.0\",\"scheduleByVpp\":null,\"scheduleSwitch\":null,\"supportAiMode\":1}"
+  },
+  {
+    "path": "/sys/user/getInfo",
+    "method": "POST",
+    "status": 200,
+    "params": {
+      "appProjectName": "elekeeper",
+      "clientDate": "2026-11-13",
+      "lang": "en",
+      "timeStamp": 1794558873612,
+      "clientId": "esolar-monitor-admin",
+      "clientCode": "organization",
+      "themeColor": "dark",
+      "orgCode": "2tCA"
+    },
+    "respKeys": "{address,allowedToPushMail,brandLogo,city,cityCode,companyName,companyOperatorEmail,companyOperatorName,companyOperatorTel,companyOwnerEmail,companyOwnerName,companyOwnerTel,companyUserHead,country,countryCode,defaultCurrency,defaultCurrencyName,demoEnabled,demoGuardMessage,district,districtCode,email,equityCountryCode,homeStatisticsStyleType,invitationCode,isEmailValid,localUserType,loginName,nickname,officeId,orgCode,parentCompanyInvitationCode,parentCompanyName,parentCompanyOperatorEmail,parentCompanyOperatorHead,parentCompanyOperatorName,parentCompanyOperatorTel,parentOfficeInvitationCode,parentOfficeName,parentOfficeOperatorEmail,parentOfficeOperatorHead,parentOfficeOperatorName,parentOfficeOperatorTel,permissions,phone,postcode,priceSettingGuidance,province,provinceCode,roleType,street,streetType,subOfficeIcon,timeZone,timeZoneName,userHead,userId,userIdentification,userType,userTypeName,virtualType}",
+    "respSample": "{\"address\":\"\",\"allowedToPushMail\":1,\"brandLogo\":\"\",\"city\":\"\",\"cityCode\":\"\",\"companyName\":\"tsbasolar\",\"companyOperatorEmail\":\"info@tsba.au\",\"companyOperatorName\":\"tsbasolar\",\"companyOperatorTel\":\"\",\"companyOwnerEmail\":\"info@tsba.au\",\"companyOwnerName\":\"tsbasolar\",\"companyOwnerTel\":\"\",\"companyUserHead\":\"https://esolar-images-f.jtaiyang.com/monitorftp/upload/user/head/default/default_installer_head_dark.webp\",\"country\":\"Australia\",\"countryCode\":\"AU\",\"defaultCurrency\":\"\",\"defaultCurrencyName\":\"\",\"demoEnabled\":false,\"demoGuardMessage\":\"no_permission\",\"district\":\"\",\"districtCode\":\"\",\"email\":\"info@tsba.au\",\"equityCountryCode\":\"\",\"homeStatisticsStyleType\":\"Installer\",\"invitationCode\":\"78L858\",\"isEma"
+  },
+  {
+    "path": "/monitor/plant/getOnePlantInfoV2",
+    "method": "POST",
+    "status": 200,
+    "params": {
+      "plantUid": "7915B3F186C143F0BF114AA1E1C7A022",
+      "appProjectName": "elekeeper",
+      "clientDate": "2026-11-13",
+      "lang": "en",
+      "timeStamp": 1794558873611,
+      "clientId": "esolar-monitor-admin",
+      "clientCode": "organization",
+      "themeColor": "dark",
+      "orgCode": "2tCA"
+    },
+    "respKeys": "{address,alarmLevel,city,cityCode,country,countryCode,county,countyCode,createDate,currency,currencyName,editEnable,email,emsType,enableEditUseType,enableShowNegativePriceStrategySmartAutoScene,fullAddress,gridNetType,gridPrice,ifInstallPv,ifInstallPvShow,isInstallEManager,isInstallEms,isInstallLoraMeter,isInstallMeter,isInstallUSNAModule,isParallel,isParallelShow,isPlant,isShowWeather,latitude,latitudeStr,longitude,longitudeStr,meterId,moduleNum,negativePriceStrategy,officeId,payMode,phone,plantLogo,plantName,plantNo,plantUid,pointInviteCode,projectPic,province,provinceCode,pvPanelAngle,pvPanelAzimuth,reducePv,runningState,runningStateName,showReducePv,street,streetType,systemPower,timeZone,timeZoneName,type,useType,weatherAddress,zipCode}",
+    "respSample": "{\"address\":\"33\",\"alarmLevel\":null,\"city\":\"Bridgeman Downs\",\"cityCode\":\"\",\"country\":\"Australia\",\"countryCode\":\"AU\",\"county\":\"\",\"countyCode\":\"\",\"createDate\":\"29/05/2026 15:35:22\",\"currency\":\"\",\"currencyName\":\"\",\"editEnable\":1,\"email\":\"\",\"emsType\":0,\"enableEditUseType\":0,\"enableShowNegativePriceStrategySmartAutoScene\":0,\"fullAddress\":\"33,Banksia place,Bridgeman Downs QLD 4035,Australia\",\"gridNetType\":\"\",\"gridPrice\":0.2,\"ifInstallPv\":1,\"ifInstallPvShow\":1,\"isInstallEManager\":null,\"isInstallEms\":0,\"isInstallLoraMeter\":0,\"isInstallMeter\":0,\"isInstallUSNAModule\":0,\"isParallel\":0,\"isParallelShow\":1,\"isPlant\":1,\"isShowWeather\":0,\"latitude\":0,\"latitudeStr\":\"0E-15\",\"longitude\":0,\"longitudeStr\":\"0E-15\","
+  },
+  {
+    "path": "/monitor/msg/getMsgStatisticsV2",
+    "method": "POST",
+    "status": 200,
+    "params": {
+      "appProjectName": "elekeeper",
+      "clientDate": "2026-11-13",
+      "lang": "en",
+      "timeStamp": 1794558873612,
+      "clientId": "esolar-monitor-admin",
+      "clientCode": "organization",
+      "themeColor": "dark",
+      "orgCode": "2tCA"
+    },
+    "respKeys": "array[2] of {delNum,messageType,readNum,sendRange,totalNum,unReadNum,userId}",
+    "respSample": "[{\"delNum\":0,\"messageType\":1,\"readNum\":0,\"sendRange\":2,\"totalNum\":458,\"unReadNum\":458,\"userId\":\"C24C2897293B4551BF45AE079E5816E2\"},{\"delNum\":null,\"messageType\":99,\"readNum\":null,\"sendRange\":null,\"totalNum\":null,\"unReadNum\":3,\"userId\":\"\"}]"
+  },
+  {
+    "path": "/monitor/plant/getPlantCapabilityV3",
+    "method": "POST",
+    "status": 200,
+    "params": {
+      "plantUid": "7915B3F186C143F0BF114AA1E1C7A022",
+      "versionOf3d": 1,
+      "appProjectName": "elekeeper",
+      "clientDate": "2026-11-13",
+      "lang": "en",
+      "timeStamp": 1794558874096,
+      "clientId": "esolar-monitor-admin",
+      "clientCode": "organization",
+      "themeColor": "dark",
+      "orgCode": "2tCA"
+    },
+    "respKeys": "{batterySeparated,bigScreenUrl,countryCode,currency,currencyName,enableFastReport,enableShowBenefit,enableShowReport,enableShowUpgradeBtn,existGridDevice,fastReportStatus,firstOnlineTime,fullAddress,has3DFunction,hasEnergyBalance,hasEnergyCompare,hasGridCurveAnalysis,hasIP20,hasPhysicalView,hasPlantImportPrice,hasPowerAnalysis,hasPromotionDevice,hasRevenueAnalysis,hasSelfUse,ifC6Device,ifCMPDevice,ifCMPDeviceV2,ifShowBigScreen,ifShowStrategyConfig,installerOperatorEmail,installerOperatorName,installerOperatorPhone,invreterSnList,isComposedScene,isFavorite,isInstallEManager,isInstallEms,isOffGridPlant,isShowWeather,isTop,masterInverterSerial,needCleanPlantSceneType,ownerEmail,ownerName,ownerPhone,plantName,plantUid,snList,socUrlList,subInverterSerial,subInverterSn,urlOf3DModel,urlOfIP20,urlOfMasterInverter,urlOfSubInverter,useType}",
+    "respSample": "{\"batterySeparated\":1,\"bigScreenUrl\":\"\",\"countryCode\":\"AU\",\"currency\":\"\",\"currencyName\":\"\",\"enableFastReport\":1,\"enableShowBenefit\":null,\"enableShowReport\":1,\"enableShowUpgradeBtn\":1,\"existGridDevice\":0,\"fastReportStatus\":1,\"firstOnlineTime\":\"29/05/2026 02:00:00\",\"fullAddress\":\"33,Banksia place,Bridgeman Downs QLD 4035,Australia\",\"has3DFunction\":1,\"hasEnergyBalance\":1,\"hasEnergyCompare\":1,\"hasGridCurveAnalysis\":null,\"hasIP20\":null,\"hasPhysicalView\":null,\"hasPlantImportPrice\":null,\"hasPowerAnalysis\":1,\"hasPromotionDevice\":0,\"hasRevenueAnalysis\":0,\"hasSelfUse\":1,\"ifC6Device\":null,\"ifCMPDevice\":0,\"ifCMPDeviceV2\":0,\"ifShowBigScreen\":0,\"ifShowStrategyConfig\":null,\"installerOperatorEmail\":\"\",\"inst"
+  },
+  {
+    "path": "/monitor/plantHome/getPlantThirdPartyControlStatus",
+    "method": "POST",
+    "status": 200,
+    "params": {
+      "plantUid": "7915B3F186C143F0BF114AA1E1C7A022",
+      "appProjectName": "elekeeper",
+      "clientDate": "2026-11-13",
+      "lang": "en",
+      "timeStamp": 1794558874655,
+      "clientId": "esolar-monitor-admin",
+      "clientCode": "organization",
+      "themeColor": "dark",
+      "orgCode": "2tCA"
+    },
+    "respKeys": "{gridControllerName,thirdPartyAuAntiRg,thirdPartyEmsDispatch,thirdPartyTcpAuth,tips,underThirdPartyControl,vppDeveloperName}",
+    "respSample": "{\"gridControllerName\":\"\",\"thirdPartyAuAntiRg\":0,\"thirdPartyEmsDispatch\":0,\"thirdPartyTcpAuth\":0,\"tips\":\"\",\"underThirdPartyControl\":0,\"vppDeveloperName\":\"\"}"
+  },
+  {
+    "path": "/monitor/plant/checkPlantParallelVersion",
+    "method": "POST",
+    "status": 200,
+    "params": {
+      "plantUid": "7915B3F186C143F0BF114AA1E1C7A022",
+      "appProjectName": "elekeeper",
+      "clientDate": "2026-11-13",
+      "lang": "en",
+      "timeStamp": 1794558874656,
+      "clientId": "esolar-monitor-admin",
+      "clientCode": "organization",
+      "themeColor": "dark",
+      "orgCode": "2tCA"
+    },
+    "respKeys": "{needUpgrade}",
+    "respSample": "{\"needUpgrade\":0}"
+  },
+  {
+    "path": "/monitor/plantHome/getPlantEnergyStatistics",
+    "method": "POST",
+    "status": 200,
+    "params": {
+      "plantUid": "7915B3F186C143F0BF114AA1E1C7A022",
+      "sn": "H2S3992J2548E18210",
+      "snType": 1,
+      "appProjectName": "elekeeper",
+      "clientDate": "2026-11-13",
+      "lang": "en",
+      "timeStamp": 1794558874654,
+      "clientId": "esolar-monitor-admin",
+      "clientCode": "organization",
+      "themeColor": "dark",
+      "orgCode": "2tCA"
+    },
+    "respKeys": "{appEnergyDataList,appIncomeDataList,currency,dataTime,energyDataList,environmentalInformation,hasPriceSetting,peakPower,plantUid,recommendInstallingSecTip,showAiIncome,showPeakPower,updateDate,userModeName,webIncomeDataList,workModeCloudLinkParam}",
+    "respSample": "{\"appEnergyDataList\":[],\"appIncomeDataList\":[],\"currency\":\"\",\"dataTime\":\"2026-11-13 18:30:00\",\"energyDataList\":[{\"dataType\":\"PV_ENERGY\",\"energy1Today\":60.37,\"energy1Total\":7967.05,\"energy2Today\":null,\"energy2Total\":null,\"selfUsePercentage\":88.74,\"showSelfUsePercentage\":1,\"todayIncome\":null,\"totalIncome\":null},{\"dataType\":\"LOAD_ENERGY\",\"energy1Today\":44.59,\"energy1Total\":5586.21,\"energy2Today\":null,\"energy2Total\":null,\"selfUsePercentage\":null,\"showSelfUsePercentage\":null,\"todayIncome\":null,\"totalIncome\":null},{\"dataType\":\"BUY_AND_SELL\",\"energy1Today\":0.25,\"energy1Total\":264.35,\"energy2Today\":6.8,\"energy2Total\":2285.92,\"selfUsePercentage\":null,\"showSelfUsePercentage\":null,\"todayIncome\":null,\"t"
+  },
+  {
+    "path": "/monitor/plantHome/getDeviceEnergyFlowDiagram",
+    "method": "POST",
+    "status": 200,
+    "params": {
+      "plantUid": "7915B3F186C143F0BF114AA1E1C7A022",
+      "sn": "H2S3992J2548E18210",
+      "snType": 1,
+      "appProjectName": "elekeeper",
+      "clientDate": "2026-11-13",
+      "lang": "en",
+      "timeStamp": 1794558874655,
+      "clientId": "esolar-monitor-admin",
+      "clientCode": "organization",
+      "themeColor": "dark",
+      "orgCode": "2tCA"
+    },
+    "respKeys": "{alarmCount,alarmLevel,batCapcity,batEnergyPercent,batPower,batteryDirection,batteryDirectionName,chargePower,chargerDirection,chargerDirectionName,chargerParam,chargerSnList,dataTime,genConnectType,genDirection,genPowerwatt,gridDirection,gridDirectionName,gridStatus,hasBattery,hasCharger,hasGen,hasGrid,hasIP20,hasPv,hasSmartDevice,hasSubPv,isOffline,isShowWeather,outputDirection,plantUid,prioritySubInverterSerial,priorityUrlOfSubInverter,pvDirection,recommendInstallingSecTip,recommendInstallingSecTitle,refreshInterval,runningState,runningStateName,showGridWire,showLoad,showLoadWire,sn,subPvDirection,subPvPower,subPvTag,sysGridPowerwatt,systemPower,todayPvEnergy,todayPvRevenue,totalLoadPowerwatt,totalPvPower,unitOfPvRevenue,updateDate,updateTimeSpan,urlOfIP20,useType,userMode,userModeName,workModeCloudLinkParam}",
+    "respSample": "{\"alarmCount\":null,\"alarmLevel\":null,\"batCapcity\":100,\"batEnergyPercent\":92,\"batPower\":627,\"batteryDirection\":1,\"batteryDirectionName\":\"Discharge\",\"chargePower\":0,\"chargerDirection\":0,\"chargerDirectionName\":\"\",\"chargerParam\":null,\"chargerSnList\":[],\"dataTime\":\"2026-11-13 18:30:00\",\"genConnectType\":null,\"genDirection\":0,\"genPowerwatt\":0,\"gridDirection\":0,\"gridDirectionName\":\"\",\"gridStatus\":1,\"hasBattery\":1,\"hasCharger\":0,\"hasGen\":0,\"hasGrid\":1,\"hasIP20\":null,\"hasPv\":1,\"hasSmartDevice\":0,\"hasSubPv\":null,\"isOffline\":null,\"isShowWeather\":0,\"outputDirection\":1,\"plantUid\":\"7915B3F186C143F0BF114AA1E1C7A022\",\"prioritySubInverterSerial\":\"\",\"priorityUrlOfSubInverter\":\"\",\"pvDirection\":1,\"recommendInsta"
+  },
+  {
+    "path": "/monitor/plant/chart/getCommonChartData",
+    "method": "POST",
+    "status": 200,
+    "params": {
+      "plantUid": "7915B3F186C143F0BF114AA1E1C7A022",
+      "chartCompareType": "1",
+      "commonChartType": 4,
+      "sn": "H2S3992J2548E18210",
+      "snType": 1,
+      "appProjectName": "elekeeper",
+      "clientDate": "2026-11-13",
+      "lang": "en",
+      "timeStamp": 1794558875040,
+      "clientId": "esolar-monitor-admin",
+      "clientCode": "organization",
+      "themeColor": "dark",
+      "orgCode": "2tCA"
+    },
+    "respKeys": "{gridPrice,pileNum,pileWay,showType,totalEnergy,totalEnergyUnit,totalProfit,totalProfitUnit,xAxis,yAxis}",
+    "respSample": "{\"gridPrice\":null,\"pileNum\":null,\"pileWay\":null,\"showType\":\"bar\",\"totalEnergy\":\"\",\"totalEnergyUnit\":\"\",\"totalProfit\":null,\"totalProfitUnit\":\"\",\"xAxis\":{\"baseCoordinateList\":[],\"coordinateList\":[\"1\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\",\"9\",\"10\",\"11\",\"12\"],\"name\":\"Month\"},\"yAxis\":[{\"baseDataList\":[],\"color\":\"#a9e28f\",\"dataList\":[\"0\",\"0\",\"0\",\"0\",\"103.97\",\"1184.22\",\"1325.91\",\"1484.52\",\"1625.34\",\"1432.74\",\"809.38\",\"0\"],\"defaultShow\":1,\"enableShowRemark\":null,\"groupName\":\"PV Energy\",\"groupType\":0,\"hasAreaStyle\":1,\"legendKey\":\"2026\",\"legendName\":\"2026\",\"lineStyle\":\"solid\",\"remarkDataList\":[],\"step\":\"\",\"tagName\":\"PV Energy\",\"unit\":\"kWh\"},{\"baseDataList\":[],\"color\":\"#a9e28f\",\"dataList\":[\"0\",\"0\",\"0\",\"0\",\"78.04"
+  },
+  {
+    "path": "/monitor/plant/chart/getSelfUseEnergyData",
+    "method": "POST",
+    "status": 200,
+    "params": {
+      "plantUid": "7915B3F186C143F0BF114AA1E1C7A022",
+      "chartDateType": 1,
+      "chartDay": "2026-11-13",
+      "showSelfUse": 1,
+      "version2": true,
+      "sn": "H2S3992J2548E18210",
+      "snType": 1,
+      "appProjectName": "elekeeper",
+      "clientDate": "2026-11-13",
+      "lang": "en",
+      "timeStamp": 1794558875120,
+      "clientId": "esolar-monitor-admin",
+      "clientCode": "organization",
+      "themeColor": "dark",
+      "orgCode": "2tCA"
+    },
+    "respKeys": "{buyEnergy,chargeEnergy,dieselGenEnergy,dischargeEnergy,energyUnit,evChargerEnergy,isShowBattery,isShowDiesel,isShowEvCharger,isShowGrid,isShowLoad,isShowPv,loadBuyRate,loadEnergy,loadSelfConsumedEnergy,loadSelfConsumedRate,pvEnergy,pvSelfConsumedEnergy,pvSelfConsumedRate,pvSellRate,sellEnergy}",
+    "respSample": "{\"buyEnergy\":0.25,\"chargeEnergy\":20.52,\"dieselGenEnergy\":0,\"dischargeEnergy\":11.3,\"energyUnit\":\"kWh\",\"evChargerEnergy\":0,\"isShowBattery\":1,\"isShowDiesel\":0,\"isShowEvCharger\":0,\"isShowGrid\":1,\"isShowLoad\":1,\"isShowPv\":1,\"loadBuyRate\":0.006,\"loadEnergy\":44.59,\"loadSelfConsumedEnergy\":44.34,\"loadSelfConsumedRate\":0.994,\"pvEnergy\":60.37,\"pvSelfConsumedEnergy\":53.57,\"pvSelfConsumedRate\":0.887,\"pvSellRate\":0.113,\"sellEnergy\":6.8}"
+  },
+  {
+    "path": "/monitor/plant/chart/getCommonChartData",
+    "method": "POST",
+    "status": 200,
+    "params": {
+      "plantUid": "7915B3F186C143F0BF114AA1E1C7A022",
+      "chartDateType": 1,
+      "chartDay": "2026-11-13",
+      "commonChartType": 2,
+      "sn": "H2S3992J2548E18210",
+      "snType": 1,
+      "appProjectName": "elekeeper",
+      "clientDate": "2026-11-13",
+      "lang": "en",
+      "timeStamp": 1794558875120,
+      "clientId": "esolar-monitor-admin",
+      "clientCode": "organization",
+      "themeColor": "dark",
+      "orgCode": "2tCA"
+    },
+    "respKeys": "{gridPrice,pileNum,pileWay,showType,totalEnergy,totalEnergyUnit,totalProfit,totalProfitUnit,xAxis,yAxis}",
+    "respSample": "{\"gridPrice\":null,\"pileNum\":null,\"pileWay\":null,\"showType\":\"line\",\"totalEnergy\":\"\",\"totalEnergyUnit\":\"\",\"totalProfit\":null,\"totalProfitUnit\":\"\",\"xAxis\":{\"baseCoordinateList\":[],\"coordinateList\":[\"00:00\",\"00:05\",\"00:10\",\"00:15\",\"00:20\",\"00:25\",\"00:30\",\"00:31:30\",\"00:32\",\"00:35\",\"00:40\",\"00:45\",\"00:50\",\"00:55\",\"01:00\",\"01:05\",\"01:10\",\"01:15\",\"01:20\",\"01:25\",\"01:30\",\"01:35\",\"01:40\",\"01:45\",\"01:50\",\"01:55\",\"02:00\",\"02:05\",\"02:10\",\"02:15\",\"02:20\",\"02:25\",\"02:30\",\"02:35\",\"02:40\",\"02:45\",\"02:50\",\"02:55\",\"03:00\",\"03:05\",\"03:10\",\"03:15\",\"03:20\",\"03:25\",\"03:30\",\"03:35\",\"03:40\",\"03:45\",\"03:50\",\"03:55\",\"04:00\",\"04:05\",\"04:10\",\"04:15\",\"04:20\",\"04:25\",\"04:30\",\"04:35\",\"04:40\",\"04:45\",\"04:50\",\"04:55\",\"05:00"
+  },
+  {
+    "path": "/monitor/plant/chart/getSelfUseEnergyData",
+    "method": "POST",
+    "status": 200,
+    "params": {
+      "plantUid": "7915B3F186C143F0BF114AA1E1C7A022",
+      "chartDateType": 2,
+      "chartWeekStartDay": "2026-11-07",
+      "chartWeekEndDay": "2026-11-13",
+      "showSelfUse": 1,
+      "version2": true,
+      "sn": "H2S3992J2548E18210",
+      "snType": 1,
+      "appProjectName": "elekeeper",
+      "clientDate": "2026-11-13",
+      "lang": "en",
+      "timeStamp": 1794558905731,
+      "clientId": "esolar-monitor-admin",
+      "clientCode": "organization",
+      "themeColor": "dark",
+      "orgCode": "2tCA"
+    },
+    "respKeys": "{buyEnergy,chargeEnergy,dieselGenEnergy,dischargeEnergy,energyUnit,evChargerEnergy,isShowBattery,isShowDiesel,isShowEvCharger,isShowGrid,isShowLoad,isShowPv,loadBuyRate,loadEnergy,loadSelfConsumedEnergy,loadSelfConsumedRate,pvEnergy,pvSelfConsumedEnergy,pvSelfConsumedRate,pvSellRate,sellEnergy}",
+    "respSample": "{\"buyEnergy\":2.17,\"chargeEnergy\":113.79,\"dieselGenEnergy\":0,\"dischargeEnergy\":97.36,\"energyUnit\":\"kWh\",\"evChargerEnergy\":0,\"isShowBattery\":1,\"isShowDiesel\":0,\"isShowEvCharger\":0,\"isShowGrid\":1,\"isShowLoad\":1,\"isShowPv\":1,\"loadBuyRate\":0.008,\"loadEnergy\":264.71,\"loadSelfConsumedEnergy\":262.54,\"loadSelfConsumedRate\":0.992,\"pvEnergy\":423.72,\"pvSelfConsumedEnergy\":278.98,\"pvSelfConsumedRate\":0.658,\"pvSellRate\":0.342,\"sellEnergy\":144.74}"
+  },
+  {
+    "path": "/monitor/plant/chart/getCommonChartData",
+    "method": "POST",
+    "status": 200,
+    "params": {
+      "plantUid": "7915B3F186C143F0BF114AA1E1C7A022",
+      "chartDateType": 2,
+      "chartWeekStartDay": "2026-11-07",
+      "chartWeekEndDay": "2026-11-13",
+      "commonChartType": 3,
+      "sn": "H2S3992J2548E18210",
+      "snType": 1,
+      "appProjectName": "elekeeper",
+      "clientDate": "2026-11-13",
+      "lang": "en",
+      "timeStamp": 1794558905732,
+      "clientId": "esolar-monitor-admin",
+      "clientCode": "organization",
+      "themeColor": "dark",
+      "orgCode": "2tCA"
+    },
+    "respKeys": "{gridPrice,pileNum,pileWay,showType,totalEnergy,totalEnergyUnit,totalProfit,totalProfitUnit,xAxis,yAxis}",
+    "respSample": "{\"gridPrice\":null,\"pileNum\":1,\"pileWay\":1,\"showType\":\"bar\",\"totalEnergy\":\"\",\"totalEnergyUnit\":\"\",\"totalProfit\":null,\"totalProfitUnit\":\"\",\"xAxis\":{\"baseCoordinateList\":[],\"coordinateList\":[\"11/07\",\"11/08\",\"11/09\",\"11/10\",\"11/11\",\"11/12\",\"11/13\"],\"name\":\"Day\"},\"yAxis\":[{\"baseDataList\":[],\"color\":\"#EBBF47\",\"dataList\":[\"60.11\",\"56.64\",\"61.04\",\"49.70\",\"61.93\",\"73.93\",\"60.37\"],\"defaultShow\":1,\"enableShowRemark\":null,\"groupName\":\"\",\"groupType\":0,\"hasAreaStyle\":1,\"legendKey\":\"PV_PRODUCTION\",\"legendName\":\"PV Energy\",\"lineStyle\":\"solid\",\"remarkDataList\":[],\"step\":\"\",\"tagName\":\"PV Energy\",\"unit\":\"kWh\"},{\"baseDataList\":[],\"color\":\"#9E7FFF\",\"dataList\":[\"30.54\",\"28.43\",\"24.82\",\"25.18\",\"62.45\",\"48.70\",\"44."
+  },
+  {
+    "path": "/monitor/plant/chart/getSelfUseEnergyData",
+    "method": "POST",
+    "status": 200,
+    "params": {
+      "plantUid": "7915B3F186C143F0BF114AA1E1C7A022",
+      "chartDateType": 3,
+      "chartMonth": "2026-11",
+      "showSelfUse": 1,
+      "version2": true,
+      "sn": "H2S3992J2548E18210",
+      "snType": 1,
+      "appProjectName": "elekeeper",
+      "clientDate": "2026-11-13",
+      "lang": "en",
+      "timeStamp": 1794558907644,
+      "clientId": "esolar-monitor-admin",
+      "clientCode": "organization",
+      "themeColor": "dark",
+      "orgCode": "2tCA"
+    },
+    "respKeys": "{buyEnergy,chargeEnergy,dieselGenEnergy,dischargeEnergy,energyUnit,evChargerEnergy,isShowBattery,isShowDiesel,isShowEvCharger,isShowGrid,isShowLoad,isShowPv,loadBuyRate,loadEnergy,loadSelfConsumedEnergy,loadSelfConsumedRate,pvEnergy,pvSelfConsumedEnergy,pvSelfConsumedRate,pvSellRate,sellEnergy}",
+    "respSample": "{\"buyEnergy\":10.68,\"chargeEnergy\":220.53,\"dieselGenEnergy\":0,\"dischargeEnergy\":199.78,\"energyUnit\":\"kWh\",\"evChargerEnergy\":0,\"isShowBattery\":1,\"isShowDiesel\":0,\"isShowEvCharger\":0,\"isShowGrid\":1,\"isShowLoad\":1,\"isShowPv\":1,\"loadBuyRate\":0.02,\"loadEnergy\":540.42,\"loadSelfConsumedEnergy\":529.74,\"loadSelfConsumedRate\":0.98,\"pvEnergy\":809.38,\"pvSelfConsumedEnergy\":550.5,\"pvSelfConsumedRate\":0.68,\"pvSellRate\":0.32,\"sellEnergy\":258.88}"
+  },
+  {
+    "path": "/monitor/plant/chart/getCommonChartData",
+    "method": "POST",
+    "status": 200,
+    "params": {
+      "plantUid": "7915B3F186C143F0BF114AA1E1C7A022",
+      "chartDateType": 3,
+      "chartMonth": "2026-11",
+      "commonChartType": 3,
+      "sn": "H2S3992J2548E18210",
+      "snType": 1,
+      "appProjectName": "elekeeper",
+      "clientDate": "2026-11-13",
+      "lang": "en",
+      "timeStamp": 1794558907645,
+      "clientId": "esolar-monitor-admin",
+      "clientCode": "organization",
+      "themeColor": "dark",
+      "orgCode": "2tCA"
+    },
+    "respKeys": "{gridPrice,pileNum,pileWay,showType,totalEnergy,totalEnergyUnit,totalProfit,totalProfitUnit,xAxis,yAxis}",
+    "respSample": "{\"gridPrice\":null,\"pileNum\":1,\"pileWay\":1,\"showType\":\"bar\",\"totalEnergy\":\"\",\"totalEnergyUnit\":\"\",\"totalProfit\":null,\"totalProfitUnit\":\"\",\"xAxis\":{\"baseCoordinateList\":[],\"coordinateList\":[\"1\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\",\"9\",\"10\",\"11\",\"12\",\"13\"],\"name\":\"Day\"},\"yAxis\":[{\"baseDataList\":[],\"color\":\"#EBBF47\",\"dataList\":[\"39.19\",\"64.32\",\"36.09\",\"79.62\",\"86.60\",\"79.84\",\"60.11\",\"56.64\",\"61.04\",\"49.70\",\"61.93\",\"73.93\",\"60.37\"],\"defaultShow\":1,\"enableShowRemark\":null,\"groupName\":\"\",\"groupType\":0,\"hasAreaStyle\":1,\"legendKey\":\"PV_PRODUCTION\",\"legendName\":\"PV Energy\",\"lineStyle\":\"solid\",\"remarkDataList\":[],\"step\":\"\",\"tagName\":\"PV Energy\",\"unit\":\"kWh\"},{\"baseDataList\":[],\"color\":\"#9E7FFF\",\"dataList\":[\"26."
+  },
+  {
+    "path": "/monitor/plant/chart/getSelfUseEnergyData",
+    "method": "POST",
+    "status": 200,
+    "params": {
+      "plantUid": "7915B3F186C143F0BF114AA1E1C7A022",
+      "chartDateType": 4,
+      "chartYear": "2026",
+      "showSelfUse": 1,
+      "version2": true,
+      "sn": "H2S3992J2548E18210",
+      "snType": 1,
+      "appProjectName": "elekeeper",
+      "clientDate": "2026-11-13",
+      "lang": "en",
+      "timeStamp": 1794558909529,
+      "clientId": "esolar-monitor-admin",
+      "clientCode": "organization",
+      "themeColor": "dark",
+      "orgCode": "2tCA"
+    },
+    "respKeys": "{buyEnergy,chargeEnergy,dieselGenEnergy,dischargeEnergy,energyUnit,evChargerEnergy,isShowBattery,isShowDiesel,isShowEvCharger,isShowGrid,isShowLoad,isShowPv,loadBuyRate,loadEnergy,loadSelfConsumedEnergy,loadSelfConsumedRate,pvEnergy,pvSelfConsumedEnergy,pvSelfConsumedRate,pvSellRate,sellEnergy}",
+    "respSample": "{\"buyEnergy\":264.35,\"chargeEnergy\":3018.64,\"dieselGenEnergy\":0,\"dischargeEnergy\":2659.39,\"energyUnit\":\"kWh\",\"evChargerEnergy\":0,\"isShowBattery\":1,\"isShowDiesel\":0,\"isShowEvCharger\":0,\"isShowGrid\":1,\"isShowLoad\":1,\"isShowPv\":1,\"loadBuyRate\":0.047,\"loadEnergy\":5586.21,\"loadSelfConsumedEnergy\":5321.86,\"loadSelfConsumedRate\":0.953,\"pvEnergy\":7967.05,\"pvSelfConsumedEnergy\":5681.13,\"pvSelfConsumedRate\":0.713,\"pvSellRate\":0.287,\"sellEnergy\":2285.92}"
+  },
+  {
+    "path": "/monitor/plant/chart/getCommonChartData",
+    "method": "POST",
+    "status": 200,
+    "params": {
+      "plantUid": "7915B3F186C143F0BF114AA1E1C7A022",
+      "chartDateType": 4,
+      "chartYear": "2026",
+      "commonChartType": 3,
+      "sn": "H2S3992J2548E18210",
+      "snType": 1,
+      "appProjectName": "elekeeper",
+      "clientDate": "2026-11-13",
+      "lang": "en",
+      "timeStamp": 1794558909530,
+      "clientId": "esolar-monitor-admin",
+      "clientCode": "organization",
+      "themeColor": "dark",
+      "orgCode": "2tCA"
+    },
+    "respKeys": "{gridPrice,pileNum,pileWay,showType,totalEnergy,totalEnergyUnit,totalProfit,totalProfitUnit,xAxis,yAxis}",
+    "respSample": "{\"gridPrice\":null,\"pileNum\":1,\"pileWay\":1,\"showType\":\"bar\",\"totalEnergy\":\"\",\"totalEnergyUnit\":\"\",\"totalProfit\":null,\"totalProfitUnit\":\"\",\"xAxis\":{\"baseCoordinateList\":[],\"coordinateList\":[\"5\",\"6\",\"7\",\"8\",\"9\",\"10\",\"11\"],\"name\":\"Month\"},\"yAxis\":[{\"baseDataList\":[],\"color\":\"#EBBF47\",\"dataList\":[\"103.97\",\"1184.22\",\"1325.91\",\"1484.52\",\"1625.34\",\"1432.74\",\"809.38\"],\"defaultShow\":1,\"enableShowRemark\":null,\"groupName\":\"\",\"groupType\":0,\"hasAreaStyle\":1,\"legendKey\":\"PV_PRODUCTION\",\"legendName\":\"PV Energy\",\"lineStyle\":\"solid\",\"remarkDataList\":[],\"step\":\"\",\"tagName\":\"PV Energy\",\"unit\":\"kWh\"},{\"baseDataList\":[],\"color\":\"#9E7FFF\",\"dataList\":[\"78.04\",\"995.75\",\"1069.59\",\"1017.35\",\"953.46\",\"930.24\",\"540.42\"]"
+  },
+  {
+    "path": "/monitor/plant/chart/getSelfUseEnergyData",
+    "method": "POST",
+    "status": 200,
+    "params": {
+      "plantUid": "7915B3F186C143F0BF114AA1E1C7A022",
+      "chartDateType": 5,
+      "showSelfUse": 1,
+      "version2": true,
+      "sn": "H2S3992J2548E18210",
+      "snType": 1,
+      "appProjectName": "elekeeper",
+      "clientDate": "2026-11-13",
+      "lang": "en",
+      "timeStamp": 1794558911427,
+      "clientId": "esolar-monitor-admin",
+      "clientCode": "organization",
+      "themeColor": "dark",
+      "orgCode": "2tCA"
+    },
+    "respKeys": "{buyEnergy,chargeEnergy,dieselGenEnergy,dischargeEnergy,energyUnit,evChargerEnergy,isShowBattery,isShowDiesel,isShowEvCharger,isShowGrid,isShowLoad,isShowPv,loadBuyRate,loadEnergy,loadSelfConsumedEnergy,loadSelfConsumedRate,pvEnergy,pvSelfConsumedEnergy,pvSelfConsumedRate,pvSellRate,sellEnergy}",
+    "respSample": "{\"buyEnergy\":264.35,\"chargeEnergy\":3018.64,\"dieselGenEnergy\":0,\"dischargeEnergy\":2659.39,\"energyUnit\":\"kWh\",\"evChargerEnergy\":0,\"isShowBattery\":1,\"isShowDiesel\":0,\"isShowEvCharger\":0,\"isShowGrid\":1,\"isShowLoad\":1,\"isShowPv\":1,\"loadBuyRate\":0.047,\"loadEnergy\":5586.21,\"loadSelfConsumedEnergy\":5321.86,\"loadSelfConsumedRate\":0.953,\"pvEnergy\":7967.05,\"pvSelfConsumedEnergy\":5681.13,\"pvSelfConsumedRate\":0.713,\"pvSellRate\":0.287,\"sellEnergy\":2285.92}"
+  },
+  {
+    "path": "/monitor/plant/chart/getCommonChartData",
+    "method": "POST",
+    "status": 200,
+    "params": {
+      "plantUid": "7915B3F186C143F0BF114AA1E1C7A022",
+      "chartDateType": 5,
+      "commonChartType": 3,
+      "sn": "H2S3992J2548E18210",
+      "snType": 1,
+      "appProjectName": "elekeeper",
+      "clientDate": "2026-11-13",
+      "lang": "en",
+      "timeStamp": 1794558911427,
+      "clientId": "esolar-monitor-admin",
+      "clientCode": "organization",
+      "themeColor": "dark",
+      "orgCode": "2tCA"
+    },
+    "respKeys": "{gridPrice,pileNum,pileWay,showType,totalEnergy,totalEnergyUnit,totalProfit,totalProfitUnit,xAxis,yAxis}",
+    "respSample": "{\"gridPrice\":null,\"pileNum\":1,\"pileWay\":1,\"showType\":\"bar\",\"totalEnergy\":\"\",\"totalEnergyUnit\":\"\",\"totalProfit\":null,\"totalProfitUnit\":\"\",\"xAxis\":{\"baseCoordinateList\":[],\"coordinateList\":[\"2026\"],\"name\":\"Year\"},\"yAxis\":[{\"baseDataList\":[],\"color\":\"#EBBF47\",\"dataList\":[\"7967.05\"],\"defaultShow\":1,\"enableShowRemark\":null,\"groupName\":\"\",\"groupType\":0,\"hasAreaStyle\":1,\"legendKey\":\"PV_PRODUCTION\",\"legendName\":\"PV Energy\",\"lineStyle\":\"solid\",\"remarkDataList\":[],\"step\":\"\",\"tagName\":\"PV Energy\",\"unit\":\"kWh\"},{\"baseDataList\":[],\"color\":\"#9E7FFF\",\"dataList\":[\"5586.21\"],\"defaultShow\":1,\"enableShowRemark\":null,\"groupName\":\"\",\"groupType\":0,\"hasAreaStyle\":1,\"legendKey\":\"CONSUMPTION\",\"legendName\":\"Load cons"
+  }
+]

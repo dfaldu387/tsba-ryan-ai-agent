@@ -45,7 +45,6 @@ const NAV: NavItem[] = [
   { key: 'drafts', label: 'Drafts & approvals', icon: '📥', perm: 'ask' },
   { key: 'users', label: 'Users & roles', icon: '👥', perm: 'manage_users' },
   { key: 'settings', label: 'Settings', icon: '⚙️', perm: 'view' },
-  { key: 'progress', label: 'Progress', icon: '📈', perm: 'view' },
 ];
 
 const TITLES: Record<Section, string> = {
@@ -64,7 +63,7 @@ const TITLES: Record<Section, string> = {
 
 const SUBTITLES: Record<Section, string> = {
   dashboard: 'A live overview of the agent, its knowledge and recent activity.',
-  solar: 'Live station, device and alert data from your Deye Cloud account.',
+  solar: 'Monitor energy production, plant health and performance across all connected solar installations.',
   energy: 'Full-screen live monitoring wall across your whole solar fleet.',
   connections: 'Connect Google Drive & Gmail, then select folders and scan email into the knowledge base.',
   knowledge: 'Every document and folder source powering the agent’s answers.',
