@@ -650,12 +650,12 @@ export function KnowledgeTab({ user, onAuthError }: { user: AuthenticatedUser; o
                 <thead>
                   <tr>
                     <th scope="col">Name</th>
-                    <th scope="col">Brand</th>
-                    <th scope="col">Type</th>
+                    <th scope="col" className="kb-col-brand">Brand</th>
+                    <th scope="col" className="kb-col-type">Type</th>
                     <th scope="col" className="kb-col-src">Source</th>
                     <th scope="col">Status</th>
                     <th scope="col" className="num kb-col-chunks">Chunks</th>
-                    <th scope="col">Last synced</th>
+                    <th scope="col" className="kb-col-when">Last synced</th>
                     <th scope="col"><span className="c-sr">Actions</span></th>
                   </tr>
                 </thead>
@@ -674,8 +674,8 @@ export function KnowledgeTab({ user, onAuthError }: { user: AuthenticatedUser; o
                             )}
                           </div>
                         </td>
-                        <td><span className={`kb-tag ${r.brand === OTHER ? 'is-other' : ''}`}>{r.brand}</span></td>
-                        <td><span className={`kb-tag ${r.type === 'other' ? 'is-other' : ''}`}>{DOC_TYPE_LABEL[r.type]}</span></td>
+                        <td className="kb-col-brand"><span className={`kb-tag ${r.brand === OTHER ? 'is-other' : ''}`}>{r.brand}</span></td>
+                        <td className="kb-col-type"><span className={`kb-tag ${r.type === 'other' ? 'is-other' : ''}`}>{DOC_TYPE_LABEL[r.type]}</span></td>
                         <td className="kb-col-src">
                           <span className="kb-src">
                             {d.source === 'gmail' ? <Icon name="mail" size={14} /> : <FolderIcon />}
@@ -691,7 +691,7 @@ export function KnowledgeTab({ user, onAuthError }: { user: AuthenticatedUser; o
                           </span>
                         </td>
                         <td className="num kb-col-chunks">{fmtInt(d.chunk_count)}</td>
-                        <td className={r.stale ? 'kb-stale' : undefined}><RelTime t={d.ingested_at} /></td>
+                        <td className={`kb-col-when ${r.stale ? 'kb-stale' : ''}`}><RelTime t={d.ingested_at} /></td>
                         <td className="kb-acts-cell">
                           <span className="kb-rowacts">
                             {d.web_url && (

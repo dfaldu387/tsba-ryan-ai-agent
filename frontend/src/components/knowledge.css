@@ -84,7 +84,7 @@
 @media (pointer: coarse) { .kb-select .c-select { height: 44px; } .kb-filter-row .c-chip { min-height: 44px; } }
 
 /* ── Documents table ─────────────────────────────────────────────────────── */
-.kb-tablewrap { overflow-x: auto; }
+.kb-tablewrap { overflow-x: auto; position: relative; /* contains absolutely-positioned sr-only labels, which otherwise widened the page */ }
 .kb-table tbody tr { cursor: default; }
 .kb-table td.name { max-width: 420px; min-width: 220px; }
 .kb-docname { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
@@ -132,3 +132,10 @@
   .kb-gs-result { grid-template-columns: 1fr 1fr; }
 }
 @media (pointer: coarse) { .kb-gs-field .c-select, .kb-gs-field .c-input { min-height: 44px; } }
+
+/* Phones: Name · Status · actions. Brand, type and date stay available as filters/sort above. */
+@media (max-width: 600px) {
+  .kb-table .kb-col-brand, .kb-table .kb-col-type, .kb-table .kb-col-when { display: none; }
+  .kb-table td.name { min-width: 0; }
+}
+.kb-docname a { display: inline-block; padding-block: 6px; } /* row link tall enough to tap */

@@ -12,28 +12,38 @@ export function PlantContacts({ user, onAuthError }: { user: AuthenticatedUser; 
   const canEdit = user.permissions.includes('manage_connections');
   const [stations, setStations] = useState<SolarStation[]>([]);
   const [contacts, setContacts] = useState<PlantContactsMap>({});
-  const [baseline, setBaseline] = useState('');
+  // Baseline matches the initial `contacts` so the form isn't "dirty" before it loads.
+  const [baseline, setBaseline] = useState('{}');
+  const [loaded, setLoaded] = useState(false);
   const [search, setSearch] = useState('');
   const [error, setError] = useState('');
   const [status, setStatus] = useState('');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    Promise.all([getPlantContacts(), getSolarOverview()])
-      .then(([c, ov]) => {
+    // Contacts and the plant list load independently: the fleet sweep can take
+    // several seconds and shouldn't hold up the saved contacts.
+    getPlantContacts()
+      .then((c) => {
         setContacts(c.contacts);
         setBaseline(JSON.stringify(c.contacts));
-        setStations(ov.stations.slice().sort((a, b) => a.name.localeCompare(b.name)));
+        setLoaded(true);
       })
       .catch((err) => {
         if (err instanceof AuthError) return onAuthError();
         setError('Couldn’t load plant contacts.');
       });
+    getSolarOverview()
+      .then((ov) => setStations(ov.stations.slice().sort((a, b) => a.name.localeCompare(b.name))))
+      .catch((err) => {
+        if (err instanceof AuthError) return onAuthError();
+        setError('Couldn’t load the plant list.');
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const keyOf = (s: SolarStation) => `${s.provider}:${s.id}`;
-  const dirty = useMemo(() => JSON.stringify(contacts) !== baseline, [contacts, baseline]);
+  const dirty = useMemo(() => loaded && JSON.stringify(contacts) !== baseline, [loaded, contacts, baseline]);
 
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();

@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TSBA Droplet Deployment</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --surface: #ffffff; --text: #14181f; --muted: #5b6573; --line: #e2e6ec;
+    --accent: #0e9f8a; --accent-soft: #e3f5f2; --warn: #b45309; --warn-soft: #fef3e2;
+    --danger: #b91c1c; --danger-soft: #fdecec; --code-bg: #0f1624; --code-text: #dbe4f0;
+    --mono: ui-monospace, "SF Mono", Consolas, "Cascadia Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0b0f16; --surface: #121823; --text: #e6ebf2; --muted: #93a0b2; --line: #222b39;
+      --accent: #2dd4bf; --accent-soft: #0f2a2a; --warn: #f59e0b; --warn-soft: #2a2010;
+      --danger: #f87171; --danger-soft: #2a1414; --code-bg: #070a10; --code-text: #d6e0ee;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0b0f16; --surface: #121823; --text: #e6ebf2; --muted: #93a0b2; --line: #222b39;
+    --accent: #2dd4bf; --accent-soft: #0f2a2a; --warn: #f59e0b; --warn-soft: #2a2010;
+    --danger: #f87171; --danger-soft: #2a1414; --code-bg: #070a10; --code-text: #d6e0ee;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 32px 16px 80px; }
+  header h1 { margin: 0 0 6px; font-size: 28px; letter-spacing: -.01em; }
+  header p { margin: 0; color: var(--muted); }
+  .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin: 22px 0 10px; }
+  .fact { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .fact span { display: block; font-size: 12px; color: var(--muted); }
+  .fact b { font-family: var(--mono); font-size: 14px; word-break: break-all; }
+  .progress { display: flex; align-items: center; gap: 12px; margin: 18px 0 26px; font-size: 13px; color: var(--muted); }
+  .bar { flex: 1; height: 6px; background: var(--line); border-radius: 99px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .25s; }
+  nav.toc { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 26px; }
+  nav.toc a { font-size: 13px; text-decoration: none; color: var(--text); background: var(--surface); border: 1px solid var(--line); padding: 4px 10px; border-radius: 99px; }
+  nav.toc a.done { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  section.step { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; margin-bottom: 16px; }
+  section.step.done { border-color: var(--accent); }
+  .step-head { display: flex; align-items: flex-start; gap: 12px; }
+  .num { flex: none; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 14px; background: var(--accent-soft); color: var(--accent); }
+  .step-head h2 { margin: 3px 0 2px; font-size: 18px; }
+  .where { font-size: 12px; color: var(--muted); }
+  .where code { font-family: var(--mono); }
+  label.check { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+  label.check input { width: 17px; height: 17px; accent-color: var(--accent); }
+  ul.short { margin: 12px 0 0; padding-left: 20px; }
+  ul.short li { margin: 3px 0; }
+  .code { position: relative; margin: 12px 0 0; }
+  .code pre { margin: 0; background: var(--code-bg); color: var(--code-text); border-radius: 10px; padding: 14px 16px; overflow-x: auto; font: 13px/1.6 var(--mono); }
+  .code pre .c { color: #7d8ba1; }
+  .copy { position: absolute; top: 8px; right: 8px; font: 12px system-ui, sans-serif; background: rgba(255,255,255,.08); color: #cfd8e6; border: 1px solid rgba(255,255,255,.15); border-radius: 6px; padding: 3px 9px; cursor: pointer; }
+  .copy:hover { background: rgba(255,255,255,.16); }
+  .note { margin: 12px 0 0; padding: 10px 12px; border-radius: 8px; font-size: 14px; border-left: 3px solid; }
+  .note.warn { background: var(--warn-soft); border-color: var(--warn); }
+  .note.danger { background: var(--danger-soft); border-color: var(--danger); }
+  .note.ok { background: var(--accent-soft); border-color: var(--accent); }
+  code.i { font-family: var(--mono); font-size: 13px; background: var(--bg); border: 1px solid var(--line); padding: 0 5px; border-radius: 4px; }
+  .theme { position: fixed; top: 12px; right: 12px; font-size: 12px; background: var(--surface); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; cursor: pointer; }
+  footer { color: var(--muted); font-size: 13px; text-align: center; margin-top: 30px; }
+  @media (max-width: 560px) {
+    .step-head { flex-wrap: wrap; }
+    label.check { margin-left: 42px; }
+    header h1 { font-size: 23px; }
+  }
+</style>
+</head>
+<body>
+<button class="theme" id="theme" type="button">Theme</button>
+<div class="wrap">
+  <header>
+    <h1>Deploying TSBA AI Agent to DigitalOcean</h1>
+    <p>One Ubuntu droplet: Node app (API + built React) on :8080 behind Nginx + HTTPS, Postgres/pgvector in Docker, PM2 keeps it running.</p>
+  </header>
+
+  <div class="facts">
+    <div class="fact"><span>Droplet IP</span><b>170.64.199.2</b></div>
+    <div class="fact"><span>Region / size</span><b>SYD1 · 2 vCPU · 4 GB</b></div>
+    <div class="fact"><span>OS</span><b>Ubuntu 24.04 LTS</b></div>
+    <div class="fact"><span>Domain</span><b>console.tsba.au <small>(replace)</small></b></div>
+    <div class="fact"><span>App user / path</span><b>tsba · ~/app</b></div>
+  </div>
+
+  <div class="progress"><div class="bar"><i id="bar"></i></div><span id="count">0 / 0 done</span></div>
+  <nav class="toc" id="toc"></nav>
+
+  <!-- 0 -->
+  <section class="step" id="s0" data-title="Prepare">
+    <div class="step-head"><div class="num">0</div><div><h2>Prepare (your PC)</h2><div class="where">Windows · project folder</div></div><label class="check"><input type="checkbox"> Done</label></div>
+    <ul class="short">
+      <li>Commit &amp; push all work — the server only gets what's on GitHub.</li>
+      <li>Restore/recreate <code class="i">.env.example</code> (it's deleted in the working tree).</li>
+      <li>Add a DNS <b>A record</b> for your domain → <code class="i">170.64.199.2</code>.</li>
+      <li>Git-ignored files you'll copy manually in step 5: <code class="i">.env</code>, <code class="i">solar-monitoring-platform-login-details.txt</code>, <code class="i">data/</code>, <code class="i">backend/.portal-sessions/</code>.</li>
+    </ul>
+    <div class="code"><pre>git add -A && git commit -m "pre-deploy" && git push origin development</pre></div>
+  </section>
+
+  <!-- 1 -->
+  <section class="step" id="s1" data-title="Droplet">
+    <div class="step-head"><div class="num">1</div><div><h2>Create the droplet</h2><div class="where">DigitalOcean dashboard</div></div><label class="check"><input type="checkbox"> Done</label></div>
+    <ul class="short">
+      <li>Ubuntu 24.04 LTS · Sydney (SYD1) · ≥ 4 GB RAM · SSH key login · enable Backups.</li>
+      <li>Already created ✓ — <code class="i">ubuntu-s-2vcpu-4gb-120gb-intel-syd1</code>.</li>
+    </ul>
+    <div class="note warn">Ignore “New release 26.04 available” — do <b>not</b> run <code class="i">do-release-upgrade</code>. Stay on 24.04 LTS.</div>
+  </section>
+
+  <!-- 2 -->
+  <section class="step" id="s2" data-title="Base setup">
+    <div class="step-head"><div class="num">2</div><div><h2>Base server setup</h2><div class="where">SSH as <code>root@170.64.199.2</code></div></div><label class="check"><input type="checkbox"> Done</label></div>
+    <ul class="short">
+      <li>Security updates, a non-root <code class="i">tsba</code> user, firewall, 2 GB swap.</li>
+      <li>Install Node 22, git, Nginx, Certbot, Docker, PM2 — then reboot.</li>
+      <li>On “modified config file” prompts choose <b>keep the local version</b>.</li>
+    </ul>
+    <div class="code"><pre>apt update && apt upgrade -y
+
+adduser tsba && usermod -aG sudo tsba
+rsync -a ~/.ssh /home/tsba/ && chown -R tsba:tsba /home/tsba/.ssh
+
+ufw allow OpenSSH && ufw allow 80,443/tcp && ufw --force enable
+
+fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+apt install -y nodejs git nginx certbot python3-certbot-nginx docker.io docker-compose-v2
+usermod -aG docker tsba
+npm i -g pm2
+
+reboot</pre></div>
+    <div class="code"><pre><span class="c"># after reboot, log in as the app user and verify</span>
+ssh tsba@170.64.199.2
+node -v && pm2 -v && docker --version && free -h && sudo ufw status</pre></div>
+    <div class="note ok">Expect: Node v22.x · Swap 2.0Gi · ufw active (OpenSSH, 80, 443).</div>
+  </section>
+
+  <!-- 3 -->
+  <section class="step" id="s3" data-title="Code">
+    <div class="step-head"><div class="num">3</div><div><h2>Get the code</h2><div class="where">as <code>tsba</code></div></div><label class="check"><input type="checkbox"> Done</label></div>
+    <ul class="short">
+      <li>Repo is private → create a deploy key and add it in GitHub → repo → Settings → Deploy keys (read-only).</li>
+      <li>Clone into <code class="i">~/app</code>.</li>
+    </ul>
+    <div class="code"><pre>ssh-keygen -t ed25519 -C "tsba-droplet" -N "" -f ~/.ssh/id_ed25519
+cat ~/.ssh/id_ed25519.pub     <span class="c"># paste into GitHub Deploy keys</span>
+
+git clone git@github.com:dfaldu387/tsba-ryan-ai-agent.git ~/app
+cd ~/app && git checkout development</pre></div>
+  </section>
+
+  <!-- 4 -->
+  <section class="step" id="s4" data-title="Database">
+    <div class="step-head"><div class="num">4</div><div><h2>Database (Postgres + pgvector)</h2><div class="where"><code>~/app</code></div></div><label class="check"><input type="checkbox"> Done</label></div>
+    <ul class="short">
+      <li>Edit <code class="i">docker-compose.yml</code>: bind to localhost and set a strong password.</li>
+      <li>Start the container.</li>
+    </ul>
+    <div class="note danger">Docker bypasses ufw — the default <code class="i">"5432:5432"</code> would expose Postgres (password <code class="i">tsba</code>) to the internet.</div>
+    <div class="code"><pre><span class="c"># docker-compose.yml changes</span>
+    environment:
+      POSTGRES_PASSWORD: &lt;strong-password&gt;
+    ports:
+      - "127.0.0.1:5432:5432"</pre></div>
+    <div class="code"><pre>nano docker-compose.yml
+docker compose up -d && docker ps</pre></div>
+  </section>
+
+  <!-- 5 -->
+  <section class="step" id="s5" data-title="Secrets">
+    <div class="step-head"><div class="num">5</div><div><h2>Copy secrets &amp; data, set .env</h2><div class="where">from your PC (Git Bash), then on server</div></div><label class="check"><input type="checkbox"> Done</label></div>
+    <ul class="short">
+      <li>Copy the git-ignored files up with <code class="i">scp</code>.</li>
+      <li>Edit <code class="i">~/app/.env</code> for production.</li>
+      <li>Google Cloud console → add the new callback URL to <b>Authorized redirect URIs</b>.</li>
+    </ul>
+    <div class="code"><pre><span class="c"># on your PC, in the project folder</span>
+scp .env solar-monitoring-platform-login-details.txt tsba@170.64.199.2:~/app/
+scp -r data tsba@170.64.199.2:~/app/
+scp -r backend/.portal-sessions tsba@170.64.199.2:~/app/backend/</pre></div>
+    <div class="code"><pre><span class="c"># ~/app/.env on the server — change/add these</span>
+NODE_ENV=production
+PORT=8080
+STORAGE=postgres
+DATABASE_URL=postgres://tsba:&lt;strong-password&gt;@127.0.0.1:5432/tsba
+WEB_ORIGIN=https://console.tsba.au
+GOOGLE_REDIRECT_URI=https://console.tsba.au/api/oauth/google/callback
+KW_PUBLIC_URL=https://console.tsba.au
+SESSION_SECRET=&lt;run: openssl rand -hex 32&gt;
+ADMIN_PASSWORD=&lt;not the default&gt;</pre></div>
+  </section>
+
+  <!-- 6 -->
+  <section class="step" id="s6" data-title="Build & run">
+    <div class="step-head"><div class="num">6</div><div><h2>Build, migrate, run with PM2</h2><div class="where"><code>~/app</code></div></div><label class="check"><input type="checkbox"> Done</label></div>
+    <ul class="short">
+      <li>Install deps, build shared + backend + frontend, install Chromium for scrapers.</li>
+      <li>Run DB migrations, start under PM2, enable start-on-boot.</li>
+      <li><code class="i">npm start</code> runs inside <code class="i">backend/</code> → sessions must be in <code class="i">backend/.portal-sessions</code>.</li>
+    </ul>
+    <div class="code"><pre>cd ~/app
+npm ci
+npm run build
+npx -w @tsba/backend playwright install --with-deps chromium
+npm run migrate
+
+pm2 start npm --name tsba -- start
+pm2 save && pm2 startup      <span class="c"># run the sudo command it prints</span>
+
+curl -s localhost:8080/api/health && pm2 logs tsba --lines 30</pre></div>
+  </section>
+
+  <!-- 7 -->
+  <section class="step" id="s7" data-title="Nginx + HTTPS">
+    <div class="step-head"><div class="num">7</div><div><h2>Nginx reverse proxy + HTTPS</h2><div class="where">server (sudo)</div></div><label class="check"><input type="checkbox"> Done</label></div>
+    <ul class="short">
+      <li>Proxy the domain to <code class="i">127.0.0.1:8080</code> with long timeouts (AI answers, scrapes) and 50 MB uploads.</li>
+      <li>Certbot issues the certificate and adds the HTTPS redirect. DNS must already point to the droplet.</li>
+    </ul>
+    <div class="code"><pre><span class="c"># sudo nano /etc/nginx/sites-available/tsba</span>
+server {
+  server_name console.tsba.au;
+  client_max_body_size 50M;
+  location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 300s;
+    proxy_buffering off;
+  }
+}</pre></div>
+    <div class="code"><pre>sudo ln -s /etc/nginx/sites-available/tsba /etc/nginx/sites-enabled/
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+sudo certbot --nginx -d console.tsba.au</pre></div>
+    <div class="note ok">Open <b>https://console.tsba.au</b> and sign in with the admin account.</div>
+  </section>
+
+  <!-- 8 -->
+  <section class="step" id="s8" data-title="Project extras">
+    <div class="step-head"><div class="num">8</div><div><h2>Project-specific setup</h2><div class="where">various</div></div><label class="check"><input type="checkbox"> Done</label></div>
+    <ul class="short">
+      <li><b>Turnstile portals</b> (e.g. Solarman): the server can't solve the challenge. Capture on your PC (<code class="i">npm run portal-chrome</code> → <code class="i">npm run portal-capture</code>), re-upload <code class="i">backend/.portal-sessions/</code>, then <code class="i">pm2 restart tsba</code>.</li>
+      <li><b>Portal logins</b> (GoodWe SEMS+, WHES, Dyness): the server has no screen, so <code class="i">npm run portal-login &lt;key&gt;</code> only works on your PC. Sign in there, then re-upload <code class="i">backend/.portal-sessions/</code> and <code class="i">pm2 restart tsba</code>. WHES lives at <code class="i">ecos-hub.whes.com</code>; leave <code class="i">WHES_PORTAL_URL</code> unset.</li>
+      <li><b>Twilio</b> (sales follow-up SMS): point inbound webhooks at the HTTPS domain, not localhost.</li>
+      <li><b>Gmail / Drive</b>: reconnect from the admin panel once the redirect URI is updated.</li>
+      <li><b>Backups</b>: droplet backups + nightly DB dump.</li>
+    </ul>
+    <div class="code"><pre>mkdir -p ~/backups && crontab -e
+<span class="c"># add this line:</span>
+0 2 * * * docker exec tsba-db pg_dump -U tsba tsba | gzip > ~/backups/tsba-$(date +\%F).sql.gz</pre></div>
+  </section>
+
+  <!-- 9 -->
+  <section class="step" id="s9" data-title="Updates">
+    <div class="step-head"><div class="num">9</div><div><h2>Deploying updates</h2><div class="where"><code>~/app</code></div></div><label class="check"><input type="checkbox"> Done</label></div>
+    <ul class="short">
+      <li>Push from your PC, then pull/build/migrate/restart on the server.</li>
+      <li>Useful: <code class="i">pm2 logs tsba</code>, <code class="i">pm2 status</code>, <code class="i">pm2 restart tsba</code>.</li>
+    </ul>
+    <div class="code"><pre>cd ~/app && git pull && npm ci && npm run build && npm run migrate && pm2 restart tsba</pre></div>
+  </section>
+
+  <section class="step" id="s10" data-title="Troubleshoot">
+    <div class="step-head"><div class="num">?</div><div><h2>Quick troubleshooting</h2><div class="where">server</div></div><label class="check"><input type="checkbox"> Done</label></div>
+    <ul class="short">
+      <li><b>502 Bad Gateway</b> → app is down: <code class="i">pm2 logs tsba</code> (often a missing env var or DB not running).</li>
+      <li><b>“Missing required env var”</b> → fix <code class="i">~/app/.env</code>, then <code class="i">pm2 restart tsba</code>.</li>
+      <li><b>Scraper “session expired”</b> → recapture sessions on your PC (step 8).</li>
+      <li><b>Chromium fails to launch</b> → re-run the <code class="i">playwright install --with-deps chromium</code> line.</li>
+      <li><b>Out of memory</b> → check <code class="i">free -h</code>; lower <code class="i">SCRAPER_MAX_CONTEXTS</code> in .env or resize the droplet.</li>
+      <li><b>Certbot fails</b> → DNS not pointing yet: <code class="i">dig +short console.tsba.au</code> must return 170.64.199.2.</li>
+    </ul>
+  </section>
+
+  <footer>TSBA AI Agent · deployment checklist · Nov 2026</footer>
+</div>
+
+<script>
+(function () {
+  var KEY = 'tsba-deploy-steps';
+  var store = {
+    get: function () { try { return JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) { return {}; } },
+    set: function (v) { try { localStorage.setItem(KEY, JSON.stringify(v)); } catch (e) {} }
+  };
+  var state = store.get();
+  var steps = Array.prototype.slice.call(document.querySelectorAll('section.step'));
+  var toc = document.getElementById('toc');
+
+  steps.forEach(function (s) {
+    var a = document.createElement('a');
+    a.href = '#' + s.id;
+    a.textContent = s.querySelector('.num').textContent + ' · ' + s.dataset.title;
+    a.id = 'toc-' + s.id;
+    toc.appendChild(a);
+    var cb = s.querySelector('label.check input');
+    cb.checked = !!state[s.id];
+    cb.addEventListener('change', function () { state[s.id] = cb.checked; store.set(state); render(); });
+  });
+
+  function render() {
+    var done = 0;
+    steps.forEach(function (s) {
+      var on = !!state[s.id];
+      if (on) done++;
+      s.classList.toggle('done', on);
+      document.getElementById('toc-' + s.id).classList.toggle('done', on);
+    });
+    document.getElementById('bar').style.width = (done / steps.length * 100) + '%';
+    document.getElementById('count').textContent = done + ' / ' + steps.length + ' done';
+  }
+  render();
+
+  document.querySelectorAll('.code').forEach(function (box) {
+    var btn = document.createElement('button');
+    btn.type = 'button'; btn.className = 'copy'; btn.textContent = 'Copy';
+    btn.addEventListener('click', function () {
+      var text = box.querySelector('pre').innerText;
+      var ok = function () { btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy'; }, 1400); };
+      if (navigator.clipboard) navigator.clipboard.writeText(text).then(ok, function () {});
+      else { var t = document.createElement('textarea'); t.value = text; document.body.appendChild(t); t.select(); try { document.execCommand('copy'); ok(); } catch (e) {} t.remove(); }
+    });
+    box.appendChild(btn);
+  });
+
+  var root = document.documentElement;
+  try { var th = localStorage.getItem('tsba-deploy-theme'); if (th) root.dataset.theme = th; } catch (e) {}
+  document.getElementById('theme').addEventListener('click', function () {
+    var dark = root.dataset.theme ? root.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+    root.dataset.theme = dark ? 'light' : 'dark';
+    try { localStorage.setItem('tsba-deploy-theme', root.dataset.theme); } catch (e) {}
+  });
+})();
+</script>
+</body>
+</html>

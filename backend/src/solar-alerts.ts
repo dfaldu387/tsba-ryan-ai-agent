@@ -1,4 +1,4 @@
-import { aggregateStations, getProvider } from './providers/index.js';
+import { aggregateStationsCached, getProvider } from './providers/index.js';
 import { cached } from './providers/cache.js';
 import type { SolarMonitorAlert } from './providers/types.js';
 
@@ -77,7 +77,7 @@ export function getSolarAlerts(): Promise<SolarAlertsResult> {
 }
 
 async function collectSolarAlerts(): Promise<SolarAlertsResult> {
-  const { stations, errors } = await aggregateStations();
+  const { stations, errors } = await aggregateStationsCached();
   const alerts: SolarMonitorAlert[] = [];
 
   // Plant-level issues straight from the overview (cheap, no extra calls).
@@ -128,7 +128,8 @@ async function collectSolarAlerts(): Promise<SolarAlertsResult> {
         for (const d of detail.devices) {
           if (d.online === false) {
             alerts.push({
-              id: `${s.provider}:${s.id}:device:${d.sn}`,
+              // SAJ meters share the inverter's SN, so add the type to keep ids unique.
+              id: `${s.provider}:${s.id}:device:${d.sn}${d.type ? `:${d.type}` : ''}`,
               severity: 'device',
               provider: s.provider,
               plant: s.name,

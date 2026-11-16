@@ -1,6 +1,18 @@
 import type { Page } from 'playwright';
 import { pickCoords } from '../coords.js';
-import type { NormalizedDetail, NormalizedStation, StationInfoItem, StationStatus } from '../types.js';
+import { cached, invalidate } from '../cache.js';
+import type {
+  ChartData,
+  EnergyFlow,
+  NormalizedAlert,
+  NormalizedDetail,
+  NormalizedDevice,
+  NormalizedPowerPoint,
+  NormalizedStation,
+  StationInfoItem,
+  StationOverview,
+  StationStatus,
+} from '../types.js';
 import { SessionExpiredError } from './browser.js';
 import { createScraperProvider } from './scraper-provider.js';
 
@@ -16,10 +28,39 @@ import { createScraperProvider } from './scraper-provider.js';
  *
  * That list endpoint returns rich per-plant fields, so the detail page is built
  * from the cached raw records (no extra page load / fragile row-clicking).
+ *
+ * Devices, today's curves, latest alerts and the per-plant Overview come from the
+ * portal's `/maintain-s/` JSON API. Those endpoints DO accept a direct call with
+ * just the portal's bearer token (verified; unlike the plant search), so the
+ * token is picked up from the app's own requests during the list scrape and the
+ * rest is plain HTTPS — no extra browser work per plant.
  */
 
-const PLANT_URL = 'https://globalpro.solarmanpv.com/business/maintain/plant';
+const ORIGIN = 'https://globalpro.solarmanpv.com';
+const PLANT_URL = `${ORIGIN}/business/maintain/plant`;
 const SEARCH_MATCH = '/operating/station/v2/search';
+const API = `${ORIGIN}/maintain-s`;
+
+// Portal bearer token, captured from the app's own /maintain-s/ requests during
+// the list scrape (long-lived: ~2 months). Cleared on a 401 so the next list
+// scrape picks up a fresh one.
+let bearer: string | null = null;
+
+async function api<T>(path: string, body?: unknown): Promise<T> {
+  if (!bearer) throw new Error('solarman_no_token (list scrape has not run yet)');
+  const res = await fetch(`${API}${path}`, {
+    method: body === undefined ? 'GET' : 'POST',
+    headers: { authorization: bearer, 'content-type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (res.status === 401) {
+    bearer = null;
+    invalidate('scraper:solarman:stations');
+  }
+  if (!res.ok) throw new Error(`solarman_api ${res.status} ${path}`);
+  return (await res.json()) as T;
+}
 
 interface SolarmanStation {
   id: number;
@@ -101,10 +142,207 @@ function tsToDate(sec?: number): string | undefined {
   return Number.isNaN(d.getTime()) ? undefined : d.toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' });
 }
 
-/** Build a rich detail page from the cached raw list record — no browser needed. */
-function detailFromList(stationId: string): NormalizedDetail | null {
+// ─── Fleet extras: devices, today's curves, latest alerts (one pass) ─────────
+
+interface SmDevice {
+  siteId?: number;
+  deviceSn?: string;
+  type?: string;
+  netState?: number; // 1 online, 0 offline
+  alertState?: number; // -1 none, else alerting
+  deviceState?: number; // 1 normal, 2 alarm, 3 offline
+}
+interface SmCurve {
+  stationId: number;
+  generationPowerList?: { generationPower?: number; dateTime?: number }[];
+}
+interface SmLatestAlert {
+  stationId?: number;
+  id?: number | string | null;
+  alertName?: string | null;
+  level?: number | null;
+  deviceSn?: string | null;
+  alertStartTime?: number | null;
+  alertEndTime?: number | null;
+}
+interface FleetExtras {
+  devices: Map<string, NormalizedDevice[]>;
+  curves: Map<string, NormalizedPowerPoint[]>;
+  alerts: Map<string, NormalizedAlert[]>;
+}
+
+const TYPE_LABEL: Record<string, string> = { INVERTER: 'Inverter', BATTERY: 'Battery', COLLECTOR: 'Logger', METER: 'Meter' };
+
+function toDevice(d: SmDevice): NormalizedDevice {
+  const offline = d.netState === 0 || d.deviceState === 3;
+  const alarm = !offline && (d.deviceState === 2 || (d.alertState != null && d.alertState > 0));
+  const online = d.netState === 1;
+  return {
+    sn: d.deviceSn ?? '',
+    type: TYPE_LABEL[d.type ?? ''] ?? d.type,
+    online: offline ? false : online ? true : undefined,
+    state: offline ? 'offline' : alarm ? 'alarm' : online ? 'normal' : 'unknown',
+    stateLabel: offline ? 'Offline' : alarm ? 'Alarm' : online ? 'Online' : undefined,
+  };
+}
+
+function pushTo<T>(m: Map<string, T[]>, k: string, v: T): void {
+  const a = m.get(k);
+  if (a) a.push(v);
+  else m.set(k, [v]);
+}
+
+async function loadFleetExtras(): Promise<FleetExtras> {
+  const ids = [...rawById.keys()].map(Number);
+  const out: FleetExtras = { devices: new Map(), curves: new Map(), alerts: new Map() };
+  const chunks: number[][] = [];
+  for (let i = 0; i < ids.length; i += 50) chunks.push(ids.slice(i, i + 50));
+
+  let ok = 0;
+  await Promise.all([
+    ...['INVERTER', 'BATTERY', 'COLLECTOR', 'METER'].map(async (t) => {
+      const r = await api<{ data?: SmDevice[] }>(
+        `/operating/system/device/${t}/list?page=1&size=500&sn=&order.direction=ASC&order.property=name`,
+      ).catch(() => null);
+      if (!r) return;
+      ok++;
+      for (const d of r.data ?? []) if (d.siteId != null && d.deviceSn) pushTo(out.devices, String(d.siteId), toDevice(d));
+    }),
+    ...chunks.map(async (stationIds) => {
+      const r = await api<SmCurve[]>('/history/power/day/overview', { stationIds }).catch(() => null);
+      if (!r) return;
+      ok++;
+      for (const c of r) {
+        out.curves.set(
+          String(c.stationId),
+          (c.generationPowerList ?? [])
+            .filter((p) => p.dateTime != null)
+            .map((p) => ({ t: Math.round(Number(p.dateTime)), powerW: Number(p.generationPower ?? 0) })),
+        );
+      }
+    }),
+    ...chunks.map(async (stationIds) => {
+      const r = await api<SmLatestAlert[]>('/operating/station/alert/lastest/list', { stationIds }).catch(() => null);
+      if (!r) return;
+      ok++;
+      for (const a of r) {
+        // One row per plant; a plant with no alert comes back with all-null fields.
+        if (!a.alertName || a.stationId == null || a.alertEndTime) continue;
+        pushTo(out.alerts, String(a.stationId), {
+          id: String(a.id ?? `${a.deviceSn}:${a.alertName}:${a.alertStartTime}`),
+          name: a.alertName,
+          deviceSn: a.deviceSn ?? undefined,
+          start: a.alertStartTime != null ? Math.round(Number(a.alertStartTime)) : undefined,
+          level: a.level != null ? String(a.level) : undefined,
+        });
+      }
+    }),
+  ]);
+  // Nothing at all came back (token lapsed / portal down): throw so the cache
+  // keeps serving the last good extras instead of caching emptiness.
+  if (!ok) throw new Error('solarman_extras_unavailable');
+  return out;
+}
+
+/** Cached fleet extras (5 min, stale-while-revalidate). Null until available. */
+async function fleetExtras(): Promise<FleetExtras | null> {
+  if (!rawById.size || !bearer) return null;
+  return cached('scraper:solarman:extras', 300_000, loadFleetExtras, { swr: true }).catch(() => null);
+}
+
+// ─── Per-plant Overview (live flow, today's totals, day curve) ───────────────
+
+interface SmRecord {
+  generationPower?: number | null;
+  usePower?: number | null;
+  wirePower?: number | null; // grid-side power; direction in wireStatus
+  gridPower?: number | null;
+  batterySoc?: number | null;
+  batteryPower?: number | null;
+  wireStatus?: string | null; // PURCHASE | GRID | STATIC
+  batteryStatus?: string | null; // CHARGE | DISCHARGE | STATIC
+  dateTime?: number;
+}
+interface SmDayStats {
+  generationValue?: number | null;
+  useValue?: number | null;
+  gridValue?: number | null; // exported
+  buyValue?: number | null; // imported
+  chargeValue?: number | null;
+  dischargeValue?: number | null;
+}
+
+const num = (v: number | null | undefined): number | undefined =>
+  v == null || Number.isNaN(Number(v)) ? undefined : Number(v);
+const hhmm = (sec: number) =>
+  new Date(sec * 1000).toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Australia/Brisbane' });
+
+async function overview(stationId: string): Promise<StationOverview> {
+  if (!bearer) await solarmanScraperProvider.listStations(); // first open after a restart
+  const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Australia/Brisbane' }));
+  const r = await api<{ statistics?: SmDayStats; records?: SmRecord[] }>(
+    `/history/power/${encodeURIComponent(stationId)}/record?year=${now.getFullYear()}&month=${now.getMonth() + 1}&day=${now.getDate()}`,
+  );
+  const recs = r.records ?? [];
+  const last = recs[recs.length - 1];
+  const st = r.statistics ?? {};
+  const hasBattery = recs.some((x) => x.batterySoc != null);
+
+  let flow: EnergyFlow | undefined;
+  if (last) {
+    const gridW = num(last.wirePower) ?? num(last.gridPower);
+    const ws = (last.wireStatus || '').toUpperCase();
+    const bs = (last.batteryStatus || '').toUpperCase();
+    flow = {
+      pvPowerW: num(last.generationPower),
+      loadPowerW: num(last.usePower),
+      gridPowerW: gridW != null ? Math.abs(gridW) : undefined,
+      gridDirection: ws === 'PURCHASE' ? 'Import' : ws === 'GRID' ? 'Export' : undefined,
+      batteryPowerW: hasBattery && last.batteryPower != null ? Math.abs(Number(last.batteryPower)) : undefined,
+      batterySoc: num(last.batterySoc),
+      batteryDirection: bs === 'CHARGE' ? 'Charging' : bs === 'DISCHARGE' ? 'Discharging' : bs === 'STATIC' ? 'Idle' : undefined,
+      hasPv: true,
+      hasGrid: gridW != null,
+      hasBattery,
+      todayPvEnergyKwh: num(st.generationValue),
+      dataTime: last.dateTime ? hhmm(last.dateTime) : undefined,
+    };
+  }
+
+  let powerCurve: ChartData | undefined;
+  if (recs.length) {
+    const series = [
+      { name: 'PV', unit: 'W', data: recs.map((x) => num(x.generationPower) ?? null) },
+      { name: 'Consumption', unit: 'W', data: recs.map((x) => num(x.usePower) ?? null) },
+      ...(hasBattery
+        ? [
+            { name: 'Battery', unit: 'W', data: recs.map((x) => num(x.batteryPower) ?? null) },
+            { name: 'SOC', unit: '%', secondaryAxis: true, data: recs.map((x) => num(x.batterySoc) ?? null) },
+          ]
+        : []),
+    ].filter((s) => s.data.some((v) => v != null));
+    powerCurve = { kind: 'line', xLabels: recs.map((x) => (x.dateTime ? hhmm(x.dateTime) : '')), series };
+  }
+
+  return {
+    flow,
+    stats: [
+      { kind: 'pv', todayKwh: num(st.generationValue), totalKwh: rawById.get(stationId)?.generationTotal },
+      ...(st.useValue != null ? [{ kind: 'load' as const, todayKwh: num(st.useValue) }] : []),
+      ...(st.buyValue != null || st.gridValue != null
+        ? [{ kind: 'grid' as const, todayKwh: num(st.buyValue), today2Kwh: num(st.gridValue) }]
+        : []),
+      ...(hasBattery ? [{ kind: 'battery' as const, todayKwh: num(st.chargeValue), today2Kwh: num(st.dischargeValue) }] : []),
+    ],
+    powerCurve,
+  };
+}
+
+/** Build a rich detail page from the cached raw list record + fleet extras — no browser needed. */
+async function detailFromList(stationId: string): Promise<NormalizedDetail | null> {
   const s = rawById.get(stationId);
   if (!s) return null;
+  const extras = await fleetExtras();
   const info: StationInfoItem[] = [];
   const push = (label: string, v: string | number | undefined | null) => {
     if (v != null && v !== '') info.push({ label, value: String(v) });
@@ -139,9 +377,9 @@ function detailFromList(stationId: string): NormalizedDetail | null {
       totalEnergyKwh: s.generationTotal,
       lastUpdate: s.lastUpdateTime,
     },
-    devices: [],
-    alerts: [],
-    power: [],
+    devices: extras?.devices.get(stationId) ?? [],
+    alerts: extras?.alerts.get(stationId) ?? [],
+    power: extras?.curves.get(stationId) ?? [],
   };
 }
 
@@ -157,6 +395,10 @@ async function scrapeStations(page: Page): Promise<NormalizedStation[]> {
     } catch {
       void route.continue();
     }
+  });
+  page.on('request', (req) => {
+    const a = req.headers().authorization;
+    if (a && req.url().includes('/maintain-s/')) bearer = a;
   });
   page.on('response', async (resp) => {
     if (resp.url().includes(SEARCH_MATCH) && resp.status() === 200 && !body) {
@@ -177,6 +419,9 @@ async function scrapeStations(page: Page): Promise<NormalizedStation[]> {
   const raws = (data.data ?? []).map((it) => it.station);
   rawById.clear();
   for (const s of raws) rawById.set(String(s.id), s);
+  // Warm devices/curves/alerts in the background so plant pages and the alert
+  // scan have them without waiting.
+  void fleetExtras();
   return raws.map(toStation);
 }
 
@@ -186,4 +431,5 @@ export const solarmanScraperProvider = createScraperProvider({
   credKey: 'solarman',
   scrapeStations,
   detailFromList,
+  overview,
 });

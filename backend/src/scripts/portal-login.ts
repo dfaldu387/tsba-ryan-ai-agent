@@ -13,7 +13,7 @@
  */
 import { chromium, type Page } from 'playwright';
 import { portalCreds, type PortalCreds } from '../providers/scraper/credentials.js';
-import { sessionPath } from '../providers/scraper/session.js';
+import { sessionPath, writeSessionStorage } from '../providers/scraper/session.js';
 
 interface PortalLogin {
   loginUrl: string;
@@ -36,6 +36,38 @@ const PORTALS: Record<string, PortalLogin> = {
     },
     successWhen: (page) => !/\/login/.test(page.url()),
   },
+  // GoodWe SEMS+ (the old SEMS portal/API was discontinued and returns no plants).
+  // Credentials are pre-filled; YOU tick "I have read and agreed to the Service
+  // Agreement" and click Login (plus any verification it shows).
+  goodwe: {
+    loginUrl: 'https://hk-semsplus.goodwe.com/#/login',
+    async prefill(page, creds) {
+      await page.getByRole('button', { name: /reject all/i }).click({ timeout: 3000 }).catch(() => {});
+      await page.locator('#account').fill(creds.username).catch(() => {});
+      await page.locator('#pwd').fill(creds.password).catch(() => {});
+    },
+    successWhen: (page) => !/#\/login/i.test(page.url()),
+  },
+  // Dyness (APAC). Pre-filled; YOU tick "I have read and agree …" and click Login.
+  dyness: {
+    loginUrl: 'https://apacems.dyness.com/login',
+    async prefill(page, creds) {
+      await page.locator('input[placeholder*="email" i]:visible').first().fill(creds.username).catch(() => {});
+      await page.locator('input[type="password"]:visible').first().fill(creds.password).catch(() => {});
+    },
+    successWhen: (page) => !/\/login/i.test(page.url()),
+  },
+  // WHES / ECOS Hub (AU). Pre-filled; complete the sign-in yourself.
+  whes: {
+    loginUrl: `${(process.env.WHES_PORTAL_URL || 'https://ecos-hub.whes.com').replace(/\/+$/, '')}/#/login`,
+    async prefill(page, creds) {
+      await page.locator('input[type="text"]:visible, input[type="email"]:visible').first().fill(creds.username).catch(() => {});
+      await page.locator('input[type="password"]:visible').first().fill(creds.password).catch(() => {});
+    },
+    // Wait for the device list (not just "left /login") so the app's full auth
+    // state (access token + menu permissions) is in storage when we save it.
+    successWhen: (page) => /device-list|#\/home|#\/dashboard/i.test(page.url()),
+  },
   // Other portals: pass the login URL as the 2nd arg until a tailored entry is added.
   // e.g. npm run portal-login solis https://www.soliscloud.com
 };
@@ -44,7 +76,7 @@ async function main() {
   const key = (process.argv[2] || '').toLowerCase();
   const urlOverride = process.argv[3];
   if (!key) {
-    console.error('Usage: npm run portal-login <key> [loginUrl]   (keys: solarman, solis, growatt, dyness, elekeeper, whes)');
+    console.error('Usage: npm run portal-login <key> [loginUrl]   (keys: solarman, solis, growatt, dyness, elekeeper, whes, goodwe)');
     process.exit(1);
   }
   const creds = portalCreds(key);
@@ -93,6 +125,22 @@ async function main() {
 
   await page.waitForTimeout(2500); // let post-login redirects settle
   await ctx.storageState({ path: sessionPath(key) });
+  // Also save localStorage + sessionStorage for this origin: storageState skips
+  // sessionStorage, where several SPAs keep their auth token.
+  const sidecar = await page
+    .evaluate(() => {
+      const dump = (s: Storage) => {
+        const o: Record<string, string> = {};
+        for (let i = 0; i < s.length; i++) {
+          const k = s.key(i);
+          if (k) o[k] = s.getItem(k) ?? '';
+        }
+        return o;
+      };
+      return { origin: location.origin, local: dump(localStorage), session: dump(sessionStorage) };
+    })
+    .catch(() => null);
+  if (sidecar) writeSessionStorage(key, sidecar);
   console.log(`\n✓ Session saved for "${key}". Landed on: ${page.url()}`);
   console.log('✓ The headless scraper can now reuse this session.');
   await browser.close();

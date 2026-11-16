@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { pickCoords } from './coords.js';
 import { portalCreds } from './scraper/credentials.js';
 import { cached } from './cache.js';
+import { flattenSajDevices, type SajDeviceNode } from './saj-device.js';
 import {
   ProviderError,
   type ChartData,
@@ -229,22 +230,6 @@ function toStation(p: SajPlant): NormalizedStation {
 
 const rawById = new Map<string, SajPlant>();
 
-interface SajDeviceNode {
-  deviceSn?: string;
-  deviceName?: string;
-  deviceModel?: string;
-  aliasName?: string;
-  deviceStatus?: number;
-  children?: SajDeviceNode[];
-}
-function flattenDevices(nodes: SajDeviceNode[], out: NormalizedDevice[] = []): NormalizedDevice[] {
-  for (const n of nodes) {
-    const sn = n.deviceSn || n.aliasName;
-    if (sn) out.push({ sn, type: n.deviceName || n.deviceModel || undefined, online: n.deviceStatus === 1 });
-    if (n.children?.length) flattenDevices(n.children, out);
-  }
-  return out;
-}
 
 interface SajAlarm {
   alarmId?: string | number;
@@ -540,7 +525,7 @@ export const esolarProvider: SolarProvider = {
     let devices: NormalizedDevice[] = [];
     try {
       const tree = await post<SajDeviceNode[]>('/monitor/plantDevice/listForWeb', { plantUid: stationId });
-      devices = flattenDevices(Array.isArray(tree) ? tree : []);
+      devices = flattenSajDevices(Array.isArray(tree) ? tree : []);
     } catch {
       /* device list unavailable */
     }

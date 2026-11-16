@@ -28,7 +28,7 @@ import { groupAlerts, isSnoozed, loadTriage, saveTriage, type AlertGroup, type T
 
 export type Section =
   | 'dashboard' | 'solar' | 'map' | 'energy' | 'connections' | 'knowledge'
-  | 'ask' | 'drafts' | 'voice' | 'users' | 'progress' | 'settings';
+  | 'ask' | 'drafts' | 'voice' | 'users' | 'progress' | 'settings' | 'sales';
 
 export type Navigate = (section: Section, search?: string) => void;
 
@@ -145,6 +145,13 @@ export function ConsoleProvider({
 
   // Initial load + polling (paused while the tab is hidden).
   useEffect(() => {
+    // Sales reps only use the follow-up agent: no fleet or support data to poll.
+    if (!hasPermission(user.role, 'view')) {
+      setFleetLoading(false);
+      setAlertsLoading(false);
+      setDrafts([]);
+      return;
+    }
     let cancelled = false;
     (async () => {
       try {

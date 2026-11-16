@@ -38,6 +38,67 @@ interface Envelope {
   [k: string]: unknown;
 }
 
+// ─── Request queue ───────────────────────────────────────────────────────────
+// Deye rejects ANY concurrent requests from an account with "too many requests"
+// (measured: 12/12 sequential calls succeed at ~3/s; 0/12 succeed at 2-wide
+// concurrency), and token minting is limited the same way. Before this queue,
+// the fleet energy scan (3 history calls × every plant) collided with the plant
+// page's detail calls, whose failures were swallowed into empty devices/power.
+// So every Deye HTTP call goes through one serial lane, with interactive calls
+// (plant detail) jumping ahead of background ones (energy totals), and
+// rate-limit rejections retried with backoff.
+type Job = () => void;
+const lane: { hi: Job[]; lo: Job[] } = { hi: [], lo: [] };
+let laneBusy = false;
+const MIN_GAP_MS = 120;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function pump(): void {
+  if (laneBusy) return;
+  const job = lane.hi.shift() ?? lane.lo.shift();
+  if (!job) return;
+  laneBusy = true;
+  job();
+}
+
+/** Run `fn` alone on the Deye lane. */
+function enqueue<T>(fn: () => Promise<T>, low = false): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    (low ? lane.lo : lane.hi).push(() => {
+      fn().then(resolve, reject).finally(async () => {
+        await sleep(MIN_GAP_MS);
+        laneBusy = false;
+        pump();
+      });
+    });
+    pump();
+  });
+}
+
+const isRateLimited = (status: number, msg?: string) => status === 429 || /too many/i.test(msg ?? '');
+
+/** fetch + JSON on the lane, retrying rate-limit rejections (1s, 2s, 4s). */
+async function deyeFetch<T>(url: string, init: RequestInit, low = false): Promise<{ res: Response; data: T }> {
+  for (let attempt = 0; ; attempt++) {
+    const out = await enqueue(async () => {
+      let res: Response;
+      try {
+        res = await fetch(url, init);
+      } catch (err) {
+        throw new DeyeError(`deye_network_error: ${(err as Error).message}`);
+      }
+      const data = (await res.json().catch(() => ({}))) as T;
+      return { res, data };
+    }, low);
+    const msg = (out.data as Envelope).msg;
+    if (attempt < 3 && isRateLimited(out.res.status, typeof msg === 'string' ? msg : undefined)) {
+      await sleep(1000 * 2 ** attempt);
+      continue;
+    }
+    return out;
+  }
+}
+
 interface CachedToken {
   token: string;
   expiresAt: number; // epoch ms
@@ -65,21 +126,11 @@ async function mintToken(companyId?: string): Promise<{ token: string; ttlMs: nu
   // The API types companyId as an integer; send it as a number when numeric.
   if (companyId) body.companyId = /^\d+$/.test(companyId) ? Number(companyId) : companyId;
 
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-  } catch (err) {
-    throw new DeyeError(`deye_network_error: ${(err as Error).message}`);
-  }
-
-  const data = (await res.json().catch(() => ({}))) as Envelope & {
-    accessToken?: string;
-    expiresIn?: number;
-  };
+  const { res, data } = await deyeFetch<Envelope & { accessToken?: string; expiresIn?: number }>(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
   if (!res.ok || data.success === false || !data.accessToken) {
     throw new DeyeError(
       `deye_auth_failed: ${data.msg || `HTTP ${res.status}`}`,
@@ -97,19 +148,13 @@ async function mintToken(companyId?: string): Promise<{ token: string; ttlMs: nu
  * case the personal-scope token is already the correct scope.
  */
 async function resolveCompanyId(token: string): Promise<string | undefined> {
-  let res: Response;
-  try {
-    res = await fetch(`${env.deyeBaseUrl}/v1.0/account/info`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', authorization: `Bearer ${token}` },
-      body: '{}',
-    });
-  } catch (err) {
-    throw new DeyeError(`deye_network_error: ${(err as Error).message}`);
-  }
-  const data = (await res.json().catch(() => ({}))) as Envelope & {
+  const { data } = await deyeFetch<Envelope & {
     orgInfoList?: Array<{ companyId?: number | string; companyName?: string }>;
-  };
+  }>(`${env.deyeBaseUrl}/v1.0/account/info`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', authorization: `Bearer ${token}` },
+    body: '{}',
+  });
   const org = data.orgInfoList?.find((o) => o.companyId != null);
   return org?.companyId != null ? String(org.companyId) : undefined;
 }
@@ -143,30 +188,26 @@ async function getToken(forceRefresh = false): Promise<string> {
   if (!forceRefresh && tokenCache && tokenCache.expiresAt - EXPIRY_SKEW_MS > Date.now()) {
     return tokenCache.token;
   }
-  return authenticate();
+  // Share one in-flight login: parallel callers used to each mint a token,
+  // which Deye rate-limits ("deye_auth_failed: too many requests").
+  authInFlight ??= authenticate().finally(() => { authInFlight = null; });
+  return authInFlight;
 }
+let authInFlight: Promise<string> | null = null;
 
 /**
  * POST a Deye API endpoint with the bearer token. Retries once with a fresh
  * token if the API reports an invalid-token business code.
  */
-async function deyePost<T extends Envelope>(path: string, body: Record<string, unknown>): Promise<T> {
+async function deyePost<T extends Envelope>(path: string, body: Record<string, unknown>, low = false): Promise<T> {
   if (!deyeConfigured()) throw new DeyeNotConfiguredError();
 
-  const run = async (token: string): Promise<{ res: Response; data: T }> => {
-    let res: Response;
-    try {
-      res = await fetch(`${env.deyeBaseUrl}${path}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', authorization: `Bearer ${token}` },
-        body: JSON.stringify(body),
-      });
-    } catch (err) {
-      throw new DeyeError(`deye_network_error: ${(err as Error).message}`);
-    }
-    const data = (await res.json().catch(() => ({}))) as T;
-    return { res, data };
-  };
+  const run = (token: string) =>
+    deyeFetch<T>(`${env.deyeBaseUrl}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    }, low);
 
   let { res, data } = await run(await getToken());
 
@@ -358,17 +399,22 @@ export async function stationEnergy(stationId: number): Promise<DeyeEnergy> {
       granularity,
       startAt,
       endAt,
-    });
+    }, true); // background fleet scan: yields to plant-page calls
     return data.stationDataItems ?? [];
   };
   const sumGen = (items: DeyeHistoryItem[]): number | undefined =>
     items.length ? items.reduce((acc, it) => acc + (it.generationValue ?? 0), 0) : undefined;
 
+  let failed = 0;
+  const soft = (p: Promise<DeyeHistoryItem[]>) => p.catch(() => { failed++; return [] as DeyeHistoryItem[]; });
   const [dayItems, monthItems, yearItems] = await Promise.all([
-    history(2, fmtDay(yesterday), fmtDay(tomorrow)).catch(() => [] as DeyeHistoryItem[]),
-    history(3, `${y}-${m}`, `${y}-${m}`).catch(() => [] as DeyeHistoryItem[]),
-    history(4, `${y}`, `${y}`).catch(() => [] as DeyeHistoryItem[]),
+    soft(history(2, fmtDay(yesterday), fmtDay(tomorrow))),
+    soft(history(3, `${y}-${m}`, `${y}-${m}`)),
+    soft(history(4, `${y}`, `${y}`)),
   ]);
+  // All three failed (rate-limited): throw so the empty result isn't cached
+  // for 5 min — the caller keeps serving the last good totals instead.
+  if (failed === 3) throw new DeyeError('deye_energy_unavailable');
 
   return {
     // Most recent day in the window = today (items are ascending by date).

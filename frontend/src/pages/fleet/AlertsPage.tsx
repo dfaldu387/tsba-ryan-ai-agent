@@ -205,8 +205,12 @@ export function AlertsPage({ search }: { search: string }) {
     return items;
   };
 
+  // Until the first scan lands, counts are unknown, not zero.
+  const counting = !alerts && alertsLoading;
+  const n = (v: number | undefined) => (counting ? '–' : fmtInt(v ?? 0));
+
   return (
-    <div className="pg-alerts">
+    <div className="pg-alerts" aria-busy={counting}>
       {alerts?.errors?.map((e) => (
         <div key={e.provider} className="c-banner t-warning"><Icon name="alert" /> <span><b>{e.name}</b> couldn’t be scanned: {e.error}</span></div>
       ))}
@@ -217,7 +221,7 @@ export function AlertsPage({ search }: { search: string }) {
           <button key={s} type="button" className={`pg-sum t-${s === 'critical' ? 'danger' : s === 'warning' ? 'warning' : 'info'} ${sev === s ? 'on' : ''}`}
             aria-pressed={sev === s} onClick={() => setSev(sev === s ? 'all' : s)}>
             <span className="c-dot" />
-            <b>{fmtInt(sevCounts[s])}</b>
+            <b>{n(sevCounts[s])}</b>
             <span>{SEVERITY_LABEL[s]}</span>
           </button>
         ))}
@@ -237,7 +241,7 @@ export function AlertsPage({ search }: { search: string }) {
         <div className="pg-views" role="tablist" aria-label="Alert views">
           {VIEWS.map((v) => (
             <button key={v.key} type="button" role="tab" aria-selected={view === v.key} onClick={() => setView(v.key)}>
-              {v.label}<span className="c-tab-n">{fmtInt(viewCounts[v.key] ?? 0)}</span>
+              {v.label}<span className="c-tab-n">{n(viewCounts[v.key])}</span>
             </button>
           ))}
           {saved.map((s) => (

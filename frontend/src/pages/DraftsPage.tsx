@@ -16,6 +16,12 @@ import {
 import './pages.css';
 
 type Bucket = 'pending' | 'review' | 'team' | 'sent' | 'rejected';
+/** First line is the question; anything after (plant context, extra info) is supporting detail. */
+function splitQuestion(q: string): { title: string; context: string } {
+  const [title, ...rest] = q.trim().split(/\r?\n/);
+  return { title: title.trim(), context: rest.join('\n').trim() };
+}
+
 const BUCKET_LABEL: Record<Bucket, string> = { pending: 'Ready to approve', review: 'Needs review', team: 'With team', sent: 'Sent', rejected: 'Rejected' };
 
 const bucketOf = (d: Draft): Bucket =>
@@ -140,7 +146,7 @@ export function DraftsPage({ search }: { search: string }) {
                       <span className="c-grow" />
                       <RelTime t={d.created_at} />
                     </span>
-                    <strong className="dr-item-q">{d.question}</strong>
+                    <strong className="dr-item-q">{splitQuestion(d.question).title}</strong>
                     <span className="dr-item-snip">{d.reply}</span>
                     {(flags.length > 0 || d.outcome !== 'answer') && (
                       <span className="dr-item-flags">
@@ -274,7 +280,8 @@ function DraftCard({
           <span className="c-grow" />
           <span className="c-muted" title={fmtAbs(d.created_at)}>Drafted <RelTime t={d.created_at} /></span>
         </div>
-        <h2 className="dr-q">{d.question}</h2>
+        <h2 className="dr-q">{splitQuestion(d.question).title}</h2>
+        {splitQuestion(d.question).context && <p className="dr-q-ctx">{splitQuestion(d.question).context}</p>}
       </header>
 
       {review && pending && (

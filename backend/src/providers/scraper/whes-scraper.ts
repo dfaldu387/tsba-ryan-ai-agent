@@ -10,7 +10,7 @@ import { createScraperProvider } from './scraper-provider.js';
  * device-list page (#/device-list/index) fetches /api/service/hybridSinglePhase/page;
  * we capture that response. The SPA boots slowly, so we retry with reloads.
  *
- * The portal origin is regional (AU: ecoshub.whes.com.au). It defaults to the AU
+ * The portal origin is regional (AU accounts: ecos-hub.whes.com). It defaults to the AU
  * instance and can be overridden with WHES_PORTAL_URL. The API/auth matches below
  * are path-only (host-agnostic), so only the origin changes between regions. The
  * captured session must come from signing in at this SAME origin — cookies are
@@ -20,7 +20,7 @@ import { createScraperProvider } from './scraper-provider.js';
  * battery SOC, but not live generation power/energy (those aren't exposed here).
  */
 
-const PORTAL_ORIGIN = (process.env.WHES_PORTAL_URL || 'https://ecoshub.whes.com.au').replace(/\/+$/, '');
+const PORTAL_ORIGIN = (process.env.WHES_PORTAL_URL || 'https://ecos-hub.whes.com').replace(/\/+$/, '');
 const DEVICE_URL = `${PORTAL_ORIGIN}/#/device-list/index`;
 const LIST_MATCH = '/hybridSinglePhase/page';
 const AUTH_MATCH = '/user/authentication';

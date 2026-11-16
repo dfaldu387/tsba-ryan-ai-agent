@@ -6,6 +6,7 @@ import {
   type NormalizedStation,
   type SolarProvider,
   type StationInfoItem,
+  type StationOverview,
 } from '../types.js';
 import { withSession } from './browser.js';
 import { hasSession } from './session.js';
@@ -33,7 +34,16 @@ export interface ScraperConfig {
    * typically also keeps its own raw records keyed by id. Preferred over
    * scrapeDetail when available (no extra page load).
    */
-  detailFromList?: (stationId: string, stations: NormalizedStation[]) => NormalizedDetail | null;
+  detailFromList?: (
+    stationId: string,
+    stations: NormalizedStation[],
+  ) => NormalizedDetail | null | Promise<NormalizedDetail | null>;
+  /**
+   * Optional rich per-plant Overview (live energy flow, KPI cards, day curve).
+   * Only the plant page calls this — never the fleet alert scan — so it may do
+   * per-plant work. Cached briefly per plant.
+   */
+  overview?: (stationId: string) => Promise<StationOverview>;
   /** Station-list cache TTL (ms). Default 10 min. */
   ttlMs?: number;
 }
@@ -67,6 +77,11 @@ export function createScraperProvider(cfg: ScraperConfig): SolarProvider {
 
     listStations: fetchStations,
 
+    ...(cfg.overview && {
+      overview: (stationId: string) =>
+        cached(`scraper:${cfg.id}:overview:${stationId}`, 120_000, () => cfg.overview!(stationId)),
+    }),
+
     async stationDetail(stationId: string): Promise<NormalizedDetail> {
       // Preferred: a live per-plant scrape (devices, real-time flow, curve). Falls
       // back to the list-based detail if it fails (session blip, UI change).
@@ -88,7 +103,7 @@ export function createScraperProvider(cfg: ScraperConfig): SolarProvider {
       // From the scraper's own cached raw records (no network needed).
       if (cfg.detailFromList) {
         try {
-          const built = cfg.detailFromList(stationId, stations);
+          const built = await cfg.detailFromList(stationId, stations);
           if (built) return built;
         } catch {
           /* ignore and derive a minimal detail below */

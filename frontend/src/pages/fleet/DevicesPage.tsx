@@ -8,7 +8,7 @@ import { useConsole } from '../../lib/console';
 import type { AlertGroup } from '../../lib/alerts';
 import { fmtInt, fmtPct, mask } from '../../lib/format';
 import {
-  Chip, EmptyState, Icon, KpiTile, Pill, ProviderChip, RelTime, SearchInput, SeverityPill, SkeletonRows, StatusPill, usePaged, Pager,
+  Chip, DeviceStatePill, EmptyState, Icon, KpiTile, Pill, ProviderChip, RelTime, SearchInput, SeverityPill, SkeletonRows, StatusPill, usePaged, Pager,
 } from '../../ui';
 
 interface DeviceState { loading: boolean; error?: string; devices?: SolarDevice[] }
@@ -59,7 +59,7 @@ export function DevicesPage() {
 
   const usedProviders = useMemo(() => {
     const ids = new Set(stations.map((s) => s.provider));
-    return (providers ?? []).filter((p) => ids.has(p.id));
+    return (providers ?? []).filter((p) => p.configured || ids.has(p.id)); // connected platforms stay listed even with 0 plants
   }, [stations, providers]);
 
   const rows = useMemo(() => {
@@ -179,9 +179,9 @@ export function DevicesPage() {
                           <strong title={s.name}>{s.name}</strong>
                           <span>{serialHit ? <>Serial match <code className="c-mono">{serialHit}</code></> : canSeePii ? s.location || s.id : mask(s.location) || s.id}</span>
                         </td>
-                        <td><ProviderChip id={s.provider} name={providerName(s.provider)} /></td>
-                        <td><StatusPill status={s.status} /></td>
-                        <td className="num">
+                        <td className="dv-prov"><ProviderChip id={s.provider} name={providerName(s.provider)} /></td>
+                        <td className="dv-status"><StatusPill status={s.status} /></td>
+                        <td className="num dv-devs" data-label="Devices">
                           {st?.loading ? <span className="c-muted">Loading…</span>
                             : st?.devices ? (
                               <>
@@ -190,9 +190,9 @@ export function DevicesPage() {
                               </>
                             ) : <span className="c-empty-val" title="Open the plant to load its devices">—</span>}
                         </td>
-                        <td className="num">{groups.length ? <Pill tone={groups.some((g) => g.severity === 'critical') ? 'danger' : 'warning'}>{fmtInt(groups.length)}</Pill> : <span className="c-empty-val">0</span>}</td>
-                        <td><RelTime t={s.lastUpdate} stale /></td>
-                        <td className="pg-actions" onClick={(e) => e.stopPropagation()}>
+                        <td className="num dv-alerts" data-label="Open alerts">{groups.length ? <Pill tone={groups.some((g) => g.severity === 'critical') ? 'danger' : 'warning'}>{fmtInt(groups.length)}</Pill> : <span className="c-empty-val">0</span>}</td>
+                        <td className="dv-when" data-label="Last data"><RelTime t={s.lastUpdate} stale /></td>
+                        <td className="pg-actions dv-act" onClick={(e) => e.stopPropagation()}>
                           <button type="button" className="c-btn sm ghost" onClick={() => openPlant(s, { tab: 'devices' })}>Open plant</button>
                         </td>
                       </tr>
@@ -236,10 +236,10 @@ function DeviceList({ state, groups, onRetry }: { state?: DeviceState; groups: A
         {devices.map((d, i) => {
           const ga = d.sn ? alertsFor(d.sn) : [];
           return (
-            <tr key={d.sn || i}>
+            <tr key={`${d.sn}:${d.type ?? ''}:${i}`}>
               <td><code className="c-mono">{d.sn || '—'}</code></td>
               <td>{d.type || <span className="c-empty-val">—</span>}</td>
-              <td>{d.online == null ? <Pill tone="neutral">Unknown</Pill> : d.online ? <Pill tone="success" dot>Communicating</Pill> : <Pill tone="danger" dot>Not communicating</Pill>}</td>
+              <td><DeviceStatePill device={d} /></td>
               <td>
                 {ga.length === 0 ? <span className="c-empty-val">—</span> : (
                   <span className="pg-dev-alerts">

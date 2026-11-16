@@ -149,6 +149,8 @@ export interface SolarStore {
   record(stations: SolarStationReading[], fleet: SolarFleetReading): Promise<void>;
   /** Most recent reading per station — used as a fallback when a provider API is down. */
   latestStations(): Promise<SolarStationReading[]>;
+  /** One station's readings at or after `sinceMs`, oldest first (today's curve fallback). */
+  stationHistory(provider: string, stationId: string, sinceMs: number): Promise<SolarStationReading[]>;
   /** Fleet aggregate snapshots at or after `sinceMs` (epoch ms), oldest first. */
   fleetHistory(sinceMs: number): Promise<SolarFleetReading[]>;
   /**

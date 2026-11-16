@@ -13,7 +13,8 @@ type Metric = 'daily' | 'monthly' | 'total';
 const METRIC_LABEL: Record<Metric, string> = { daily: 'Today', monthly: 'This month', total: 'Lifetime' };
 const METRIC_FIELD: Record<Metric, keyof SolarStation> = { daily: 'dailyEnergyKwh', monthly: 'monthlyEnergyKwh', total: 'totalEnergyKwh' };
 
-export function AnalyticsView({ stations, providers, providerName }: SolarViewProps) {
+export function AnalyticsView({ stations, providers, providerName, overview }: SolarViewProps) {
+  const loading = !overview; // the first fleet sweep hasn't landed yet
   const [metric, setMetric] = useState<Metric>('daily');
   const [months, setMonths] = useState<MonthlyProductionPoint[] | null>(null);
 
@@ -84,16 +85,16 @@ export function AnalyticsView({ stations, providers, providerName }: SolarViewPr
           </div>
         }
       >
-        <RankBars data={byPlant} valueFmt={(v) => fmtEnergy(v)} />
+        <RankBars loading={loading} data={byPlant} valueFmt={(v) => fmtEnergy(v)} />
       </SectionCard>
 
       <div className="solar-ov-grid">
         <SectionCard title="Production by manufacturer" eyebrow={METRIC_LABEL[metric]}>
-          <RankBars data={byManufacturer} valueFmt={(v) => fmtEnergy(v)} />
+          <RankBars loading={loading} data={byManufacturer} valueFmt={(v) => fmtEnergy(v)} />
         </SectionCard>
 
         <SectionCard title="Installed capacity" eyebrow="By plant (kWp)">
-          <RankBars data={byCapacity} valueFmt={(v) => fmtCapacity(v)} />
+          <RankBars loading={loading} data={byCapacity} valueFmt={(v) => fmtCapacity(v)} />
         </SectionCard>
       </div>
     </div>

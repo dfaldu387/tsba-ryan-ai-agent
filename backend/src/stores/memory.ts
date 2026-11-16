@@ -343,18 +343,32 @@ export class MemoryUserStore implements UserStore {
  */
 export class MemorySolarStore implements SolarStore {
   private readonly latest = new Map<string, SolarStationReading>();
+  /** Per-station ring (~2 days at 15-min captures) for the day-curve fallback. */
+  private readonly history = new Map<string, SolarStationReading[]>();
   private readonly fleet: SolarFleetReading[] = [];
   private static readonly MAX_FLEET = 20_000;
 
   async record(stations: SolarStationReading[], fleet: SolarFleetReading): Promise<void> {
     const at = new Date().toISOString();
-    for (const s of stations) this.latest.set(`${s.provider}:${s.station_id}`, { ...s, captured_at: at });
+    for (const s of stations) {
+      const key = `${s.provider}:${s.station_id}`;
+      const row = { ...s, captured_at: at };
+      this.latest.set(key, row);
+      const h = this.history.get(key) ?? [];
+      h.push(row);
+      if (h.length > 200) h.splice(0, h.length - 200);
+      this.history.set(key, h);
+    }
     this.fleet.push({ ...fleet, captured_at: at });
     if (this.fleet.length > MemorySolarStore.MAX_FLEET) this.fleet.splice(0, this.fleet.length - MemorySolarStore.MAX_FLEET);
   }
 
   async latestStations(): Promise<SolarStationReading[]> {
     return [...this.latest.values()];
+  }
+
+  async stationHistory(provider: string, stationId: string, sinceMs: number): Promise<SolarStationReading[]> {
+    return (this.history.get(`${provider}:${stationId}`) ?? []).filter((r) => Date.parse(r.captured_at ?? '') >= sinceMs);
   }
 
   async fleetHistory(sinceMs: number): Promise<SolarFleetReading[]> {

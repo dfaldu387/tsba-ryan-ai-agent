@@ -18,7 +18,7 @@ import {
   PROVIDERS,
   ProviderError,
   ProviderNotConfiguredError,
-  aggregateStations,
+  aggregateStationsCached,
   configuredProviders,
   getProvider,
 } from '../providers/index.js';
@@ -1036,7 +1036,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // in parallel and resiliently (one retry + last-good fallback per provider), so
   // a transient blip on one platform neither blanks it nor flashes an error.
   app.get('/api/solar/overview', { preHandler: requirePermission('view') }, async () => {
-    const { stations, errors, stale, unavailable } = await aggregateStations();
+    const { stations, errors, stale, unavailable } = await aggregateStationsCached();
     return { stations, errors, stale, unavailable, providerCount: configuredProviders().length, geocodePending: geocodeBacklog() };
   });
 
@@ -1071,6 +1071,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           // One retry — covers a transient upstream blip or a just-expired token.
           await new Promise((r) => setTimeout(r, 400));
           detail = await provider.stationDetail(req.params.id);
+        }
+        // No intraday curve from the platform (e.g. Sungrow's curve endpoints are
+        // outside our API scope): build today's from our own 15-min snapshots.
+        if (!detail.power.length) {
+          detail = { ...detail, power: await todayCurveFromSnapshots(provider.id, req.params.id).catch(() => []) };
         }
         return { provider: provider.id, stationId: req.params.id, ...detail };
       } catch (err) {
@@ -1266,4 +1271,20 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       return runAlertMonitorOnce();
     },
   );
+}
+
+/**
+ * Today's power curve for one plant from the solar snapshot recorder (15-min
+ * resolution), for platforms that don't expose an intraday curve. "Today" is
+ * the Brisbane day (UTC+10, no DST), matching the fleet.
+ */
+async function todayCurveFromSnapshots(provider: string, stationId: string): Promise<{ t: number; powerW: number }[]> {
+  const BRISBANE_OFFSET_MS = 10 * 3600_000;
+  const now = Date.now();
+  const midnight = Math.floor((now + BRISBANE_OFFSET_MS) / 86_400_000) * 86_400_000 - BRISBANE_OFFSET_MS;
+  const storage = await getStorage();
+  const rows = await storage.solar.stationHistory(provider, stationId, midnight);
+  return rows
+    .filter((r) => r.current_power_w != null && r.captured_at)
+    .map((r) => ({ t: Math.floor(Date.parse(r.captured_at!) / 1000), powerW: Number(r.current_power_w) }));
 }

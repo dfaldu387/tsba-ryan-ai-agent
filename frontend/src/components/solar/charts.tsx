@@ -226,7 +226,15 @@ export interface RankDatum {
 
 /** Horizontal ranked bars with value labels. Responsive; good for comparing
  *  many categories (plants, manufacturers) by a single metric. */
-export function RankBars({ data, valueFmt, max }: { data: RankDatum[]; valueFmt: (v: number) => string; max?: number }) {
+export function RankBars({ data, valueFmt, max, loading }: { data: RankDatum[]; valueFmt: (v: number) => string; max?: number; loading?: boolean }) {
+  // Loading is not the same as empty: say so instead of "No data".
+  if (loading) {
+    return (
+      <div className="c-skelrows" aria-busy="true" aria-label="Loading">
+        {[70, 55, 42, 30, 22].map((w) => <span key={w} className="c-skel" style={{ width: `${w}%`, margin: '10px 0' }} />)}
+      </div>
+    );
+  }
   if (!data.length) return <p className="solar-empty">No data for this selection.</p>;
   const top = Math.max(max ?? 0, ...data.map((d) => d.value), 1);
   return (

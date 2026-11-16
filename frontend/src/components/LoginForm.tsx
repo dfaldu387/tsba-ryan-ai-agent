@@ -1,7 +1,8 @@
 import { useState, type FormEvent } from 'react';
 import type { AuthenticatedUser } from '@tsba/shared';
 import { ApiError, login } from '../api';
-import logo from '../assets/tsba-logo.png';
+import logoLight from '../assets/tsba-logo.png';
+import logoDark from '../assets/tsba-logo-dark.png';
 
 export function LoginForm({ onAuthed }: { onAuthed: (user: AuthenticatedUser) => void }) {
   const [email, setEmail] = useState('');
@@ -31,7 +32,9 @@ export function LoginForm({ onAuthed }: { onAuthed: (user: AuthenticatedUser) =>
     <div className="gate">
       <form className="card" onSubmit={submit}>
         <div className="gate-brand">
-          <img src={logo} alt="TSBA — Trusted Solar, Bigger Advantage" />
+          {/* Theme-matched logo (App sets data-theme on <html> before login renders). */}
+          <img className="gate-logo gate-logo-dark" src={logoDark} alt="TSBA — Trusted Solar, Bigger Advantage" width={500} height={117} />
+          <img className="gate-logo gate-logo-light" src={logoLight} alt="" aria-hidden="true" width={500} height={117} />
           <h1>Support AI console</h1>
           <small className="eyebrow">Admin panel · sign in</small>
         </div>
