@@ -1,6 +1,7 @@
 // Plant directory: paginated table (15 per page) with sticky header, sortable columns,
 // column chooser, density toggle, status/provider filter chips and saved
 // filters. Row → side drawer; "Open full page" → Plant 360.
+import { ProviderErrors } from './ProviderErrors';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { SolarStation, StationStatus } from '../../api';
 import { useConsole } from '../../lib/console';
@@ -63,7 +64,10 @@ export function PlantsPage({ search }: { search: string }) {
   }, [openGroups]);
   const alertsFor = (s: SolarStation) => alertsByPlant.get(`${s.provider}:${s.id}`) ?? [];
 
-  const configured = (providers ?? []).filter((p) => p.configured && stations.some((s) => s.provider === p.id));
+  // Every connected platform gets a chip, even with 0 plants — hiding it made a
+  // connected-but-empty account (GoodWe, Dyness) look like it wasn't there at all.
+  const configured = (providers ?? []).filter((p) => p.configured || stations.some((s) => s.provider === p.id));
+  const emptyProvider = provider !== 'all' && !stations.some((s) => s.provider === provider);
   const scoped = useMemo(() => (provider === 'all' ? stations : stations.filter((s) => s.provider === provider)), [stations, provider]);
   const statusCounts = useMemo(() => {
     const c = {} as Record<StationStatus, number>;
@@ -164,9 +168,7 @@ export function PlantsPage({ search }: { search: string }) {
 
   return (
     <div className="pg-plants">
-      {overview?.errors.map((e) => (
-        <div key={e.provider} className="c-banner t-warning"><Icon name="alert" /><span><b>{e.name}</b> couldn’t be reached — its plants may be missing or stale.</span></div>
-      ))}
+      <ProviderErrors errors={overview?.errors ?? []} />
       <section className="c-section">
         <div className="c-toolbar">
           <SearchInput value={q} onChange={setQ} label="Search plants" placeholder={canSeePii ? 'Name, address, owner or ID…' : 'Name or ID…'} />
@@ -208,9 +210,9 @@ export function PlantsPage({ search }: { search: string }) {
           <SkeletonRows rows={10} cols={6} />
         ) : rows.length === 0 ? (
           <EmptyState
-            icon={stations.length ? 'search' : 'plant'}
-            title={stations.length ? 'No plants match' : 'No plants on the connected accounts'}
-            hint={stations.length ? 'Clear the search or a filter.' : undefined}
+            icon={stations.length && !emptyProvider ? 'search' : 'plant'}
+            title={emptyProvider ? `No plants on ${providerName(provider)}` : stations.length ? 'No plants match' : 'No plants on the connected accounts'}
+            hint={emptyProvider ? 'This platform is connected, but its account returned no plants. Check the account has sites shared with it.' : stations.length ? 'Clear the search or a filter.' : undefined}
             action={filtersActive ? <button type="button" className="c-btn sm" onClick={() => { setStatus('all'); setProvider('all'); setQ(''); }}>Clear filters</button> : undefined}
           />
         ) : (
@@ -235,7 +237,7 @@ export function PlantsPage({ search }: { search: string }) {
                     aria-selected={active?.id === s.id && active.provider === s.provider}
                     onClick={() => setActive(s)} onKeyDown={(e) => onRowKey(e, s)}>
                     {cols.map((c) => (
-                      <td key={c.key} className={c.key === 'plant' ? 'name' : c.num ? 'num' : undefined}>{c.render(s)}</td>
+                      <td key={c.key} className={c.key === 'plant' ? 'name' : c.num ? 'num' : undefined} data-label={c.key === 'plant' ? undefined : c.label}>{c.render(s)}</td>
                     ))}
                   </tr>
                 ))}

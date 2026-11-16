@@ -1,10 +1,11 @@
 // Fleet overview: portfolio KPIs, plant health, top producers, the monthly
 // production trend and the fleet assistant. Every tile and row links to the
 // screen that explains it (Plants pre-filtered by status, Alerts, Analytics…).
+import { ProviderErrors } from './ProviderErrors';
 import { useEffect, useMemo, useState } from 'react';
 import { getSolarMonthlyProduction, type MonthlyProductionPoint, type StationStatus } from '../../api';
 import { useConsole } from '../../lib/console';
-import { fmtInt, fmtKwh, fmtKwp, fmtPowerBig, plural } from '../../lib/format';
+import { fmtInt, fmtKwh, fmtKwp, fmtPowerBig, installedCapacityKw, plural } from '../../lib/format';
 import {
   EmptyState, Icon, KpiTile, ProviderChip, Section, SkeletonRows, STATION_HINT, STATION_TONE, StatusDot, type IconName,
 } from '../../ui';
@@ -21,7 +22,6 @@ export function OverviewPage() {
   const summary = useMemo(() => {
     const sum = (f: (s: (typeof stations)[number]) => number | undefined, list = stations) => list.reduce((a, s) => a + (f(s) ?? 0), 0);
     const generating = stations.filter((s) => s.status !== 'offline');
-    const commissioned = stations.filter((s) => !(s.status === 'offline' && s.currentPowerW == null));
     return {
       count: stations.length,
       online: stations.filter((s) => s.status === 'online').length,
@@ -29,7 +29,7 @@ export function OverviewPage() {
       daily: sum((s) => s.dailyEnergyKwh),
       monthly: sum((s) => s.monthlyEnergyKwh),
       total: sum((s) => s.totalEnergyKwh),
-      capacity: sum((s) => s.capacityKw, commissioned),
+      capacity: installedCapacityKw(stations),
     };
   }, [stations]);
 
@@ -61,13 +61,7 @@ export function OverviewPage() {
 
   return (
     <div className="fo">
-      {providerErrors.map((e) => (
-        <button key={e.provider} type="button" className="c-banner t-warning fo-banner" onClick={() => navigate('connections')}>
-          <Icon name="alert" size={16} />
-          <span><b>{e.name}</b> couldn’t be reached — its plants may be missing or stale.</span>
-          <span className="fo-banner-go">Check connection <Icon name="chevron" size={14} /></span>
-        </button>
-      ))}
+      <ProviderErrors errors={providerErrors} onCheck={() => navigate('connections')} />
 
       {/* Portfolio KPIs — each opens the screen behind the number */}
       <div className="fo-kpis">

@@ -1,12 +1,18 @@
 import { useEffect, useState } from 'react';
 import { AuthError, getProgress } from '../api';
 import type { ProgressBoard, ProgressState } from '../types';
+import { Icon, type IconName } from '../ui';
 
-const MARK: Record<ProgressState, string> = {
-  done: '✅',
-  in_progress: '🔄',
-  next: '⏳',
+// The app's own icon set (was emoji, which rendered differently per OS and
+// clashed with every other screen). Each state also has a spoken label.
+const MARK: Record<ProgressState, { icon: IconName; label: string }> = {
+  done: { icon: 'check', label: 'Done' },
+  in_progress: { icon: 'refresh', label: 'In progress' },
+  next: { icon: 'clock', label: 'Next' },
 };
+const Mark = ({ state }: { state: ProgressState }) => (
+  <span className={`mark is-${state}`} aria-hidden="true"><Icon name={MARK[state].icon} size={14} /></span>
+);
 
 export function ProgressTab({ onAuthError }: { onAuthError: () => void }) {
   const [board, setBoard] = useState<ProgressBoard | null>(null);
@@ -23,7 +29,8 @@ export function ProgressTab({ onAuthError }: { onAuthError: () => void }) {
   }, []);
 
   return (
-    <main className="wrap" style={{ gridTemplateColumns: '1fr', maxWidth: 860 }}>
+    // A div, not <main>: the app shell already provides the page's <main>.
+    <div className="wrap" style={{ gridTemplateColumns: '1fr', maxWidth: 860 }}>
       <div className="col">
         <section className="card">
           <div className="card-h">
@@ -34,9 +41,7 @@ export function ProgressTab({ onAuthError }: { onAuthError: () => void }) {
             A quick glance at what&rsquo;s done, what&rsquo;s in progress and what&rsquo;s next. Updated every few days.
           </p>
           <div className="p-legend">
-            <span>{MARK.done} Done</span>
-            <span>{MARK.in_progress} In progress</span>
-            <span>{MARK.next} Next</span>
+            {(['done', 'in_progress', 'next'] as ProgressState[]).map((st) => <span key={st}><Mark state={st} /> {MARK[st].label}</span>)}
           </div>
 
           {error && <span className="err">{error}</span>}
@@ -44,8 +49,8 @@ export function ProgressTab({ onAuthError }: { onAuthError: () => void }) {
           <div className="progress-list">
             {board?.items.map((item, i) => (
               <div key={i} className={`p-item ${item.state}`}>
-                <span className="mark" aria-hidden="true">{MARK[item.state]}</span>
-                <span className="ptext">{item.text}</span>
+                <Mark state={item.state} />
+                <span className="ptext"><span className="c-sr">{MARK[item.state].label}: </span>{item.text}</span>
               </div>
             ))}
           </div>
@@ -59,6 +64,6 @@ export function ProgressTab({ onAuthError }: { onAuthError: () => void }) {
           )}
         </section>
       </div>
-    </main>
+    </div>
   );
 }

@@ -84,9 +84,13 @@ export const deyeProvider: SolarProvider = {
     const stations = await listStations();
     return Promise.all(
       stations.map(async (s): Promise<NormalizedStation> => {
-        const energy = await cached(`deye:energy:${s.id}`, 300_000, () => stationEnergy(s.id)).catch(
-          (): import('../deye.js').DeyeEnergy => ({}),
-        );
+        // Energy calls run one at a time on the Deye lane (≈1 min for a cold
+        // fleet), so don't hold the plant list on them: wait briefly, and if the
+        // cache is still cold the totals show on the next refresh.
+        const energy = await Promise.race([
+          cached(`deye:energy:${s.id}`, 300_000, () => stationEnergy(s.id), { swr: true }),
+          new Promise<import('../deye.js').DeyeEnergy>((r) => setTimeout(() => r({}), 2_000)),
+        ]).catch((): import('../deye.js').DeyeEnergy => ({}));
         return {
           id: String(s.id),
           name: s.name || `Station ${s.id}`,
@@ -112,11 +116,17 @@ export const deyeProvider: SolarProvider = {
 
   async stationDetail(stationId: string): Promise<NormalizedDetail> {
     const id = Number(stationId);
+    // Deye's account-wide rate limit is tight, and the fleet alert scan calls this
+    // for every plant every 2 min. Cache each part per plant (shared by the scan,
+    // the plant page and the AI tools) with stale-while-revalidate, so a refresh
+    // that gets rate-limited serves the last good data instead of an empty list.
+    const part = <T,>(name: string, ttl: number, fn: () => Promise<T>) =>
+      cached(`deye:${name}:${id}`, ttl, fn, { swr: true });
     const [latest, devices, alerts, power, stations] = await Promise.all([
-      stationLatest(id).catch(() => null),
-      listStationDevices(id).catch(() => []),
-      listStationAlerts(id).catch(() => []),
-      stationPowerCurve(id).catch(() => []),
+      part('latest', 60_000, () => stationLatest(id)).catch(() => null),
+      part('devices', 300_000, () => listStationDevices(id)).catch(() => []),
+      part('alerts', 300_000, () => listStationAlerts(id)).catch(() => []),
+      part('power', 300_000, () => stationPowerCurve(id)).catch(() => []),
       cached('deye:rawlist', 60_000, () => listStations()).catch((): DeyeStation[] => []),
     ]);
     const record = stations.find((x) => x.id === id);
@@ -127,7 +137,8 @@ export const deyeProvider: SolarProvider = {
         ? {
             currentPowerW: latest.generationPower,
             consumptionPowerW: latest.consumptionPower,
-            gridPowerW: latest.gridPower,
+            // Deye leaves gridPower null on most hybrid plants; wirePower is the grid-side power.
+            gridPowerW: latest.gridPower ?? latest.wirePower ?? latest.purchasePower,
             batteryPowerW: latest.batteryPower,
             batterySoc: latest.batterySOC,
             lastUpdate: latest.lastUpdateTime,

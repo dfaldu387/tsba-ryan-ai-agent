@@ -23,6 +23,11 @@ async function main(): Promise<void> {
   }
 
   await registerRoutes(app);
+  // Sales follow-up agent (needs Postgres for its tables).
+  if (env.storage === 'postgres') {
+    const { registerKeepwarmRoutes } = await import('./keepwarm/routes.js');
+    await registerKeepwarmRoutes(app);
+  }
   // Hidden, token-gated token-usage report (/usage?key=…). Registered before the
   // SPA fallback so the standalone page isn't swallowed by the catch-all.
   await registerUsageRoutes(app);
@@ -75,6 +80,16 @@ async function main(): Promise<void> {
     startSolarAlertMonitor();
   } catch (err) {
     app.log.error({ err }, 'could not start solar alert monitor');
+  }
+
+  // Sales follow-up agent: morning drafts + sending approved texts on time.
+  if (env.storage === 'postgres') {
+    try {
+      const { startKeepwarm } = await import('./keepwarm/service.js');
+      startKeepwarm();
+    } catch (err) {
+      app.log.error({ err }, 'could not start sales follow-up loop');
+    }
   }
 
   await app.listen({ port: env.port, host: '0.0.0.0' });

@@ -1,6 +1,7 @@
 import type { Page } from 'playwright';
 import { pickCoords } from '../coords.js';
-import type { NormalizedDetail, NormalizedDevice, NormalizedStation, StationInfoItem, StationStatus } from '../types.js';
+import type { NormalizedDetail, NormalizedStation, StationInfoItem, StationStatus } from '../types.js';
+import { flattenSajDevices, type SajDeviceNode } from '../saj-device.js';
 import { SessionExpiredError } from './browser.js';
 import { createScraperProvider } from './scraper-provider.js';
 
@@ -141,7 +142,18 @@ async function scrapeStations(page: Page): Promise<NormalizedStation[]> {
   await page.waitForTimeout(4000);
   if (!body) throw new Error('plant list response not captured');
 
-  const data = JSON.parse(body) as { data?: { rows?: SajPlant[]; list?: SajPlant[]; records?: SajPlant[] } };
+  const data = JSON.parse(body) as {
+    errCode?: number | string;
+    errMsg?: string;
+    data?: { rows?: SajPlant[]; list?: SajPlant[]; records?: SajPlant[] };
+  };
+  // An expired token does NOT redirect to #/login — the SPA stays put and the
+  // API answers errCode 10002 "Please login first". Treat it as an expired
+  // session so withSession() runs the auto-login and retries, instead of
+  // silently reporting 0 plants.
+  if (String(data.errCode ?? '') === '10002' || /login first/i.test(data.errMsg ?? '')) {
+    throw new SessionExpiredError('elekeeper');
+  }
   const list = data.data?.rows ?? data.data?.list ?? data.data?.records ?? [];
   rawById.clear();
   for (const p of list) rawById.set(String(p.plantUid), p);
@@ -171,32 +183,6 @@ interface FlowDiagram {
   dataTime?: string;
 }
 
-interface SajDeviceNode {
-  deviceSn?: string;
-  deviceName?: string;
-  deviceModel?: string;
-  aliasName?: string;
-  deviceStatus?: number; // 1 online
-  deviceStatusName?: string;
-  batSoc?: number | null;
-  children?: SajDeviceNode[];
-}
-
-/** Flatten the device tree (inverter → children modules/battery) into a flat list. */
-function flattenDevices(nodes: SajDeviceNode[], out: NormalizedDevice[] = []): NormalizedDevice[] {
-  for (const n of nodes) {
-    const sn = n.deviceSn || n.aliasName;
-    if (sn) {
-      out.push({
-        sn,
-        type: n.deviceName || n.deviceModel || undefined,
-        online: n.deviceStatus === 1,
-      });
-    }
-    if (n.children?.length) flattenDevices(n.children, out);
-  }
-  return out;
-}
 
 async function scrapeDetail(page: Page, stationId: string): Promise<NormalizedDetail> {
   let flowBody: string | null = null;
@@ -227,7 +213,7 @@ async function scrapeDetail(page: Page, stationId: string): Promise<NormalizedDe
 
   const flow: FlowDiagram = flowBody ? (JSON.parse(flowBody).data ?? {}) : {};
   const devicesRaw: SajDeviceNode[] = deviceBody ? (JSON.parse(deviceBody).data ?? []) : [];
-  const devices = flattenDevices(Array.isArray(devicesRaw) ? devicesRaw : []);
+  const devices = flattenSajDevices(Array.isArray(devicesRaw) ? devicesRaw : []);
 
   // Start from the list-based info, then layer live flow fields on top.
   const base = detailFromList(stationId);

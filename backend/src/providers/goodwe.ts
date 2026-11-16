@@ -1,4 +1,5 @@
 import { env, goodweConfigured } from '../env.js';
+import { latestStationReading } from '../solar-repo.js';
 import {
   ProviderError,
   ProviderNotConfiguredError,
@@ -215,6 +216,50 @@ function toStation(s: SemsStation): NormalizedStation {
   };
 }
 
+// ─── Owner-account fallback ─────────────────────────────────────────────────
+// SEMS's monitor list is intermittent for owner (non-installer) accounts: the
+// same call sometimes returns the plant and sometimes `record: 0`, so the plant
+// used to vanish from the fleet. GetPowerStationIdByOwner is fast (~0.3s) and
+// reliable, so when the list comes back empty we confirm the plant still exists
+// by id and show it from its last good reading, marked "No data" with the time
+// of that reading, never invented as live.
+const lastSeen = new Map<string, { station: NormalizedStation; at: number }>();
+
+async function ownerStationId(): Promise<string | null> {
+  const id = await semsPost<unknown>('PowerStation/GetPowerStationIdByOwner', {}).catch(() => null);
+  return typeof id === 'string' && id ? id : null;
+}
+
+async function lastKnownStation(id: string): Promise<NormalizedStation> {
+  const mem = lastSeen.get(id);
+  let base: NormalizedStation | undefined = mem?.station;
+  let at = mem?.at;
+  if (!base) {
+    const row = await latestStationReading('goodwe', id).catch(() => null);
+    if (row) {
+      base = {
+        id,
+        name: row.name,
+        status: 'unknown',
+        monthlyEnergyKwh: row.monthly_kwh ?? undefined,
+        totalEnergyKwh: row.total_kwh ?? undefined,
+        capacityKw: row.capacity_kw ?? undefined,
+        location: row.location ?? undefined,
+      };
+      at = row.captured_at ? Date.parse(row.captured_at) : undefined;
+    }
+  }
+  return {
+    ...(base ?? { id, name: `GoodWe plant ${id.slice(0, 8)}` }),
+    id,
+    status: 'unknown',
+    // Live figures from an old reading would mislead; leave them blank.
+    currentPowerW: undefined,
+    dailyEnergyKwh: undefined,
+    lastUpdate: at ? Math.floor(at / 1000) : undefined,
+  };
+}
+
 export const goodweProvider: SolarProvider = {
   id: 'goodwe',
   name: 'GoodWe (SEMS)',
@@ -229,7 +274,14 @@ export const goodweProvider: SolarProvider = {
       powerstation_type: '',
       powerstation_status: '',
     });
-    return (data.list ?? []).map(toStation);
+    const list = (data.list ?? []).map(toStation);
+    if (list.length) {
+      const now = Date.now();
+      for (const st of list) lastSeen.set(st.id, { station: st, at: now });
+      return list;
+    }
+    const ownerId = await ownerStationId();
+    return ownerId ? [await lastKnownStation(ownerId)] : [];
   },
 
   // SEMS's monitor-detail endpoint returns no body for this (shared) account, so
@@ -285,6 +337,15 @@ export const goodweProvider: SolarProvider = {
       push('Full-power hours', s.to_hour != null ? `${s.to_hour} h` : undefined);
       push('Organisation', s.org_name);
       push('Station ID', s.powerstation_id);
+    } else {
+      // SEMS returned no live record (see the owner-account fallback above).
+      const k = await lastKnownStation(stationId);
+      info.push({ label: 'Live data', value: 'SEMS returned no live reading; showing the last known details' });
+      if (k.location) info.push({ label: 'Location', value: k.location });
+      if (k.capacityKw != null) info.push({ label: 'Installed capacity', value: `${k.capacityKw} kWp` });
+      if (k.totalEnergyKwh != null) info.push({ label: 'Total (last known)', value: `${k.totalEnergyKwh} kWh` });
+      if (k.lastUpdate) info.push({ label: 'Last reading', value: new Date(k.lastUpdate * 1000).toLocaleString('en-AU', { timeZone: 'Australia/Sydney' }) });
+      info.push({ label: 'Station ID', value: stationId });
     }
     // Inverter roster from the warnings query. SEMS doesn't give a per-inverter
     // comms flag here, so treat an inverter as online unless the whole plant is

@@ -14,9 +14,11 @@ export type UsageActivity =
   | 'followups' // follow-up suggestions
   | 'starters' // opening suggestions
   | 'pdf_extract' // Claude PDF text extraction (ingest/OCR)
-  | 'alert_solution'; // monitoring-alert resolution text
+  | 'alert_solution' // monitoring-alert resolution text
+  | 'sales_followup'; // sales follow-up agent (notes, drafts, replies, scoreboard)
 
 export const USAGE_ACTIVITY_LABELS: Record<UsageActivity, string> = {
+  sales_followup: 'Sales follow-ups',
   draft: 'Draft reply',
   voice_chat: 'Voice chat',
   followups: 'Follow-up suggestions',

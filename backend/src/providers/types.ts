@@ -44,10 +44,18 @@ export interface NormalizedStation {
   lastUpdate?: number;
 }
 
+/** Normalised device state. `standby` (idle but communicating, e.g. a full battery
+ *  that isn't cycling) and `alarm` (faulted but still reporting) are NOT offline. */
+export type DeviceState = 'normal' | 'standby' | 'alarm' | 'offline' | 'unknown';
+
 export interface NormalizedDevice {
   sn: string;
   type?: string;
+  /** Communicating with the portal. Only `false` means a real offline device. */
   online?: boolean;
+  state?: DeviceState;
+  /** The provider's own status label, shown verbatim (e.g. SAJ "Standby", "Discharge"). */
+  stateLabel?: string;
 }
 
 export interface NormalizedAlert {

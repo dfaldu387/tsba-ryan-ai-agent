@@ -153,6 +153,32 @@ export async function latestStationReadings(): Promise<SolarStationReading[]> {
   return res.rows.map(toStation);
 }
 
+/** The newest stored reading for one station that carried real data (skips
+ *  'unknown' rows, so a fallback snapshot never passes itself off as a reading). */
+export async function latestStationReading(provider: string, stationId: string): Promise<SolarStationReading | null> {
+  const res = await query<StationRow>(
+    `SELECT ${STATION_COLS}
+       FROM solar_station_readings
+      WHERE provider = $1 AND station_id = $2 AND status <> 'unknown'
+      ORDER BY captured_at DESC
+      LIMIT 1`,
+    [provider, stationId],
+  );
+  return res.rows[0] ? toStation(res.rows[0]) : null;
+}
+
+/** One station's snapshots at/after `sinceMs`, oldest first (index-backed). */
+export async function stationReadingsSince(provider: string, stationId: string, sinceMs: number): Promise<SolarStationReading[]> {
+  const res = await query<StationRow>(
+    `SELECT ${STATION_COLS}
+       FROM solar_station_readings
+      WHERE provider = $1 AND station_id = $2 AND captured_at >= to_timestamp($3)
+      ORDER BY captured_at ASC`,
+    [provider, stationId, Math.floor(sinceMs / 1000)],
+  );
+  return res.rows.map(toStation);
+}
+
 /** Fleet aggregate snapshots at/after `sinceMs`, oldest first. */
 export async function fleetReadingsSince(sinceMs: number): Promise<SolarFleetReading[]> {
   const res = await query<FleetRow>(

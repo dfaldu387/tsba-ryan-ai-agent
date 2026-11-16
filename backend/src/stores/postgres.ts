@@ -39,6 +39,7 @@ import {
 import {
   recordSolar,
   latestStationReadings,
+  stationReadingsSince,
   fleetReadingsSince,
   monthlyProduction,
 } from '../solar-repo.js';
@@ -169,6 +170,9 @@ export class PgSolarStore implements SolarStore {
   }
   latestStations(): Promise<SolarStationReading[]> {
     return latestStationReadings();
+  }
+  stationHistory(provider: string, stationId: string, sinceMs: number): Promise<SolarStationReading[]> {
+    return stationReadingsSince(provider, stationId, sinceMs);
   }
   fleetHistory(sinceMs: number): Promise<SolarFleetReading[]> {
     return fleetReadingsSince(sinceMs);

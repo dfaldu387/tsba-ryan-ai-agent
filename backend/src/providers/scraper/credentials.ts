@@ -29,6 +29,7 @@ const SECTION_KEYS: Record<string, string[]> = {
   dyness: ['dyness'],
   elekeeper: ['elekeeper', 'saj'],
   whes: ['whes', 'ecos'],
+  goodwe: ['goodwe', 'sems'],
 };
 
 function credsFilePath(): string {
@@ -94,6 +95,10 @@ export function portalCreds(key: string): PortalCreds | null {
   const envUser = process.env[`SCRAPER_${key.toUpperCase()}_USER`];
   const envPass = process.env[`SCRAPER_${key.toUpperCase()}_PASS`];
   if (envUser && envPass) return { username: envUser, password: envPass };
+  // GoodWe SEMS+ uses the same account as the (discontinued) SEMS API config.
+  if (key === 'goodwe' && env.goodweEmail && env.goodwePassword) {
+    return parseFile()[key] ?? { username: env.goodweEmail, password: env.goodwePassword };
+  }
   return parseFile()[key] ?? null;
 }
 

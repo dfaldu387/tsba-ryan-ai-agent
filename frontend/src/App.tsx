@@ -5,14 +5,13 @@ import {
   type AuthenticatedUser,
   type Permission,
 } from '@tsba/shared';
-import { clearToken, getMe, getStoredUser, getToken } from './api';
+import { AuthError, clearToken, getMe, getStoredUser, getToken } from './api';
 import { LoginForm } from './components/LoginForm';
 import { ConsoleProvider, useConsole, type Navigate, type Section } from './lib/console';
 import { CommandPalette } from './ui/CommandPalette';
-import { Icon, Menu, type IconName } from './ui';
+import { Icon, Menu, SkeletonRows, type IconName } from './ui';
 import { DashboardPage } from './pages/DashboardPage';
 import { SolarTab } from './components/SolarTab';
-import { MapPage } from './pages/MapPage';
 import { DraftsPage } from './pages/DraftsPage';
 import { ConnectionsManager } from './components/ConnectionsManager';
 import { KnowledgeTab } from './components/KnowledgeTab';
@@ -20,13 +19,24 @@ import { UsersPanel } from './components/UsersPanel';
 import { QueryList } from './components/QueryList';
 import { SupportChat } from './components/SupportChat';
 import { NotificationBell } from './components/NotificationBell';
-import { VoiceAgent } from './components/VoiceAgent';
 import { ProgressTab } from './components/ProgressTab';
 import { SettingsTab } from './components/SettingsTab';
 import logoLight from './assets/tsba-logo.png';
 import logoDark from './assets/tsba-logo-dark.png';
 import logoMark from './assets/tsba-mark.png';
 import { IntegrationsPanel } from './pages/IntegrationsPanel';
+import { salesNavView } from './pages/sales/nav';
+import { WorkspaceSwitcher, type Workspace, type WorkspaceId } from './ui/WorkspaceSwitcher';
+
+const SALES_LABELS: Record<string, string> = {
+  today: 'Today', agent: 'Pipeline agent', board: 'My pipeline', clients: 'My clients', score: 'Scoreboard', setup: 'My setup', overview: 'Overview',
+  pipeline: 'Pipeline', messages: 'Text log', optouts: 'Opt-outs', reps: 'Reps', settings: 'Settings',
+};
+
+const WORKSPACES: Workspace[] = [
+  { id: 'support', name: 'Solar support', hint: 'Fleet, inbox & knowledge', icon: 'sun', home: 'dashboard', search: '' },
+  { id: 'sales', name: 'Sales pipeline', hint: 'Follow-ups, reps & team', icon: 'chat', home: 'sales', search: '' },
+];
 
 // Control-room wall display (dark, full-screen). Lazy: pulls in globe.gl/three.js
 // only when opened, so the console bundle stays light.
@@ -34,14 +44,20 @@ const EnergyDashboard = lazy(() =>
   import('./components/EnergyDashboard').then((m) => ({ default: m.EnergyDashboard })),
 );
 
+// Separate workspaces / heavy screens, loaded on first visit.
+const SalesPage = lazy(() => import('./pages/sales/SalesPage').then((m) => ({ default: m.SalesPage })));
+const VoiceAgent = lazy(() => import('./components/VoiceAgent').then((m) => ({ default: m.VoiceAgent })));
+// Map: Leaflet (~150 KB) is only needed on this one screen.
+const MapPage = lazy(() => import('./pages/MapPage').then((m) => ({ default: m.MapPage })));
+
 const SECTIONS: Section[] = [
-  'dashboard', 'solar', 'map', 'energy', 'connections', 'knowledge', 'ask', 'drafts', 'voice', 'users', 'progress', 'settings',
+  'dashboard', 'solar', 'map', 'energy', 'connections', 'knowledge', 'ask', 'drafts', 'voice', 'users', 'progress', 'settings', 'sales',
 ];
 const isSection = (v: unknown): v is Section => SECTIONS.includes(v as Section);
 
 const PERM: Record<Section, Permission> = {
   dashboard: 'view', solar: 'view', map: 'view', energy: 'view', connections: 'view', knowledge: 'view',
-  ask: 'ask', drafts: 'view', voice: 'ask', users: 'manage_users', progress: 'view', settings: 'view',
+  ask: 'ask', drafts: 'view', voice: 'ask', users: 'manage_users', progress: 'view', settings: 'view', sales: 'sales',
 };
 
 const TITLES: Record<Section, string> = {
@@ -57,6 +73,7 @@ const TITLES: Record<Section, string> = {
   users: 'Users & roles',
   progress: 'Build progress',
   settings: 'Settings',
+  sales: 'Sales pipeline',
 };
 
 const FLEET_VIEWS: { view: string; label: string }[] = [
@@ -138,9 +155,14 @@ export function App() {
     if (!getToken()) return;
     getMe()
       .then(setUser)
-      .catch(() => {
-        clearToken();
-        setUser(null);
+      .catch((err) => {
+        // Only a rejected token signs the user out. A server error or dropped
+        // connection (e.g. the API restarting during a deploy) keeps the cached
+        // session; the next request retries and a real 401 still signs out.
+        if (err instanceof AuthError || !getStoredUser()) {
+          clearToken();
+          setUser(null);
+        }
       })
       .finally(() => setRestoring(false));
   }, []);
@@ -203,7 +225,9 @@ function Shell({ loc, theme, onToggleTheme, onSignOut }: {
   const [paletteOpen, setPaletteOpen] = useState(false);
 
   const can = (s: Section) => hasPermission(user.role, PERM[s]);
-  const active: Section = can(loc.section) ? loc.section : 'dashboard';
+  // A sales rep can't see the dashboard, so their home is the follow-up agent.
+  const home: Section = can('dashboard') ? 'dashboard' : 'sales';
+  const active: Section = can(loc.section) ? loc.section : home;
   const params = useMemo(() => new URLSearchParams(loc.search), [loc.search]);
   const fleetView = params.get('station') ? 'plant' : params.get('view') ?? 'overview';
 
@@ -267,6 +291,27 @@ function Shell({ loc, theme, onToggleTheme, onSignOut }: {
       </a>
     ) : null;
 
+  // Two workspaces share the shell; the active section decides which sidebar shows.
+  const workspace: WorkspaceId = active === 'sales' ? 'sales' : 'support';
+  const salesNav = salesNavView(loc.search, hasPermission(user.role, 'sales_team'));
+  const salesLink = (v: string, icon: IconName, label: string) => (
+    <a
+      key={v}
+      href={`/sales?v=${v}`}
+      className="c-nav-link"
+      aria-current={active === 'sales' && salesNav === v ? 'page' : undefined}
+      title={collapsed ? label : undefined}
+      onClick={(e) => {
+        if (e.metaKey || e.ctrlKey || e.shiftKey) return;
+        e.preventDefault();
+        navigate('sales', `?v=${v}`);
+      }}
+    >
+      <Icon name={icon} />
+      <span className="c-nav-label">{label}</span>
+    </a>
+  );
+
   const initials = (user.name || user.email || '?').trim().slice(0, 2).toUpperCase();
   const fleetLabel = FLEET_VIEWS.find((v) => v.view === fleetView)?.label ?? (fleetView === 'plant' ? 'Plant' : '');
 
@@ -274,7 +319,7 @@ function Shell({ loc, theme, onToggleTheme, onSignOut }: {
   switch (active) {
     case 'dashboard': body = <DashboardPage />; break;
     case 'solar': body = <SolarTab search={loc.search} />; break;
-    case 'map': body = <MapPage />; break;
+    case 'map': body = <Suspense fallback={<SkeletonRows rows={6} cols={3} />}><MapPage /></Suspense>; break;
     case 'connections':
       body = (
         <div className="c-stack">
@@ -286,10 +331,11 @@ function Shell({ loc, theme, onToggleTheme, onSignOut }: {
     case 'knowledge': body = <KnowledgeTab user={user} onAuthError={onAuthError} />; break;
     case 'ask': body = <><QueryList onAuthError={onAuthError} /><SupportChat onAuthError={onAuthError} floatingOnly /></>; break;
     case 'drafts': body = <DraftsPage search={loc.search} />; break;
-    case 'voice': body = <VoiceAgent onAuthError={onAuthError} />; break;
+    case 'voice': body = <Suspense fallback={<SkeletonRows rows={4} cols={1} />}><VoiceAgent onAuthError={onAuthError} /></Suspense>; break;
     case 'users': body = <div className="col"><UsersPanel me={user} onAuthError={onAuthError} /></div>; break;
     case 'settings': body = <SettingsTab user={user} onAuthError={onAuthError} />; break;
     case 'progress': body = <ProgressTab onAuthError={onAuthError} />; break;
+    case 'sales': body = <Suspense fallback={<SkeletonRows rows={5} cols={3} />}><SalesPage search={loc.search} /></Suspense>; break;
   }
 
   return (
@@ -300,50 +346,131 @@ function Shell({ loc, theme, onToggleTheme, onSignOut }: {
         <div className="c-side-brand">
           <img className="c-brand-full" src={theme === 'dark' ? logoDark : logoLight} alt="TSBA — Trusted Solar, Bigger Advantage" />
           <img className="c-brand-mark" src={logoMark} alt="TSBA" />
-          <span className="c-brand-sub">Support AI console</span>
+          <span className="c-brand-sub">{workspace === 'sales' ? 'Sales pipeline' : 'Support AI console'}</span>
         </div>
         <nav aria-label="Sections">
-          <div className="c-nav-group">
-            <div className="c-nav-h">Monitor</div>
-            {link('dashboard', 'dashboard', 'Dashboard')}
-            {/* The critical-alert badge sits on Fleet only while its sub-menu is hidden; otherwise on Alerts. */}
-            {link('solar', 'fleet', 'Fleet', active === 'solar' && !collapsed ? undefined : { n: criticalAlerts, tone: 'danger' })}
-            {active === 'solar' && !collapsed && (
-              <div className="c-nav-sub">
-                {FLEET_VIEWS.map((v) => (
-                  <a key={v.view} href={`/solar${v.view === 'overview' ? '' : `?view=${v.view}`}`} className="c-nav-link"
-                    aria-current={fleetView === v.view ? 'page' : undefined}
-                    onClick={(e) => { e.preventDefault(); navigate('solar', v.view === 'overview' ? '' : `?view=${v.view}`); }}>
-                    <span className="c-nav-label">{v.label}</span>
-                    {v.view === 'alerts' && criticalAlerts > 0 && <span className="c-nav-badge danger">{criticalAlerts}</span>}
-                  </a>
-                ))}
+          {workspace === 'sales' ? (
+            <>
+              <div className="c-nav-group">
+                <div className="c-nav-h">My follow-ups</div>
+                {salesLink('today', 'dashboard', 'Today')}
+                {salesLink('agent', 'ai', 'Pipeline agent')}
+                {salesLink('board', 'columns', 'My pipeline')}
+                {salesLink('clients', 'book', 'My clients')}
+                {salesLink('score', 'trend', 'Scoreboard')}
+                {salesLink('setup', 'user', 'My setup')}
               </div>
-            )}
-            {link('map', 'map', 'Map')}
-          </div>
-          {(can('ask') || can('drafts')) && (
+              {can('sales') && hasPermission(user.role, 'sales_team') && (
+                <div className="c-nav-group">
+                  <div className="c-nav-h">Sales admin</div>
+                  {salesLink('overview', 'monitor', 'Overview')}
+                  {salesLink('pipeline', 'flag', 'Pipeline')}
+                  {salesLink('messages', 'chat', 'Text log')}
+                  {salesLink('optouts', 'shield', 'Opt-outs')}
+                  {salesLink('reps', 'users', 'Reps')}
+                  {salesLink('settings', 'sliders', 'Sales settings')}
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+            {can('dashboard') && (
+  
             <div className="c-nav-group">
-              <div className="c-nav-h">Support</div>
-              {link('ask', 'inbox', 'Inbox')}
-              {link('drafts', 'drafts', 'Drafts & approvals', { n: pendingDrafts, tone: 'brand' })}
-              {link('voice', 'voice', 'Voice / chat agent')}
+  
+              <div className="c-nav-h">Monitor</div>
+  
+              {link('dashboard', 'dashboard', 'Dashboard')}
+  
+              {/* The critical-alert badge sits on Fleet only while its sub-menu is hidden; otherwise on Alerts. */}
+  
+              {link('solar', 'fleet', 'Fleet', active === 'solar' && !collapsed ? undefined : { n: criticalAlerts, tone: 'danger' })}
+  
+              {active === 'solar' && !collapsed && (
+  
+                <div className="c-nav-sub">
+  
+                  {FLEET_VIEWS.map((v) => (
+  
+                    <a key={v.view} href={`/solar${v.view === 'overview' ? '' : `?view=${v.view}`}`} className="c-nav-link"
+  
+                      aria-current={fleetView === v.view ? 'page' : undefined}
+  
+                      onClick={(e) => { e.preventDefault(); navigate('solar', v.view === 'overview' ? '' : `?view=${v.view}`); }}>
+  
+                      <span className="c-nav-label">{v.label}</span>
+  
+                      {v.view === 'alerts' && criticalAlerts > 0 && <span className="c-nav-badge danger">{criticalAlerts}</span>}
+  
+                    </a>
+  
+                  ))}
+  
+                </div>
+  
+              )}
+  
+              {link('map', 'map', 'Map')}
+  
             </div>
+  
+            )}
+  
+            {(can('ask') || can('drafts')) && (
+  
+              <div className="c-nav-group">
+  
+                <div className="c-nav-h">Support</div>
+  
+                {link('ask', 'inbox', 'Inbox')}
+  
+                {link('drafts', 'drafts', 'Drafts & approvals', { n: pendingDrafts, tone: 'brand' })}
+  
+                {link('voice', 'voice', 'Voice / chat agent')}
+  
+              </div>
+  
+            )}
+  
+            {can('knowledge') && (
+  
+              <div className="c-nav-group">
+  
+                <div className="c-nav-h">Knowledge</div>
+  
+                {link('connections', 'link', 'Connections')}
+  
+                {link('knowledge', 'book', 'Knowledge base')}
+  
+              </div>
+  
+            )}
+  
+            {(can('users') || can('settings')) && (
+  
+              <div className="c-nav-group">
+  
+                <div className="c-nav-h">Admin</div>
+  
+                {link('users', 'users', 'Users & roles')}
+  
+                {link('settings', 'settings', 'Settings')}
+  
+              </div>
+  
+            )}
+  
+              </>
           )}
-          <div className="c-nav-group">
-            <div className="c-nav-h">Knowledge</div>
-            {link('connections', 'link', 'Connections')}
-            {link('knowledge', 'book', 'Knowledge base')}
-          </div>
-          <div className="c-nav-group">
-            <div className="c-nav-h">Admin</div>
-            {link('users', 'users', 'Users & roles')}
-            {link('settings', 'settings', 'Settings')}
-          </div>
         </nav>
 
         <div className="c-side-foot">
-          <span className="c-side-ver">Every AI reply is human-approved</span>
+          <WorkspaceSwitcher
+            current={workspace}
+            collapsed={collapsed}
+            options={WORKSPACES.filter((w) => can(w.home))}
+            onSwitch={(w) => navigate(w.home, w.search)}
+          />
         </div>
       </aside>
       <button type="button" className="c-edge-toggle" onClick={toggleCollapsed} aria-pressed={collapsed}
@@ -359,14 +486,17 @@ function Shell({ loc, theme, onToggleTheme, onSignOut }: {
           <h1>
             {TITLES[active]}
             {active === 'solar' && fleetLabel && <span className="c-crumb"> / {fleetLabel}</span>}
+            {active === 'sales' && SALES_LABELS[salesNav] && <span className="c-crumb"> / {SALES_LABELS[salesNav]}</span>}
           </h1>
           <div className="c-top-right">
-            <button type="button" className="c-topsearch" onClick={() => setPaletteOpen(true)} aria-label="Search (Ctrl+K)">
-              <Icon name="search" size={16} />
-              <span className="c-topsearch-t">Search plants, serials, drafts…</span>
-              <kbd>Ctrl K</kbd>
-            </button>
-            <button type="button" className="c-iconbtn bordered" onClick={onToggleTheme} aria-pressed={theme === 'dark'}
+            {can('dashboard') && (
+              <button type="button" className="c-topsearch" onClick={() => setPaletteOpen(true)} aria-label="Search (Ctrl+K)">
+                <Icon name="search" size={16} />
+                <span className="c-topsearch-t">Search plants, serials, drafts…</span>
+                <kbd>Ctrl K</kbd>
+              </button>
+            )}
+            <button type="button" className="c-iconbtn bordered c-hide-sm" onClick={onToggleTheme} aria-pressed={theme === 'dark'}
               aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'} title={theme === 'dark' ? 'Light mode' : 'Dark mode'}>
               <Icon name={theme === 'dark' ? 'sun' : 'moon'} />
             </button>
@@ -382,10 +512,12 @@ function Shell({ loc, theme, onToggleTheme, onSignOut }: {
                     <strong>{user.name || user.email}</strong>
                     <span>{ROLE_LABELS[user.role]}</span>
                   </span>
-                  <Icon name="chevronDown" size={14} />
+                  <Icon name="chevronDown" size={14} className="c-hide-sm" />
                 </span>
               }
               items={[
+                // On phones the theme button is hidden from the top bar to give the title room; it lives here instead.
+                { label: theme === 'dark' ? 'Light mode' : 'Dark mode', icon: theme === 'dark' ? 'sun' : 'moon', onSelect: onToggleTheme },
                 { label: 'Sign out', icon: 'logout', onSelect: onSignOut },
               ]}
             />

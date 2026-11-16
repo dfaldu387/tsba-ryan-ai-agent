@@ -16,6 +16,7 @@
     "build": "npm run build:shared && npm run build -w @tsba/backend && npm run build -w @tsba/frontend",
     "migrate": "npm run migrate -w @tsba/backend",
     "ingest": "npm run ingest -w @tsba/backend",
+    "portal-login": "npm run portal-login -w @tsba/backend --",
     "start": "npm run start -w @tsba/backend",
     "typecheck": "npm run typecheck -w @tsba/shared && npm run typecheck -w @tsba/backend && npm run typecheck -w @tsba/frontend"
   },

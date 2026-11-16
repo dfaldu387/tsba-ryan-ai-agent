@@ -1,9 +1,9 @@
-// Rich plant-overview building blocks: flow + KPI cards + curve-analysis bars +
-// environmental tiles, assembled by OverviewSections.
+// Rich plant-overview building blocks: KPI cards + curve-analysis bars + charts +
+// environmental tiles, assembled by OverviewSections. (The house energy-flow panel
+// lives in ./flow and is rendered by Plant360 for every plant, rich overview or not.)
 import type { ReactNode } from 'react';
-import type { EnergyStat, SolarStation, StationOverview } from '../../api';
+import type { EnergyStat, StationOverview } from '../../api';
 import { fmtDelta, fmtEnergy } from './format';
-import { FlowPanel } from './flow';
 import { OverviewChart } from './charts';
 
 export function Metric({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
@@ -15,11 +15,10 @@ export function Metric({ label, value, accent }: { label: string; value: string;
   );
 }
 
-export function OverviewSections({ overview, station }: { overview: StationOverview; station: SolarStation }) {
-  const { flow, stats, selfUse, powerCurve, comparison, environmental, strategy } = overview;
+export function OverviewSections({ overview }: { overview: StationOverview }) {
+  const { stats, selfUse, powerCurve, comparison, environmental } = overview;
   return (
     <>
-      {flow && <FlowPanel flow={flow} strategy={strategy} capacityKw={station.capacityKw} />}
       {stats && stats.length > 0 && <KpiCards stats={stats} />}
       {selfUse && <CurveAnalysisBars selfUse={selfUse} />}
       {powerCurve && powerCurve.series.length > 0 && (

@@ -1,5 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import { aggregateStations, configuredProviders, getProvider } from './providers/index.js';
+import { aggregateStationsCached, configuredProviders, getProvider } from './providers/index.js';
 
 /** True when at least one monitoring platform is connected (so the tools are useful). */
 export function solarToolsAvailable(): boolean {
@@ -70,7 +70,7 @@ function clean<T extends Record<string, unknown>>(o: T): Partial<T> {
 /** Execute a solar tool call from the model and return a compact JSON-able result. */
 export async function executeSolarTool(name: string, input: Record<string, unknown>): Promise<unknown> {
   if (name === 'get_solar_overview') {
-    const { stations, errors } = await aggregateStations();
+    const { stations, errors } = await aggregateStationsCached();
     return {
       platforms: configuredProviders().map((p) => p.name),
       unreachablePlatforms: errors.length ? errors.map((e) => e.name) : undefined,
@@ -99,7 +99,7 @@ export async function executeSolarTool(name: string, input: Record<string, unkno
   if (name === 'get_station_detail') {
     const q = String(input?.name ?? '').trim().toLowerCase();
     if (!q) return { error: 'The "name" argument is required.' };
-    const { stations } = await aggregateStations();
+    const { stations } = await aggregateStationsCached();
     const match =
       stations.find((s) => s.name.toLowerCase() === q) ??
       stations.find((s) => s.name.toLowerCase().includes(q)) ??
@@ -129,10 +129,11 @@ export async function executeSolarTool(name: string, input: Record<string, unkno
       deviceCount: devices.length || undefined,
       // Per-type counts so the agent can answer "how many batteries/inverters/loggers".
       devicesByType: countByType(devices),
-      offlineDeviceCount: devices.filter((d) => !d.online).length || undefined,
+      offlineDeviceCount: devices.filter((d) => d.online === false).length || undefined,
       // Only the offline devices' serials matter for support — don't ship the
-      // full healthy list.
-      offlineDevices: devices.filter((d) => !d.online).map((d) => d.sn) || undefined,
+      // full healthy list. (Standby / alarm devices are still communicating.)
+      offlineDevices: devices.filter((d) => d.online === false).map((d) => d.sn) || undefined,
+      standbyDeviceCount: devices.filter((d) => d.state === 'standby').length || undefined,
       activeAlerts: detail?.alerts.length
         ? detail.alerts.map((a) => clean({ name: a.name, code: a.code, device: a.deviceSn, level: a.level }))
         : undefined,

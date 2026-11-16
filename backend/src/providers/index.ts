@@ -102,6 +102,39 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
  * each provider gets one retry, and on failure falls back to its last-good data.
  * Shared by the overview route and the agent's tools so both behave identically.
  */
+// One in-flight station fetch per provider. A provider slower than the page
+// timeout (GoodWe SEMS takes ~30s to answer QueryPowerStationMonitor) keeps
+// running after the page stops waiting; when it lands it refreshes lastGood,
+// and later sweeps reuse the same call instead of piling up new ones.
+// Past this a provider is treated as down, not slow, so a real hang still
+// surfaces as an error on the next sweep.
+const SLOW_PROVIDER_CEILING_MS = 90_000;
+const inflightList = new Map<string, Promise<StationWithProvider[]>>();
+
+function fetchStations(p: SolarProvider): Promise<StationWithProvider[]> {
+  let run = inflightList.get(p.id);
+  if (!run) {
+    run = withTimeout((async () => {
+      let list: NormalizedStation[];
+      try {
+        list = await p.listStations();
+      } catch {
+        // One retry after a short pause covers a transient blip.
+        await new Promise((r) => setTimeout(r, 400));
+        list = await p.listStations();
+      }
+      const withProvider = list.map((s) => ({ ...s, provider: p.id }));
+      lastGood.set(p.id, withProvider);
+      return withProvider;
+    })(), SLOW_PROVIDER_CEILING_MS).finally(() => inflightList.delete(p.id));
+    inflightList.set(p.id, run);
+    run.catch(() => {}); // a late rejection after a timeout must not go unhandled
+  }
+  return run;
+}
+
+class StillLoading extends Error {}
+
 export async function aggregateStations(): Promise<AggregateResult> {
   const stations: StationWithProvider[] = [];
   const errors: AggregateResult['errors'] = [];
@@ -110,28 +143,21 @@ export async function aggregateStations(): Promise<AggregateResult> {
 
   await Promise.all(
     configuredProviders().map(async (p) => {
-      const attempt = () => p.listStations();
       try {
-        // One retry after a short pause (covers a transient blip), with the whole
-        // attempt+retry bounded so a hanging provider can't stall the page.
-        const list = await withTimeout(
-          (async () => {
-            try {
-              return await attempt();
-            } catch {
-              await new Promise((r) => setTimeout(r, 400));
-              return await attempt();
-            }
-          })(),
-          PROVIDER_TIMEOUT_MS,
-        );
-        const withProvider = list.map((s) => ({ ...s, provider: p.id }));
-        lastGood.set(p.id, withProvider);
+        // Bounded so a slow platform can't stall the page; the fetch itself keeps going.
+        const run = fetchStations(p);
+        const withProvider = await withTimeout(run, PROVIDER_TIMEOUT_MS).catch((e) => {
+          throw inflightList.get(p.id) === run ? new StillLoading((e as Error).message) : e;
+        });
         stations.push(...withProvider);
       } catch (err) {
         const cached = lastGood.get(p.id);
         if (cached) {
           stations.push(...cached);
+          stale.push(p.id);
+        } else if (err instanceof StillLoading) {
+          // Slow, not down: it is still answering. Its plants appear once it
+          // lands; reporting it as unreachable would be a false alarm.
           stale.push(p.id);
         } else if (p.optional) {
           // Known-incomplete/unverified integration — don't raise a fleet error.
@@ -147,6 +173,41 @@ export async function aggregateStations(): Promise<AggregateResult> {
   // their address — cached, with unknown addresses geocoded in the background.
   const located = await applyGeocodes(stations).catch(() => stations);
   return { stations: located, errors, stale, unavailable };
+}
+
+// ─── Shared, stale-while-revalidate wrapper ─────────────────────────────────
+// A full provider sweep takes ~10s+. The dashboard, Fleet pages and the alert
+// bell all poll it, so without this each caller paid that wait separately.
+// Now: concurrent callers share one in-flight sweep; a result younger than
+// FRESH_MS is returned as is; an older one (up to STALE_MS) is returned
+// instantly while a fresh sweep runs in the background.
+const FRESH_MS = 30_000;
+const STALE_MS = 10 * 60_000;
+let cachedAgg: { at: number; value: AggregateResult } | null = null;
+let inflightAgg: Promise<AggregateResult> | null = null;
+
+function sweep(): Promise<AggregateResult> {
+  if (!inflightAgg) {
+    inflightAgg = aggregateStations()
+      .then((value) => {
+        cachedAgg = { at: Date.now(), value };
+        return value;
+      })
+      .finally(() => {
+        inflightAgg = null;
+      });
+  }
+  return inflightAgg;
+}
+
+export async function aggregateStationsCached(): Promise<AggregateResult> {
+  const age = cachedAgg ? Date.now() - cachedAgg.at : Infinity;
+  if (cachedAgg && age < FRESH_MS) return cachedAgg.value;
+  if (cachedAgg && age < STALE_MS) {
+    void sweep().catch(() => {});
+    return cachedAgg.value;
+  }
+  return sweep();
 }
 
 export * from './types.js';

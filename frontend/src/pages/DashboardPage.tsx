@@ -13,7 +13,7 @@ import {
 } from '../api';
 import { useConsole } from '../lib/console';
 import { CATEGORY_LABEL, type AlertGroup } from '../lib/alerts';
-import { fmtInt, fmtKwh, fmtPowerBig, fmtRel, plural, toMs } from '../lib/format';
+import { fmtInt, fmtKwh, fmtKwp, fmtPowerBig, fmtRel, installedCapacityKw, plural, toMs } from '../lib/format';
 import { DayCurve, hourOfDay, localDay, type CurvePoint } from '../ui/charts';
 import {
   EmptyState, Icon, KpiTile, Pill, ProviderChip, RelTime, Section, SeverityPill, SkeletonRows, STATION_TONE,
@@ -267,6 +267,7 @@ export function DashboardPage() {
               <DayCurve
                 label="Fleet power output today compared with yesterday"
                 unit="kW"
+                nowHour={hourOfDay(Date.now())}
                 valueFmt={(v) => `${v >= 1000 ? `${(v / 1000).toLocaleString('en-AU', { maximumFractionDigits: 2 })} MW` : `${Math.round(v).toLocaleString('en-AU')} kW`}`}
                 series={[
                   { name: 'Yesterday', points: prod.yPts, tone: 'neutral', dashed: true },
@@ -300,7 +301,7 @@ export function DashboardPage() {
                 </div>
                 <div className="pg-dash-power">
                   <div><span>Generating now</span><b>{fmtPowerBig(prod.powerNow)}</b></div>
-                  <div><span>Capacity</span><b>{fmtInt(stations.reduce((a, s) => a + (s.capacityKw ?? 0), 0))} kWp</b></div>
+                  <div><span>Capacity</span><b>{fmtKwp(installedCapacityKw(stations))}</b></div>
                 </div>
               </>
             )}

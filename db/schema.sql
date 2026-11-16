@@ -170,3 +170,156 @@ CREATE TABLE IF NOT EXISTS app_settings (
   value      JSONB NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ─── Sales follow-up agent (Keepwarm) ────────────────────────────────────────
+-- Reps voice-note client meetings, set a follow-up rhythm, and approve every
+-- AI-drafted text. A rep only ever sees their own rows (user_id).
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin', 'manager', 'viewer', 'rep'));
+
+-- One per rep: who is texting, how they sound, and what the AI understood of
+-- their business. `understood` is the AI's play-back the rep confirmed.
+CREATE TABLE IF NOT EXISTS kw_profiles (
+  user_id      TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  display_name TEXT NOT NULL,
+  company      TEXT NOT NULL DEFAULT 'TSBA',
+  sign_off     TEXT NOT NULL,
+  about        TEXT NOT NULL DEFAULT '',
+  understood   JSONB NOT NULL DEFAULT '{}'::jsonb,
+  tone         TEXT NOT NULL DEFAULT 'friendly' CHECK (tone IN ('relaxed', 'friendly', 'direct')),
+  send_time    TEXT NOT NULL DEFAULT '09:00',
+  timezone     TEXT NOT NULL DEFAULT 'Australia/Sydney',
+  sms_from     TEXT NOT NULL DEFAULT '',
+  targets      JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- A rep's client. `notes` = [{id, cat, text}] sorted by the AI into
+-- want / situation / decides / personal / promised. cadence_days NULL = no rhythm.
+CREATE TABLE IF NOT EXISTS kw_clients (
+  id              TEXT PRIMARY KEY,
+  user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name            TEXT NOT NULL,
+  phone           TEXT NOT NULL DEFAULT '',
+  phone_norm      TEXT NOT NULL DEFAULT '',
+  email           TEXT NOT NULL DEFAULT '',
+  stage           TEXT NOT NULL DEFAULT '',
+  notes           JSONB NOT NULL DEFAULT '[]'::jsonb,
+  transcripts     JSONB NOT NULL DEFAULT '[]'::jsonb,
+  cadence_days    INT,
+  mix             TEXT NOT NULL DEFAULT 'business' CHECK (mix IN ('business', 'friendly', 'mix')),
+  next_type       TEXT NOT NULL DEFAULT 'business' CHECK (next_type IN ('business', 'friendly')),
+  send_time       TEXT,
+  next_due        DATE,
+  paused          BOOLEAN NOT NULL DEFAULT false,
+  opted_out_at    TIMESTAMPTZ,
+  last_contact_at TIMESTAMPTZ,
+  last_reply_at   TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Deal pipeline (worked by the pipeline agent). `stage` above stays as the
+-- free-text label from voice notes; deal_stage is the structured stage.
+ALTER TABLE kw_clients ADD COLUMN IF NOT EXISTS deal_stage TEXT NOT NULL DEFAULT 'lead'
+  CHECK (deal_stage IN ('lead', 'contacted', 'meeting', 'quoted', 'negotiating', 'won', 'lost'));
+ALTER TABLE kw_clients ADD COLUMN IF NOT EXISTS deal_value NUMERIC;
+ALTER TABLE kw_clients ADD COLUMN IF NOT EXISTS stage_changed_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE kw_clients ADD COLUMN IF NOT EXISTS expected_close DATE;
+ALTER TABLE kw_clients ADD COLUMN IF NOT EXISTS lost_reason TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS kw_clients_user_idx ON kw_clients (user_id);
+CREATE INDEX IF NOT EXISTS kw_clients_phone_idx ON kw_clients (phone_norm);
+
+-- Every text, both directions. Outbound life-cycle:
+-- draft → (rep approves) → scheduled → sent | failed ; or skipped / held.
+-- `held` = a client replied after approval, so it was never sent.
+CREATE TABLE IF NOT EXISTS kw_messages (
+  id            TEXT PRIMARY KEY,
+  user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  client_id     TEXT NOT NULL REFERENCES kw_clients(id) ON DELETE CASCADE,
+  direction     TEXT NOT NULL CHECK (direction IN ('out', 'in')),
+  kind          TEXT NOT NULL DEFAULT 'due' CHECK (kind IN ('due', 'reply', 'new', 'adhoc', 'inbound')),
+  type          TEXT NOT NULL DEFAULT 'business' CHECK (type IN ('business', 'friendly')),
+  status        TEXT NOT NULL CHECK (status IN ('draft', 'scheduled', 'sent', 'failed', 'skipped', 'held', 'received')),
+  body          TEXT NOT NULL DEFAULT '',
+  ai_body       TEXT NOT NULL DEFAULT '',
+  used_notes    JSONB NOT NULL DEFAULT '[]'::jsonb,
+  approved_at   TIMESTAMPTZ,
+  scheduled_for TIMESTAMPTZ,
+  sent_at       TIMESTAMPTZ,
+  provider_id   TEXT,
+  error         TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS kw_messages_client_idx ON kw_messages (client_id, created_at);
+CREATE INDEX IF NOT EXISTS kw_messages_status_idx ON kw_messages (status, scheduled_for);
+
+-- "Stop means stop, forever": a number that opted out is never texted again,
+-- even if a rep re-adds the contact later.
+CREATE TABLE IF NOT EXISTS kw_optouts (
+  phone_norm TEXT PRIMARY KEY,
+  source     TEXT NOT NULL DEFAULT 'sms',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Hand-logged scoreboard inputs (calls, conversations, meetings, proposals,
+-- revenue). Follow-ups and pipeline additions are derived, never logged here.
+CREATE TABLE IF NOT EXISTS kw_score_events (
+  id         BIGSERIAL PRIMARY KEY,
+  user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  day        DATE NOT NULL,
+  metric     TEXT NOT NULL CHECK (metric IN ('calls', 'convos', 'booked', 'attended', 'proposals', 'revenue')),
+  value      NUMERIC NOT NULL,
+  source     TEXT NOT NULL DEFAULT 'tap',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS kw_score_user_day_idx ON kw_score_events (user_id, day);
+
+-- The pipeline agent's to-do list for each rep. One open task per client+kind.
+CREATE TABLE IF NOT EXISTS kw_agent_tasks (
+  id          TEXT PRIMARY KEY,
+  user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  client_id   TEXT NOT NULL REFERENCES kw_clients(id) ON DELETE CASCADE,
+  kind        TEXT NOT NULL CHECK (kind IN ('move_stage', 'chase', 'call', 'log_outcome', 'set_rhythm', 'add_value', 'close_lost')),
+  title       TEXT NOT NULL,
+  reason      TEXT NOT NULL DEFAULT '',
+  priority    INT NOT NULL DEFAULT 2,
+  payload     JSONB NOT NULL DEFAULT '{}'::jsonb,
+  status      TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done', 'dismissed')),
+  snooze_until TIMESTAMPTZ,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  resolved_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS kw_agent_tasks_open_uq ON kw_agent_tasks (client_id, kind) WHERE status = 'open';
+CREATE INDEX IF NOT EXISTS kw_agent_tasks_user_idx ON kw_agent_tasks (user_id, status);
+
+-- Audit trail: everything the agent and the rep did to a deal, newest first.
+-- `undo` holds what to restore for agent changes the rep can take back.
+CREATE TABLE IF NOT EXISTS kw_activity (
+  id         BIGSERIAL PRIMARY KEY,
+  user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  client_id  TEXT REFERENCES kw_clients(id) ON DELETE CASCADE,
+  actor      TEXT NOT NULL CHECK (actor IN ('agent', 'rep')),
+  action     TEXT NOT NULL,
+  detail     TEXT NOT NULL DEFAULT '',
+  undo       JSONB,
+  undone_at  TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS kw_activity_user_idx ON kw_activity (user_id, created_at DESC);
+
+-- AI-led conversations with human takeover (Sales settings → auto-replies, off
+-- by default). `convo` says who answers the client's next message:
+--   idle  = no live conversation (the agent may pick it up if auto-replies are on)
+--   agent = the agent is answering routine messages itself
+--   rep   = a human took over; the agent only drafts until the rep hands back
+ALTER TABLE kw_clients ADD COLUMN IF NOT EXISTS convo TEXT NOT NULL DEFAULT 'idle' CHECK (convo IN ('idle', 'agent', 'rep'));
+ALTER TABLE kw_clients ADD COLUMN IF NOT EXISTS convo_since TIMESTAMPTZ;
+ALTER TABLE kw_clients ADD COLUMN IF NOT EXISTS convo_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE kw_clients ADD COLUMN IF NOT EXISTS rep_typing_at TIMESTAMPTZ;
+-- Who sent an outbound text: the rep (approved it) or the agent (auto-reply).
+ALTER TABLE kw_messages ADD COLUMN IF NOT EXISTS sent_by TEXT NOT NULL DEFAULT 'rep' CHECK (sent_by IN ('rep', 'agent'));
+ALTER TABLE kw_agent_tasks DROP CONSTRAINT IF EXISTS kw_agent_tasks_kind_check;
+ALTER TABLE kw_agent_tasks ADD CONSTRAINT kw_agent_tasks_kind_check
+  CHECK (kind IN ('move_stage', 'chase', 'call', 'log_outcome', 'set_rhythm', 'add_value', 'close_lost', 'handback'));

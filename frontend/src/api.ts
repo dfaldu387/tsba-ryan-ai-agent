@@ -408,10 +408,16 @@ export interface SolarOverview {
   geocodePending?: number;
 }
 
+export type DeviceState = 'normal' | 'standby' | 'alarm' | 'offline' | 'unknown';
+
 export interface SolarDevice {
   sn: string;
   type?: string;
+  /** Communicating. Only `false` is a real offline device (standby/alarm still report). */
   online?: boolean;
+  state?: DeviceState;
+  /** Provider's own status label, e.g. SAJ "Normal" / "Standby" / "Discharge". */
+  stateLabel?: string;
 }
 
 export interface SolarAlert {
@@ -658,3 +664,65 @@ export interface SolarFleetReading {
 export function getSolarFleetHistory(hours = 24): Promise<{ readings: SolarFleetReading[] }> {
   return request<{ readings: SolarFleetReading[] }>(`/api/solar/history/fleet?hours=${hours}`);
 }
+
+// ─── Sales follow-up agent (Keepwarm) ────────────────────────────────────────
+import type {
+  KwClient, KwExtractResult, KwMessage, KwMix, KwNote, KwProfile, KwScoreboard, KwSendResult,
+  KwStatus, KwTeamRow, KwTextType, KwToday, KwUnderstood, KwStage, KwAgentState, KwAgentTask, KwActivity,
+} from './lib/kw-types';
+
+const post = <T>(path: string, body: unknown = {}) => request<T>(path, { method: 'POST', body: JSON.stringify(body) });
+
+export const kw = {
+  status: () => request<KwStatus>('/api/kw/status'),
+  understand: (about: string, company: string) => post<KwUnderstood>('/api/kw/understand', { about, company }),
+  saveProfile: (p: Partial<KwProfile>) => request<{ ok: true }>('/api/kw/profile', { method: 'PUT', body: JSON.stringify(p) }),
+  today: () => request<KwToday>('/api/kw/today'),
+  clients: () => request<{ clients: KwClient[] }>('/api/kw/clients'),
+  client: (id: string) => request<{ client: KwClient; thread: KwMessage[]; open: KwMessage[] }>(`/api/kw/clients/${id}`),
+  addClient: (c: { name: string; phone: string; email?: string; stage?: string; dealStage?: KwStage; dealValue?: number | null }) => post<KwClient>('/api/kw/clients', c),
+  updateClient: (id: string, patch: {
+    name?: string; phone?: string; email?: string; stage?: string; notes?: Partial<KwNote>[]; transcript?: string;
+    cadenceDays?: number | null; mix?: KwMix; sendTime?: string | null; firstDue?: string | null; firstText?: boolean; resume?: boolean;
+    dealStage?: KwStage; dealValue?: number | null; expectedClose?: string | null; lostReason?: string;
+  }) => request<KwClient>(`/api/kw/clients/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  deleteClient: (id: string) => request<{ ok: true }>(`/api/kw/clients/${id}`, { method: 'DELETE' }),
+  understandNote: (id: string, transcript: string) => post<KwExtractResult>(`/api/kw/clients/${id}/understand`, { transcript }),
+  compose: (id: string, body: { type?: KwTextType; instruction?: string } = {}) => post<KwMessage>(`/api/kw/clients/${id}/compose`, body),
+  simulateReply: (id: string, text: string) => post<{ ok: true }>(`/api/kw/clients/${id}/simulate-reply`, { text }),
+  rewrite: (id: string, body: { type?: KwTextType; instruction?: string; shorter?: boolean; another?: boolean; current?: string }) =>
+    post<KwMessage>(`/api/kw/messages/${id}/rewrite`, body),
+  approve: (id: string, text: string, type: KwTextType) => post<KwSendResult>(`/api/kw/messages/${id}/approve`, { text, type }),
+  snooze: (id: string, days: number) => post<{ ok: true }>(`/api/kw/messages/${id}/snooze`, { days }),
+  skip: (id: string) => post<{ ok: true }>(`/api/kw/messages/${id}/skip`),
+  unschedule: (id: string) => post<KwMessage>(`/api/kw/messages/${id}/unschedule`),
+  score: (range: 'day' | 'week') => request<KwScoreboard>(`/api/kw/score?range=${range}`),
+  logScore: (metric: string, delta: number) => post<KwScoreboard>('/api/kw/score', { metric, delta }),
+  logScoreVoice: (text: string) => post<{ added: Record<string, number>; board: KwScoreboard }>('/api/kw/score/voice', { text }),
+  team: () => request<{ reps: KwTeamRow[] }>('/api/kw/team'),
+  // Pipeline agent
+  agent: () => request<KwAgentState>('/api/kw/agent'),
+  runAgent: () => post<KwAgentState>('/api/kw/agent/run'),
+  acceptTask: (id: string, body: { toStage?: KwStage; value?: number; outcome?: 'spoke' | 'no_answer'; attended?: boolean; lostReason?: string; cadenceDays?: number; note?: string } = {}) =>
+    post<{ messageId?: string; note: string }>(`/api/kw/agent/tasks/${id}/accept`, body),
+  dismissTask: (id: string, days = 7) => post<{ ok: true }>(`/api/kw/agent/tasks/${id}/dismiss`, { days }),
+  undoActivity: (id: string) => post<{ ok: true }>(`/api/kw/agent/activity/${id}/undo`),
+  takeOver: (id: string) => post<KwClient>(`/api/kw/clients/${id}/takeover`),
+  handBack: (id: string, note = '') => post<{ note: string; client: KwClient }>(`/api/kw/clients/${id}/handback`, { note }),
+  typing: (id: string) => post<{ tookOver: boolean }>(`/api/kw/clients/${id}/typing`),
+  clientActivity: (id: string) => request<{ activity: KwActivity[]; tasks: KwAgentTask[] }>(`/api/kw/clients/${id}/activity`),
+};
+
+import type { KwAdminClient, KwAdminMessage, KwOptOut, KwSettings } from '@tsba/shared';
+
+/** Sales admin (requires the `sales_team` permission). */
+export const kwAdmin = {
+  pipeline: () => request<{ clients: KwAdminClient[] }>('/api/kw/admin/pipeline'),
+  messages: (f: { status?: string; direction?: string; rep?: string; q?: string } = {}) => {
+    const qs = new URLSearchParams(Object.entries(f).filter(([, v]) => v) as [string, string][]).toString();
+    return request<{ messages: KwAdminMessage[] }>(`/api/kw/admin/messages${qs ? `?${qs}` : ''}`);
+  },
+  optOuts: () => request<{ optOuts: KwOptOut[] }>('/api/kw/admin/optouts'),
+  settings: () => request<{ settings: KwSettings; sms: { mode: 'twilio' | 'outbox'; from: string | null }; ai: boolean }>('/api/kw/admin/settings'),
+  saveSettings: (s: Partial<KwSettings>) => request<{ settings: KwSettings }>('/api/kw/admin/settings', { method: 'PUT', body: JSON.stringify(s) }),
+};

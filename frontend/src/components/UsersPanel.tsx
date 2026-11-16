@@ -135,6 +135,9 @@ export function UsersPanel({ me, onAuthError }: { me: AuthenticatedUser; onAuthE
             {adding ? 'Adding…' : 'Add user'}
           </button>
         </div>
+        {password.length > 0 && password.length < 8 && (
+          <p className="role-hint is-warn" role="status">Password needs at least 8 characters ({8 - password.length} more).</p>
+        )}
         <p className="role-hint">{ROLE_DESCRIPTIONS[role]}</p>
       </form>
 

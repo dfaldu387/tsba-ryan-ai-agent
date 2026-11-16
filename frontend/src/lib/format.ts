@@ -111,3 +111,15 @@ export function mask(s?: string | null): string {
     .map((w) => (w.length <= 1 ? w : `${w[0]}${'•'.repeat(Math.min(3, w.length - 1))}`))
     .join(' ');
 }
+
+/**
+ * Installed capacity of the fleet, in kW. Counts commissioned plants only: a
+ * plant that is offline and has never reported power is a placeholder on the
+ * platform (often with a nonsense size), so it would inflate the total. One
+ * definition, used by the dashboard and the Fleet overview so they agree.
+ */
+export function installedCapacityKw(stations: { status: string; currentPowerW?: number | null; capacityKw?: number | null }[]): number {
+  return stations
+    .filter((s) => !(s.status === 'offline' && s.currentPowerW == null))
+    .reduce((a, s) => a + (s.capacityKw ?? 0), 0);
+}

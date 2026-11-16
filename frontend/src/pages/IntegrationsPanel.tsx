@@ -10,7 +10,7 @@ import { fmtInt, plural, toMs } from '../lib/format';
 import { Drawer, EmptyState, Icon, Pill, RelTime, Section, SkeletonRows, providerHue, type Tone } from '../ui';
 import './pages.css';
 
-type Health = 'auth' | 'error' | 'degraded' | 'none' | 'ok' | 'off';
+type Health = 'auth' | 'error' | 'degraded' | 'none' | 'ok' | 'off' | 'checking';
 const META: Record<Health, { label: string; tone: Tone; rank: number }> = {
   auth: { label: 'Auth expired', tone: 'danger', rank: 0 },
   error: { label: 'Unreachable', tone: 'danger', rank: 1 },
@@ -18,6 +18,8 @@ const META: Record<Health, { label: string; tone: Tone; rank: number }> = {
   none: { label: 'No plants', tone: 'neutral', rank: 3 },
   ok: { label: 'Connected', tone: 'success', rank: 4 },
   off: { label: 'Not configured', tone: 'neutral', rank: 5 },
+  // First fleet sweep still running: we don't know yet (was shown as "No plants").
+  checking: { label: 'Checking…', tone: 'neutral', rank: 4 },
 };
 const AUTH_RX = /auth|401|403|token|login|password|credential|unauthori|session|expired|captcha|turnstile/i;
 
@@ -45,6 +47,7 @@ export function IntegrationsPanel() {
       let h: Health;
       const reasons: string[] = [];
       if (!p.configured) h = 'off';
+      else if (!overview) h = 'checking';
       else if (err && AUTH_RX.test(err)) { h = 'auth'; reasons.push(err); }
       else if (err) { h = 'error'; reasons.push(err); }
       else if (unavailable) { h = 'auth'; reasons.push('The portal session returned no data — it likely needs to be signed in again.'); }
@@ -61,11 +64,12 @@ export function IntegrationsPanel() {
 
   const problems = rows.filter((r) => META[r.h].rank <= 2).length;
   const connected = rows.filter((r) => r.h !== 'off').length;
+  const checking = rows.some((r) => r.h === 'checking');
 
   return (
     <Section
       title="Monitoring platforms"
-      sub={providers ? `${connected} of ${rows.length} connected${problems ? ` · ${plural(problems, 'needs', 'need')} attention` : ''}` : undefined}
+      sub={providers ? `${connected} of ${rows.length} connected${checking ? ' · checking each platform…' : problems ? ` · ${plural(problems, 'needs', 'need')} attention` : ''}` : undefined}
       actions={<button type="button" className="c-btn sm" onClick={() => void refreshFleet()} disabled={refreshing}><Icon name="refresh" size={14} /> {refreshing ? 'Checking…' : 'Check all now'}</button>}
     >
       {fleetLoading && !providers ? <SkeletonRows rows={3} cols={4} /> : rows.length === 0 ? (
@@ -82,8 +86,8 @@ export function IntegrationsPanel() {
                 </div>
               </header>
               <dl className="pg-integ-meta">
-                <div><dt>Plants</dt><dd>{p.configured ? fmtInt(plants) : '—'}{offline > 0 && <span className="c-muted"> · {fmtInt(offline)} offline</span>}</dd></div>
-                <div><dt>Last data</dt><dd>{p.configured ? <RelTime t={synced} stale /> : '—'}</dd></div>
+                <div><dt>Plants</dt><dd>{p.configured && h !== 'checking' ? fmtInt(plants) : '—'}{offline > 0 && <span className="c-muted"> · {fmtInt(offline)} offline</span>}</dd></div>
+                <div><dt>Last data</dt><dd>{p.configured && h !== 'checking' ? <RelTime t={synced} stale /> : '—'}</dd></div>
               </dl>
               {reasons.length > 0 && (
                 <details className="pg-integ-err" open={h === 'auth' || h === 'error'}>

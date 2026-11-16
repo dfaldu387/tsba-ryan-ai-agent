@@ -53,6 +53,10 @@ const PATHS: Record<string, ReactNode> = {
   menu: p(<path d="M3 6h18M3 12h18M3 18h18" />),
   moon: p(<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" />),
   logout: p(<><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" /></>),
+  chat: p(<path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 9 9 0 0 1-3.9-.9L3 20.5l1.5-4.6A8.4 8.4 0 1 1 21 11.5z" />),
+  trend: p(<><path d="M3 17l6-6 4 4 8-8" /><path d="M15 7h6v6" /></>),
+  stop: p(<rect x="6" y="6" width="12" height="12" rx="2" />),
+  back: p(<path d="m15 18-6-6 6-6" />),
 };
 export type IconName = keyof typeof PATHS;
 
@@ -97,6 +101,25 @@ export function Pill({ tone = 'neutral', children, dot, title }: { tone?: Tone; 
       {children}
     </span>
   );
+}
+
+const DEVICE_TONE: Record<string, { tone: Tone; label: string; hint: string }> = {
+  normal: { tone: 'success', label: 'Online', hint: 'Communicating and operating normally.' },
+  standby: { tone: 'info', label: 'Standby', hint: 'Idle but communicating — e.g. a full battery that isn’t cycling. Not a fault.' },
+  alarm: { tone: 'warning', label: 'Alarm', hint: 'Communicating but reporting a fault — see Alerts.' },
+  offline: { tone: 'danger', label: 'Offline', hint: 'Not communicating with the provider portal.' },
+};
+
+/** Per-device state, showing the provider's own label (e.g. SAJ "Standby", "Discharge")
+ *  like the vendor portal does. Falls back to the legacy online flag for providers
+ *  that don't report a state. */
+export function DeviceStatePill({ device }: { device: { online?: boolean; state?: string; stateLabel?: string } }) {
+  const key = device.state && device.state !== 'unknown'
+    ? device.state
+    : device.online === false ? 'offline' : device.online === true ? 'normal' : undefined;
+  if (!key) return <Pill tone="neutral" title="The provider didn’t report a state for this device.">{device.stateLabel || 'Unknown'}</Pill>;
+  const m = DEVICE_TONE[key];
+  return <Pill tone={m.tone} dot title={m.hint}>{device.stateLabel || m.label}</Pill>;
 }
 
 export function StatusPill({ status }: { status: StationStatus }) {
@@ -211,9 +234,14 @@ export function KpiTile({
         <span className="c-kpi-value">{value}</span>
       )}
       <span className="c-kpi-foot">
-        {delta && <span className={`c-delta t-${delta.tone}`}>{delta.text}</span>}
-        {sub && <span className="c-kpi-sub">{sub}</span>}
-        {spark && <Sparkline values={spark} tone={tone ?? 'brand'} />}
+        {/* The footer is derived from the same data as the value, so it waits for it too. */}
+        {loading ? <span className="c-skel c-skel-sm" aria-hidden="true" /> : (
+          <>
+            {delta && <span className={`c-delta t-${delta.tone}`}>{delta.text}</span>}
+            {sub && <span className="c-kpi-sub">{sub}</span>}
+            {spark && <Sparkline values={spark} tone={tone ?? 'brand'} />}
+          </>
+        )}
       </span>
     </>
   );
@@ -426,8 +454,28 @@ export function Tabs<T extends string>({ value, onChange, tabs, label }: {
     onChange(n.value);
     (e.currentTarget.parentElement?.querySelector(`[data-tab="${n.value}"]`) as HTMLElement | null)?.focus();
   };
+  // When tabs don't fit they scroll sideways; fade the edge that hides more tabs
+  // so it's visible that there are more, and keep the selected tab in view.
+  const ref = useRef<HTMLDivElement>(null);
+  const [edge, setEdge] = useState('');
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const update = () => {
+      const more = el.scrollWidth - el.clientWidth;
+      setEdge(more <= 1 ? '' : el.scrollLeft < 2 ? 'fade-r' : el.scrollLeft >= more - 2 ? 'fade-l' : 'fade-lr');
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    el.addEventListener('scroll', update, { passive: true });
+    return () => { ro.disconnect(); el.removeEventListener('scroll', update); };
+  }, [tabs.length]);
+  useEffect(() => {
+    (ref.current?.querySelector('[aria-selected="true"]') as HTMLElement | null)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [value]);
   return (
-    <div className="c-tabs" role="tablist" aria-label={label}>
+    <div ref={ref} className={`c-tabs ${edge}`} role="tablist" aria-label={label}>
       {tabs.map((t, i) => (
         <button key={t.value} type="button" role="tab" data-tab={t.value} aria-selected={value === t.value}
           tabIndex={value === t.value ? 0 : -1} onClick={() => onChange(t.value)} onKeyDown={(e) => onKey(e, i)}>

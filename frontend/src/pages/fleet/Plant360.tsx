@@ -14,9 +14,10 @@ import { useConsole } from '../../lib/console';
 import { brandTokens, matchDocs, plantQuestion } from '../../lib/aiActions';
 import { EMPTY, fmtAbs, fmtInt, fmtKw, fmtKwh, fmtKwp, fmtPct, mask } from '../../lib/format';
 import { OverviewSections } from '../../components/solar/kpis';
+import { FlowPanel, flowFromDetail } from '../../components/solar/flow';
 import { PowerChart } from '../../components/solar/charts';
 import {
-  EmptyState, ErrorState, Icon, Pill, ProviderChip, RelTime, SeverityPill, SkeletonRows, StatusPill, Tabs, neverReported, usePaged, Pager,
+  DeviceStatePill, EmptyState, ErrorState, Icon, Pill, ProviderChip, RelTime, SeverityPill, SkeletonRows, StatusPill, Tabs, neverReported, usePaged, Pager,
 } from '../../ui';
 import { CATEGORY_LABEL } from '../../lib/alerts';
 
@@ -89,6 +90,8 @@ export function Plant360({ station, tab: initialTab, onBack }: { station: SolarS
   );
 
   const latest = detail?.latest;
+  // House energy-flow: the provider's rich flow when it has one, else built from basic detail.
+  const flow = useMemo(() => ov?.flow ?? (detail ? flowFromDetail(detail, station) : null), [ov, detail, station]);
   const tabs: { value: Tab; label: string; count?: number }[] = [
     { value: 'overview', label: 'Overview' },
     { value: 'alerts', label: 'Alerts', count: openCount },
@@ -140,8 +143,9 @@ export function Plant360({ station, tab: initialTab, onBack }: { station: SolarS
                   <div><span>Lifetime</span><b>{fmtKwh(latest?.totalEnergyKwh ?? station.totalEnergyKwh)}</b></div>
                 </div>
                 {detailErr && <ErrorState title="Live detail unavailable" detail={detailErr} onRetry={load} />}
-                {ov && (ov.flow || ov.stats?.length || ov.powerCurve) ? (
-                  <div className="solar-root p360-rich"><OverviewSections overview={ov} station={station} /></div>
+                {flow && <div className="solar-root"><FlowPanel flow={flow} overview={ov} station={station} detail={detail} /></div>}
+                {ov && (ov.stats?.length || ov.powerCurve || ov.selfUse || ov.comparison) ? (
+                  <div className="solar-root p360-rich"><OverviewSections overview={ov} /></div>
                 ) : detail ? (
                   <div className="solar-root">
                     <h3 className="c-h3">Today’s generation</h3>
@@ -188,17 +192,22 @@ export function Plant360({ station, tab: initialTab, onBack }: { station: SolarS
 
             {tab === 'devices' && (
               !detail ? (detailErr ? <ErrorState detail={detailErr} onRetry={load} /> : <SkeletonRows rows={3} cols={3} />)
-                : equipment.devices.length === 0 ? <EmptyState icon="monitor" title={`${pname} doesn’t expose device data`} />
+                : equipment.devices.length === 0 ? (
+                  // Empty can mean "none linked" or a failed/rate-limited platform call — don't claim the platform lacks devices.
+                  <EmptyState icon="monitor" title={`No devices returned by ${pname}`}
+                    hint="The platform sent no device list for this plant just now. It may be busy — try again in a minute."
+                    action={<button type="button" className="c-btn sm" onClick={load}>Retry</button>} />
+                )
                   : (
                     <>
                     <table className="c-table">
                       <thead><tr><th>Serial</th><th>Type</th><th>State</th></tr></thead>
                       <tbody>
                         {devPaged.slice.map((d, i) => (
-                          <tr key={d.sn || devPaged.start + i} style={{ cursor: 'default' }}>
+                          <tr key={`${d.sn}:${d.type ?? ''}:${devPaged.start + i}`} style={{ cursor: 'default' }}>
                             <td><code className="c-mono">{d.sn || EMPTY}</code></td>
                             <td>{d.type || EMPTY}</td>
-                            <td>{d.online === false ? <Pill tone="danger" dot>Offline</Pill> : <Pill tone="success" dot>Online</Pill>}</td>
+                            <td><DeviceStatePill device={d} /></td>
                           </tr>
                         ))}
                       </tbody>

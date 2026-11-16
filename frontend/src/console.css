@@ -3,7 +3,7 @@
    brand teal for navigation/actions, status colours only for status. */
 
 /* ── Utilities ─────────────────────────────────────────────────────────────── */
-.c-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.c-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; left: 0; } /* left:0 — an absolutely-positioned label keeps its static x otherwise, and inside a horizontal scroller that widened the whole page */
 .c-num, .c-table td.num, .c-kpi-value { font-variant-numeric: tabular-nums; }
 .c-mono { font-family: var(--f-mono); font-size: 12.5px; letter-spacing: 0; }
 .c-muted { color: var(--muted); }
@@ -141,6 +141,7 @@
 .c-prov { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 8px 0 6px; border-radius: var(--r-sm); background: var(--sunk); border: 1px solid var(--line); color: var(--ink); font-size: 12px; font-weight: 600; white-space: nowrap; }
 .c-prov-mark { width: 8px; height: 8px; border-radius: 2px; background: hsl(var(--h) 70% 45%); }
 .c-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 12px; border-radius: var(--r-pill); border: 1px solid var(--line); background: var(--surface); color: var(--ink); font: inherit; font-size: 13px; font-weight: 500; cursor: pointer; white-space: nowrap; }
+.c-chip { max-width: 100%; } /* never wider than its row on small screens */
 .c-chip:hover { border-color: var(--line-strong); }
 .c-chip.on { border-color: var(--brand); background: var(--brand-soft); color: var(--brand-strong); font-weight: 600; }
 .c-chip-n { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -157,6 +158,9 @@
 .c-seg-n { font-size: 11.5px; color: var(--subtle); font-variant-numeric: tabular-nums; }
 .c-tabs { display: flex; gap: var(--sp-1); border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; }
 .c-tabs button { position: relative; display: inline-flex; align-items: center; gap: 6px; min-height: 42px; padding: 0 12px; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+.c-tabs.fade-r { mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); }
+.c-tabs.fade-l { mask-image: linear-gradient(to left, #000 calc(100% - 32px), transparent); }
+.c-tabs.fade-lr { mask-image: linear-gradient(to right, transparent, #000 32px, #000 calc(100% - 32px), transparent); }
 .c-tabs button:hover { color: var(--ink); }
 .c-tabs button[aria-selected="true"] { color: var(--ink); }
 .c-tabs button[aria-selected="true"]::after { content: ''; position: absolute; left: 8px; right: 8px; bottom: -1px; height: 2px; border-radius: 2px; background: var(--brand); }
@@ -207,7 +211,7 @@
 .c-health { display: flex; height: 12px; border-radius: 6px; overflow: hidden; background: var(--sunk); gap: 2px; }
 .c-health > span { display: block; background: var(--tc); min-width: 3px; }
 .c-health-legend { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-4); margin-top: var(--sp-3); }
-.c-health-legend button { all: unset; display: inline-flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; border-radius: 6px; padding: 2px 4px; }
+.c-health-legend button { all: unset; display: inline-flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; border-radius: 6px; padding: 2px 6px; min-height: 32px; box-sizing: border-box; } /* 32px: comfortable tap target */
 .c-health-legend button:hover { background: var(--sunk); }
 .c-health-legend button:focus-visible { outline: 2px solid var(--brand); }
 .c-health-legend b { font-variant-numeric: tabular-nums; }
@@ -257,6 +261,7 @@
 .c-banner > svg { color: var(--tc); flex: none; }
 .c-skel { display: block; height: 12px; border-radius: 6px; background: linear-gradient(90deg, var(--sunk) 0%, var(--line) 50%, var(--sunk) 100%); background-size: 200% 100%; animation: c-shimmer 1.3s ease-in-out infinite; }
 .c-skel-lg { height: 30px; width: 60%; }
+.c-skel-sm { height: 10px; width: 45%; }
 .c-skelrows { display: flex; flex-direction: column; }
 .c-skelrow { display: grid; grid-template-columns: 2fr repeat(4, 1fr); gap: var(--sp-4); align-items: center; height: 48px; padding: 0 var(--sp-4); border-bottom: 1px solid var(--line); }
 @keyframes c-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
@@ -331,8 +336,10 @@
 .c-mobilenav-btn { display: none; }
 @media (max-width: 960px) {
   .c-shell, .c-shell.collapsed { grid-template-columns: minmax(0, 1fr); }
-  .c-side { position: fixed; left: 0; top: 0; bottom: 0; width: 280px; transform: translateX(-100%); transition: transform .2s ease; box-shadow: var(--sh-3); z-index: 70; }
-  .c-shell.nav-open .c-side { transform: none; }
+  /* Closed drawer: off-screen, no shadow (it used to bleed in at the left edge)
+     and hidden, so its links aren't reachable by Tab while invisible. */
+  .c-side { position: fixed; left: 0; top: 0; bottom: 0; width: 280px; transform: translateX(-100%); visibility: hidden; transition: transform .2s ease, visibility 0s linear .2s; z-index: 70; }
+  .c-shell.nav-open .c-side { transform: none; visibility: visible; box-shadow: var(--sh-3); transition: transform .2s ease; }
   .c-shell.collapsed .c-brand-full, .c-shell.collapsed .c-nav-label, .c-shell.collapsed .c-nav-h, .c-shell.collapsed .c-nav-sub, .c-shell.collapsed .c-side-foot { display: revert; }
   .c-shell.collapsed .c-nav-link { justify-content: flex-start; padding-inline: 10px; }
   .c-nav-scrim { position: fixed; inset: 0; z-index: 65; background: rgba(10,12,18,.45); }
@@ -372,7 +379,12 @@
 
 /* Sign-in brand (light card in both themes keeps the black wordmark legible) */
 .gate-brand { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-bottom: var(--sp-3); }
-.gate-brand img { width: 100%; max-width: 300px; height: auto; padding: 10px 12px; border-radius: var(--r-md); background: #ffffff; border: 1px solid var(--line); }
+/* Transparent logo straight on the card (no white box), aspect ratio preserved. */
+.gate-brand .gate-logo { display: block; width: 100%; max-width: 320px; height: auto; object-fit: contain; margin-bottom: 4px; }
+.gate-brand .gate-logo-light { display: none; }
+[data-theme="light"] .gate-brand .gate-logo-dark { display: none; }
+/* The artwork's "TSBA" letters are white — outline them so they read on the white card. */
+[data-theme="light"] .gate-brand .gate-logo-light { display: block; filter: drop-shadow(0 0 .6px rgba(15,23,42,.55)) drop-shadow(0 1px 1px rgba(15,23,42,.18)); }
 .gate-brand h1 { margin: 6px 0 0; font-size: 18px; }
 
 /* Our search boxes have their own clear button — hide the browser's duplicate "×" there. */
@@ -384,4 +396,49 @@
 /* Sidebar colour runs the full page height (the sticky panel itself is one screen tall). */
 @media (min-width: 961px) {
   .c-shell { background: linear-gradient(to right, var(--nav-bg) calc(var(--side-w) - 1px), var(--nav-line) calc(var(--side-w) - 1px), var(--nav-line) var(--side-w), var(--bg) var(--side-w)); }
+}
+
+/* ── Workspace switcher (sidebar foot) ─────────────────────────────────────── */
+.c-side-foot:has(.c-ws) { padding: var(--sp-2) 0 0; }
+.c-ws-wrap { position: relative; }
+.c-ws {
+  display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px; border-radius: 10px;
+  border: 1px solid var(--nav-line); background: transparent; color: var(--nav-ink); font: inherit; text-align: left; cursor: pointer;
+  transition: background-color .12s ease, border-color .12s ease;
+}
+button.c-ws:hover, button.c-ws[aria-expanded="true"] { background: var(--nav-hover); border-color: var(--line-strong); }
+button.c-ws:focus-visible, .c-ws-item:focus-visible { outline: none; box-shadow: var(--focus); }
+.c-ws.is-static { cursor: default; }
+.c-ws-icon { flex: none; width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; }
+.c-ws-icon.is-support { background: var(--gold-soft); color: var(--gold); }
+.c-ws-icon.is-sales { background: var(--brand-soft); color: var(--brand-strong); }
+.c-ws-t { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
+.c-ws-t strong { font-size: 13.5px; font-weight: 600; color: var(--nav-ink-strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.c-ws-t span { font-size: 11.5px; color: var(--nav-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.c-ws-chev { flex: none; color: var(--nav-muted); transform: rotate(180deg); transition: transform .15s ease; }
+.c-ws-chev.is-open { transform: none; }
+.c-ws-menu {
+  position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); z-index: 30; padding: 6px;
+  background: var(--raised); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--sh-3);
+  animation: c-ws-up .14s ease-out both;
+}
+@keyframes c-ws-up { from { opacity: 0; transform: translateY(4px); } }
+@media (prefers-reduced-motion: reduce) { .c-ws-menu { animation: none; } }
+.c-ws-menu-h { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--nav-muted); padding: 6px 8px 4px; }
+.c-ws-item {
+  display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px; border: 0; border-radius: 8px;
+  background: transparent; color: var(--ink); font: inherit; text-align: left; cursor: pointer;
+}
+.c-ws-item:hover { background: var(--nav-hover); }
+.c-ws-item[aria-checked="true"] { background: var(--nav-active); }
+.c-ws-check { color: var(--brand); flex: none; }
+/* Collapsed sidebar: keep the switcher, icon only; the menu pops out to the right. */
+.c-shell.collapsed .c-side-foot:has(.c-ws) { display: block; border-top: 0; }
+.c-shell.collapsed .c-ws { justify-content: center; padding: 6px 0; border-color: transparent; }
+.c-shell.collapsed .c-ws .c-ws-t, .c-shell.collapsed .c-ws .c-ws-chev { display: none; }
+.c-shell.collapsed .c-ws-menu { position: fixed; left: calc(var(--side-w) + 8px); right: auto; bottom: 12px; width: 260px; }
+@media (max-width: 960px) {
+  .c-shell.collapsed .c-ws .c-ws-t, .c-shell.collapsed .c-ws .c-ws-chev { display: flex; }
+  .c-shell.collapsed .c-ws { justify-content: flex-start; padding: 8px; border-color: var(--nav-line); }
+  .c-shell.collapsed .c-ws-menu { position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); width: auto; }
 }
