@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AUDIENCE_LABELS,
   AUTOMATED_RESPONSE_PREFIX,
@@ -6,11 +6,11 @@ import {
   OUTCOME_LABELS,
   type Audience,
   type Channel,
+  type DraftAction,
   type DraftStatus,
   type Outcome,
   type SourceCard,
 } from '@tsba/shared';
-import type { DraftAction } from '@tsba/shared';
 import {
   ApiError,
   AuthError,
@@ -20,12 +20,15 @@ import {
   patchDraft,
   replyGmailQuery,
 } from '../api';
+import { Chip, EmptyState, ErrorState, Icon, Pill, RelTime, SearchInput, SkeletonRows, Trunc, type Tone } from '../ui';
+import { fmtAbs, mask } from '../lib/format';
+import { useConsole } from '../lib/console';
+import './inbox.css';
 
-// ─── Support inbox (Ask the agent) ────────────────────────────────────────────
-// A support-inbox table of end-user queries. Fed from Gmail when connected
-// (expand → auto-draft → send a reply to the thread), and from the in-app
-// queries (drafts) otherwise. KPI stat cards sit above the panel; the panel has
-// search + status / source / date-range filters over the table.
+// ─── Support inbox ────────────────────────────────────────────────────────────
+// Two panes: the thread list (Gmail inbox when connected, in-app queries
+// otherwise) and the selected thread with the agent's drafted reply. Selecting a
+// Gmail thread drafts a grounded reply; the operator reviews, edits and sends it.
 
 type RowKind = 'gmail' | 'draft';
 
@@ -49,6 +52,7 @@ interface DraftState {
   outcome?: Outcome;
   sources?: SourceCard[];
   text?: string;
+  editing?: boolean;
   sending?: boolean;
   sent?: boolean;
   sendError?: string;
@@ -56,18 +60,16 @@ interface DraftState {
   actError?: string;
 }
 
-type SortKey = 'from' | 'subject' | 'date';
-type SortDir = 'asc' | 'desc';
+type SortKey = 'newest' | 'oldest' | 'from' | 'subject';
 type DateFilter = 'all' | 'today' | '7d' | '30d';
-const PAGE_SIZE = 8;
 
-interface Status { key: string; label: string; cls: string }
+interface Status { key: string; label: string; tone: Tone }
 
 const DRAFT_STATUS: Record<DraftStatus, Status> = {
-  pending: { key: 'pending', label: 'Awaiting review', cls: 'warn' },
-  sent: { key: 'sent', label: 'Sent', cls: 'ok' },
-  team: { key: 'team', label: 'To team', cls: 'info' },
-  rejected: { key: 'rejected', label: 'Rejected', cls: 'bad' },
+  pending: { key: 'pending', label: 'Awaiting review', tone: 'warning' },
+  sent: { key: 'sent', label: 'Sent', tone: 'success' },
+  team: { key: 'team', label: 'To team', tone: 'info' },
+  rejected: { key: 'rejected', label: 'Rejected', tone: 'danger' },
 };
 const STATUS_ORDER = ['new', 'pending', 'drafted', 'replied', 'sent', 'team', 'rejected'];
 const AUDIENCES: Audience[] = ['customer', 'installer', 'sales'];
@@ -77,19 +79,45 @@ const DATE_FILTERS: { key: DateFilter; label: string }[] = [
   { key: '7d', label: 'Last 7 days' },
   { key: '30d', label: 'Last 30 days' },
 ];
+const SORTS: { key: SortKey; label: string }[] = [
+  { key: 'newest', label: 'Newest first' },
+  { key: 'oldest', label: 'Oldest first' },
+  { key: 'from', label: 'Sender A–Z' },
+  { key: 'subject', label: 'Subject A–Z' },
+];
 
-const AVATAR_COLORS = ['#e08b1b', '#6366f1', '#0ea5e9', '#10b981', '#8b5cf6', '#ec4899', '#14b8a6', '#ef4444'];
-function hashIdx(s: string): number { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return h % AVATAR_COLORS.length; }
+const OUTCOME_TONE: Record<Outcome, Tone> = { answer: 'success', clarify: 'info', handover: 'warning', decline: 'neutral' };
+const REVIEW_OUTCOMES: Outcome[] = ['clarify', 'handover', 'decline'];
+
+// Heuristic safety flags: keyword match over the question + drafted reply.
+const SAFETY_FLAGS: { label: string; tone: Tone; re: RegExp }[] = [
+  { label: 'Battery', tone: 'warning', re: /\bbatter(y|ies)\b|\bbms\b|lithium|lifepo4?|\bess\b/i },
+  { label: 'AS/NZS 5139', tone: 'warning', re: /as\s*\/?\s*nzs\s*5139|\b5139\b/i },
+  { label: 'Electrical', tone: 'warning', re: /electric|voltage|wiring|\bshock|\barc(ing)?\b|\bdc\b|\bac\b|earth(ing)? fault|\brcd\b/i },
+  { label: 'Isolation', tone: 'warning', re: /isolat/i },
+  { label: 'Fire', tone: 'danger', re: /\bfire\b|smoke|burn(t|ing|ed)?\b|melt|overheat|scorch/i },
+];
+
+// Quick replies for "Needs more info" drafts — pre-fill the editor.
+const QUICK_REPLIES: { label: string; body: string }[] = [
+  {
+    label: 'Ask for model number',
+    body: 'Thanks for getting in touch. So we can look into this for you, could you please send us the exact model number of the inverter or battery? It is printed on the rating label on the side of the unit.',
+  },
+  {
+    label: 'Ask for serial number',
+    body: 'Thanks for getting in touch. Could you please send us the serial number of the unit? You will find it on the rating label on the side of the inverter or battery, or in the monitoring app under device information.',
+  },
+  {
+    label: 'Ask for a photo of the fault screen',
+    body: 'Thanks for getting in touch. Could you please send us a clear photo of the inverter display showing the fault or error code? If it is safe to do so, a photo of the rating label would also help us identify the exact model.',
+  },
+];
+
 function fromName(from: string): string { const m = from.match(/^\s*"?([^"<]+?)"?\s*</); return (m ? m[1] : from.replace(/<[^>]+>/, '')).trim() || from; }
 function initials(name: string): string { const p = name.trim().split(/\s+/).filter(Boolean); if (!p.length) return '?'; if (p.length === 1) return p[0].slice(0, 2).toUpperCase(); return (p[0][0] + p[p.length - 1][0]).toUpperCase(); }
-function whenShort(iso: string): string {
-  const d = new Date(iso); if (Number.isNaN(d.getTime())) return iso;
-  const now = new Date(); const yday = new Date(now); yday.setDate(now.getDate() - 1);
-  if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  if (d.toDateString() === yday.toDateString()) return `Yesterday ${d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
-  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
-}
 function replyBody(reply: string): string { const r = reply.trimStart(); return r.startsWith(AUTOMATED_RESPONSE_PREFIX) ? r.slice(AUTOMATED_RESPONSE_PREFIX.length).trim() : r; }
+function withPrefix(body: string): string { return `${AUTOMATED_RESPONSE_PREFIX} ${body}`; }
 function inRange(iso: string, f: DateFilter): boolean {
   if (f === 'all') return true;
   const t = new Date(iso).getTime(); if (Number.isNaN(t)) return false;
@@ -99,7 +127,23 @@ function inRange(iso: string, f: DateFilter): boolean {
   return t >= Date.now() - 30 * day;
 }
 
+/** Narrow layout (< 960px): list and detail become separate full-width views. */
+function useNarrow(): boolean {
+  const q = '(max-width: 959px)';
+  const [narrow, setNarrow] = useState(() => typeof window !== 'undefined' && window.matchMedia(q).matches);
+  useEffect(() => {
+    const m = window.matchMedia(q);
+    const on = () => setNarrow(m.matches);
+    m.addEventListener('change', on);
+    return () => m.removeEventListener('change', on);
+  }, []);
+  return narrow;
+}
+
 export function QueryList({ onAuthError }: { onAuthError: () => void }) {
+  const { canSeePii, toast, navigate, upsertDraft } = useConsole();
+  const narrow = useNarrow();
+
   const [rows, setRows] = useState<QueryRow[]>([]);
   const [mode, setMode] = useState<'gmail' | 'draft'>('gmail');
   const [loading, setLoading] = useState(true);
@@ -108,15 +152,20 @@ export function QueryList({ onAuthError }: { onAuthError: () => void }) {
   const [statusFilter, setStatusFilter] = useState('all');
   const [sourceFilter, setSourceFilter] = useState<'all' | Audience>('all');
   const [dateFilter, setDateFilter] = useState<DateFilter>('all');
-  const [sortKey, setSortKey] = useState<SortKey>('date');
-  const [sortDir, setSortDir] = useState<SortDir>('desc');
-  const [page, setPage] = useState(1);
-  const [expanded, setExpanded] = useState<string | null>(null);
+  const [sort, setSort] = useState<SortKey>('newest');
+  const [selected, setSelected] = useState<string | null>(null);
   const [byId, setById] = useState<Record<string, DraftState>>({});
-  const [toast, setToast] = useState<string | null>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  const detailRef = useRef<HTMLDivElement>(null);
+  const requested = useRef<Set<string>>(new Set());
+  const authRef = useRef(onAuthError);
+  authRef.current = onAuthError;
+
+  const patch = useCallback((id: string, p: Partial<DraftState>) => setById((prev) => ({ ...prev, [id]: { ...prev[id], ...p } })), []);
 
   async function load() {
     setLoading(true); setError('');
+    requested.current.clear();
     try {
       const { queries } = await getGmailQueries('INBOX', 50);
       setMode('gmail'); setById({});
@@ -126,7 +175,6 @@ export function QueryList({ onAuthError }: { onAuthError: () => void }) {
       try {
         const drafts = await listDrafts();
         setMode('draft');
-        setToast('Gmail isn’t connected — showing in-app queries. Connect Gmail in Connections to pull your live inbox and send replies.');
         const prefill: Record<string, DraftState> = {};
         for (const d of drafts) prefill[String(d.id)] = { audience: d.audience, channel: d.channel, outcome: d.outcome, sources: d.sources, text: d.reply };
         setById(prefill);
@@ -141,54 +189,48 @@ export function QueryList({ onAuthError }: { onAuthError: () => void }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => void load(), []);
 
-  // Auto-dismiss the toast.
-  useEffect(() => {
-    if (!toast) return;
-    const t = window.setTimeout(() => setToast(null), 7000);
-    return () => window.clearTimeout(t);
-  }, [toast]);
-
   function rowStatus(row: QueryRow): Status {
     if (row.kind === 'draft') return DRAFT_STATUS[row.draftStatus ?? 'pending'];
     const d = byId[row.id];
-    if (d?.sent) return { key: 'replied', label: 'Replied', cls: 'ok' };
-    if (d && !d.error && !d.loading) return { key: 'drafted', label: 'Drafted', cls: 'info' };
-    return { key: 'new', label: 'New', cls: 'accent' };
+    if (d?.sent) return { key: 'replied', label: 'Replied', tone: 'success' };
+    if (d && d.text != null && !d.error && !d.loading) return { key: 'drafted', label: 'Drafted', tone: 'neutral' };
+    return { key: 'new', label: 'New', tone: 'info' };
   }
+
+  const senderLabel = (r: QueryRow) => {
+    const name = fromName(r.from);
+    return r.kind === 'gmail' && !canSeePii ? mask(name) : name;
+  };
 
   const hasSource = useMemo(() => rows.some((r) => r.audience), [rows]);
 
-  // search + source + date, then sort. (Status filter applied after, so tiles show full counts.)
+  // search + source + date, then sort. (Status filter applied after, so chips show full counts.)
   const preStatus = useMemo(() => {
     const q = search.trim().toLowerCase();
     const base = rows.filter((m) => {
-      if (q && !(m.subject.toLowerCase().includes(q) || m.from.toLowerCase().includes(q) || m.snippet.toLowerCase().includes(q))) return false;
+      if (q && !(m.subject.toLowerCase().includes(q) || (canSeePii && m.from.toLowerCase().includes(q)) || m.snippet.toLowerCase().includes(q))) return false;
       if (sourceFilter !== 'all' && m.audience !== sourceFilter) return false;
       if (!inRange(m.date, dateFilter)) return false;
       return true;
     });
     return [...base].sort((a, b) => {
-      let cmp = 0;
-      if (sortKey === 'date') cmp = new Date(a.date).getTime() - new Date(b.date).getTime();
-      else if (sortKey === 'from') cmp = fromName(a.from).localeCompare(fromName(b.from));
-      else cmp = a.subject.localeCompare(b.subject);
-      return sortDir === 'asc' ? cmp : -cmp;
+      if (sort === 'from') return fromName(a.from).localeCompare(fromName(b.from));
+      if (sort === 'subject') return a.subject.localeCompare(b.subject);
+      const cmp = new Date(a.date).getTime() - new Date(b.date).getTime();
+      return sort === 'oldest' ? cmp : -cmp;
     });
-  }, [rows, search, sourceFilter, dateFilter, sortKey, sortDir]);
+  }, [rows, search, sourceFilter, dateFilter, sort, canSeePii]);
 
-  const tiles = useMemo(() => {
+  const chips = useMemo(() => {
     const counts = new Map<string, Status & { count: number }>();
     for (const r of preStatus) {
       const s = rowStatus(r);
       const cur = counts.get(s.key);
       if (cur) cur.count++; else counts.set(s.key, { ...s, count: 1 });
     }
-    const ordered = [...counts.values()].sort((a, b) => STATUS_ORDER.indexOf(a.key) - STATUS_ORDER.indexOf(b.key));
-    return [{ key: 'all', label: 'All', cls: 'all', count: preStatus.length }, ...ordered];
+    return [...counts.values()].sort((a, b) => STATUS_ORDER.indexOf(a.key) - STATUS_ORDER.indexOf(b.key));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [preStatus, byId]);
-
-  const statusOptions = useMemo(() => tiles.map((t) => ({ key: t.key, label: t.key === 'all' ? 'All statuses' : t.label })), [tiles]);
 
   const visible = useMemo(
     () => (statusFilter === 'all' ? preStatus : preStatus.filter((r) => rowStatus(r).key === statusFilter)),
@@ -196,252 +238,421 @@ export function QueryList({ onAuthError }: { onAuthError: () => void }) {
     [preStatus, statusFilter, byId],
   );
 
-  const totalPages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
-  const pageSafe = Math.min(page, totalPages);
-  const start = (pageSafe - 1) * PAGE_SIZE;
-  const pageRows = visible.slice(start, start + PAGE_SIZE);
-
   const filtersActive = search.trim() !== '' || statusFilter !== 'all' || sourceFilter !== 'all' || dateFilter !== 'all';
-  function resetFilters() { setSearch(''); setStatusFilter('all'); setSourceFilter('all'); setDateFilter('all'); setPage(1); }
+  function resetFilters() { setSearch(''); setStatusFilter('all'); setSourceFilter('all'); setDateFilter('all'); }
 
-  function toggleSort(key: SortKey) {
-    if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
-    else { setSortKey(key); setSortDir(key === 'date' ? 'desc' : 'asc'); }
-  }
-  const sortMark = (key: SortKey) => (sortKey !== key ? '↕' : sortDir === 'asc' ? '↑' : '↓');
+  const current = rows.find((r) => r.id === selected) ?? null;
 
-  async function expand(row: QueryRow) {
-    if (expanded === row.id) { setExpanded(null); return; }
-    setExpanded(row.id);
-    if (row.kind === 'draft' || byId[row.id]) return;
-    setById((p) => ({ ...p, [row.id]: { loading: true } }));
+  // ── Drafting ──────────────────────────────────────────────────────────────
+  const generate = useCallback(async (id: string) => {
+    requested.current.add(id);
+    setById((p) => ({ ...p, [id]: { ...p[id], loading: true, error: undefined, editing: false, sendError: undefined } }));
     try {
-      const d = await draftGmailQuery(row.id);
-      setById((p) => ({ ...p, [row.id]: { audience: d.audience, channel: d.channel, outcome: d.result.outcome, sources: d.sources, text: d.result.reply } }));
+      const d = await draftGmailQuery(id);
+      setById((p) => ({ ...p, [id]: { ...p[id], loading: false, audience: d.audience, channel: d.channel, outcome: d.result.outcome, sources: d.sources, text: d.result.reply } }));
     } catch (err) {
-      if (err instanceof AuthError) return onAuthError();
-      setById((p) => ({ ...p, [row.id]: { error: 'Couldn’t draft a reply. Try again.' } }));
+      if (err instanceof AuthError) return authRef.current();
+      setById((p) => ({ ...p, [id]: { ...p[id], loading: false, error: 'Couldn’t draft a reply. Try again.' } }));
     }
+  }, []);
+
+  // Draft the selected Gmail thread once the selection settles (so arrowing
+  // through the list doesn't fire a draft request for every thread passed).
+  useEffect(() => {
+    if (!current || current.kind !== 'gmail' || requested.current.has(current.id)) return;
+    const t = window.setTimeout(() => void generate(current.id), 350);
+    return () => window.clearTimeout(t);
+  }, [current, generate]);
+
+  function select(id: string, focusDetail = false) {
+    setSelected(id);
+    if (focusDetail && narrow) window.setTimeout(() => detailRef.current?.focus(), 0);
+  }
+
+  function back() {
+    const id = selected;
+    setSelected(null);
+    window.setTimeout(() => listRef.current?.querySelector<HTMLElement>(`[data-id="${CSS.escape(id ?? '')}"]`)?.focus(), 0);
+  }
+
+  function onListKey(e: React.KeyboardEvent<HTMLUListElement>) {
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End', 'Enter', ' '].includes(e.key) || !visible.length) return;
+    e.preventDefault();
+    const idx = visible.findIndex((r) => r.id === selected);
+    if (e.key === 'Enter' || e.key === ' ') {
+      if (idx >= 0) select(visible[idx].id, true);
+      else select(visible[0].id, true);
+      return;
+    }
+    let next = idx;
+    if (e.key === 'ArrowDown') next = idx < 0 ? 0 : Math.min(visible.length - 1, idx + 1);
+    else if (e.key === 'ArrowUp') next = idx < 0 ? 0 : Math.max(0, idx - 1);
+    else if (e.key === 'Home') next = 0;
+    else next = visible.length - 1;
+    const id = visible[next].id;
+    // On narrow screens arrows only move focus — opening is an explicit Enter/tap.
+    if (narrow) { listRef.current?.querySelector<HTMLElement>(`[data-id="${CSS.escape(id)}"]`)?.focus(); return; }
+    setSelected(id);
+    listRef.current?.querySelector<HTMLElement>(`[data-id="${CSS.escape(id)}"]`)?.focus();
   }
 
   async function act(id: string, action: DraftAction) {
-    setById((p) => ({ ...p, [id]: { ...p[id], acting: true, actError: undefined } }));
+    patch(id, { acting: true, actError: undefined });
     try {
       const updated = await patchDraft(Number(id), action);
+      upsertDraft(updated);
       setRows((rs) => rs.map((r) => (r.id === id ? { ...r, draftStatus: updated.status, snippet: replyBody(updated.reply).slice(0, 150) } : r)));
-      setById((p) => ({ ...p, [id]: { ...p[id], acting: false, text: updated.reply, outcome: updated.outcome } }));
+      patch(id, { acting: false, editing: false, text: updated.reply, outcome: updated.outcome });
+      const msg = action.action === 'approve' ? 'Reply approved and sent.' : action.action === 'reject' ? 'Query rejected.' : 'Edit saved.';
+      toast({ text: msg, tone: 'success' });
     } catch (err) {
       if (err instanceof AuthError) return onAuthError();
-      setById((p) => ({ ...p, [id]: { ...p[id], acting: false, actError: 'Couldn’t update this query. Try again.' } }));
+      patch(id, { acting: false, actError: 'Couldn’t update this query. Try again.' });
     }
   }
 
   async function send(id: string) {
     const d = byId[id];
     if (!d?.text?.trim()) return;
-    setById((p) => ({ ...p, [id]: { ...p[id], sending: true, sendError: undefined } }));
+    patch(id, { sending: true, sendError: undefined });
     try {
       await replyGmailQuery(id, d.text);
-      setById((p) => ({ ...p, [id]: { ...p[id], sending: false, sent: true } }));
+      patch(id, { sending: false, sent: true, editing: false });
+      toast({ text: 'Reply sent to the Gmail thread.', tone: 'success' });
     } catch (err) {
       if (err instanceof AuthError) return onAuthError();
       const msg = err instanceof ApiError && err.code === 'gmail_not_connected' ? 'Gmail disconnected — reconnect it to send.' : 'Couldn’t send the reply. Try again.';
-      setById((p) => ({ ...p, [id]: { ...p[id], sending: false, sendError: msg } }));
+      patch(id, { sending: false, sendError: msg });
     }
   }
 
-  const showControls = !loading && !error && rows.length > 0;
+  // ── Render ────────────────────────────────────────────────────────────────
+  const view = narrow && current ? 'detail' : 'list';
 
   return (
-    <div className="ql">
-      {/* KPI stat cards — OUTSIDE the panel */}
-      {showControls && (
-        <div className="ql-stats">
-          {tiles.map((t) => (
-            <button
-              key={t.key}
-              type="button"
-              className={`ql-stat ${t.cls} ${statusFilter === t.key ? 'on' : ''}`}
-              onClick={() => { setStatusFilter(t.key); setPage(1); }}
-            >
-              <span className="ql-stat-count">{t.count}</span>
-              <span className="ql-stat-label"><span className="ql-stat-dot" aria-hidden="true" />{t.label}</span>
-            </button>
-          ))}
-        </div>
-      )}
-
-      <section className="ql-panel">
-        {/* Toolbar: title + filters */}
-        <header className="ql-toolbar">
-          <div className="ql-toolbar-title">
+    <div className="ib" data-view={view}>
+      {/* ── Thread list ─────────────────────────────────────────────────── */}
+      <div className="ib-list">
+        <div className="ib-list-h">
+          <div className="ib-list-title">
             <h2>{mode === 'gmail' ? 'Gmail inbox' : 'End-user queries'}</h2>
-            <span className="ql-sub">{visible.length} of {rows.length} shown</span>
+            {!loading && !error && <span className="ib-count">{visible.length} of {rows.length}</span>}
+            <button type="button" className="c-iconbtn" onClick={() => void load()} disabled={loading} title="Refresh" aria-label="Refresh inbox">
+              <Icon name="refresh" size={16} />
+            </button>
           </div>
-          {showControls && (
-            <div className="ql-filters">
-              <input className="ql-search" type="text" value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="Search sender or subject…" aria-label="Search" />
-
-              <div className="ql-select-wrap">
-                <select className="ql-select" value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }} aria-label="Filter by status">
-                  {statusOptions.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
-                </select>
+          {mode === 'draft' && !loading && (
+            <div className="c-banner t-info" role="status" style={{ padding: '8px 10px', fontSize: 12.5 }}>
+              <span className="c-grow">Gmail isn’t connected — showing in-app queries.</span>
+              <button type="button" className="c-link" onClick={() => navigate('connections')}>Connect</button>
+            </div>
+          )}
+          {!loading && !error && rows.length > 0 && (
+            <>
+              <SearchInput value={search} onChange={setSearch} placeholder={canSeePii ? 'Search sender, subject or text…' : 'Search subject or text…'} label="Search threads" />
+              <div className="ib-chips" role="group" aria-label="Filter by status">
+                <Chip active={statusFilter === 'all'} onClick={() => setStatusFilter('all')} count={preStatus.length}>All</Chip>
+                {chips.map((c) => (
+                  <Chip key={c.key} tone={c.tone} active={statusFilter === c.key} count={c.count} onClick={() => setStatusFilter(statusFilter === c.key ? 'all' : c.key)}>
+                    {c.label}
+                  </Chip>
+                ))}
               </div>
-
-              {hasSource && (
-                <div className="ql-select-wrap">
-                  <select className="ql-select" value={sourceFilter} onChange={(e) => { setSourceFilter(e.target.value as 'all' | Audience); setPage(1); }} aria-label="Filter by source">
+              <div className="ib-filters">
+                {hasSource && (
+                  <select className="c-select" value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value as 'all' | Audience)} aria-label="Filter by source">
                     <option value="all">All sources</option>
                     {AUDIENCES.map((a) => <option key={a} value={a}>{AUDIENCE_LABELS[a]}</option>)}
                   </select>
-                </div>
-              )}
-
-              <div className="ql-select-wrap">
-                <select className="ql-select" value={dateFilter} onChange={(e) => { setDateFilter(e.target.value as DateFilter); setPage(1); }} aria-label="Filter by date">
+                )}
+                <select className="c-select" value={dateFilter} onChange={(e) => setDateFilter(e.target.value as DateFilter)} aria-label="Filter by date">
                   {DATE_FILTERS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
                 </select>
+                <select className="c-select" value={sort} onChange={(e) => setSort(e.target.value as SortKey)} aria-label="Sort threads">
+                  {SORTS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+                </select>
+                {filtersActive && <button type="button" className="c-btn sm ghost" onClick={resetFilters}>Clear</button>}
               </div>
-
-              {filtersActive && (
-                <button type="button" className="ql-clear" onClick={resetFilters} title="Clear all filters">Clear</button>
-              )}
-              <button type="button" className="ql-icon-btn" onClick={() => void load()} disabled={loading} title="Refresh" aria-label="Refresh">
-                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="M21 12a9 9 0 1 1-3-6.7L21 8" /><path d="M21 3v5h-5" />
-                </svg>
-              </button>
-            </div>
+            </>
           )}
-        </header>
+        </div>
 
         {loading ? (
-          <div className="ql-state thinking"><span className="spin" aria-hidden="true" /><span>Loading queries…</span></div>
+          <SkeletonRows rows={7} cols={2} />
         ) : error ? (
-          <div className="ql-state"><p className="err" role="status">{error}</p></div>
+          <div className="ib-list-state"><ErrorState title="Couldn’t load the inbox" detail={error} onRetry={() => void load()} /></div>
         ) : visible.length === 0 ? (
-          <div className="ql-state"><p className="empty">{rows.length === 0 ? 'No queries yet.' : 'No queries match your filters.'}</p></div>
+          <EmptyState
+            icon="inbox"
+            title={rows.length === 0 ? 'No queries yet' : 'No threads match your filters'}
+            hint={rows.length === 0 ? 'New support emails will appear here.' : undefined}
+            action={rows.length > 0 ? <button type="button" className="c-btn" onClick={resetFilters}>Clear filters</button> : undefined}
+          />
         ) : (
-          <>
-            <div className="ql-table-wrap">
-              <table className="ql-table">
-                <thead>
-                  <tr>
-                    <th className="sortable ql-col-from" onClick={() => toggleSort('from')}>From <span className="ql-sort">{sortMark('from')}</span></th>
-                    <th className="sortable" onClick={() => toggleSort('subject')}>Query <span className="ql-sort">{sortMark('subject')}</span></th>
-                    <th className="sortable ql-col-date" onClick={() => toggleSort('date')}>Received <span className="ql-sort">{sortMark('date')}</span></th>
-                    <th className="ql-col-status">Status</th>
-                    <th aria-label="Expand" className="ql-col-x"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {pageRows.map((m) => {
-                    const isOpen = expanded === m.id;
-                    const st = rowStatus(m);
-                    const d = byId[m.id];
-                    const name = fromName(m.from);
-                    return (
-                      <FragmentRow key={m.id}>
-                        <tr className={`ql-trow ${isOpen ? 'open' : ''} ${st.key === 'new' ? 'is-new' : ''}`} onClick={() => void expand(m)}>
-                          <td className="ql-td-from">
-                            <span className="ql-avatar" style={{ background: AVATAR_COLORS[hashIdx(name)] }} aria-hidden="true">{initials(name)}</span>
-                            <span className="ql-from-name">{name}</span>
-                          </td>
-                          <td className="ql-td-q">
-                            <span className="ql-q-subj">{m.subject}</span>
-                            {m.snippet && <span className="ql-q-snip">{m.snippet}</span>}
-                          </td>
-                          <td className="ql-col-date ql-td-date">{whenShort(m.date)}</td>
-                          <td className="ql-col-status"><span className={`ql-status ${st.cls}`}><span className="ql-status-dot" aria-hidden="true" />{st.label}</span></td>
-                          <td className="ql-col-x"><span className="ql-caret" aria-hidden="true">{isOpen ? '▴' : '▾'}</span></td>
-                        </tr>
-                        {isOpen && (
-                          <tr className="ql-detail-row">
-                            <td colSpan={5}>
-                              <div className="ql-detail">
-                                {!d || d.loading ? (
-                                  <div className="ql-state thinking"><span className="spin" aria-hidden="true" /><span>Reading the message and drafting a grounded reply…</span></div>
-                                ) : d.error ? (
-                                  <p className="err" role="status">{d.error}</p>
-                                ) : (
-                                  <div className="ql-grid">
-                                    <div className="ql-question">
-                                      <span className="eyebrow">Question received</span>
-                                      <p className="ql-question-subj">{m.subject}</p>
-                                      {m.snippet && <p className="ql-question-snip">{m.snippet}</p>}
-                                      <div className="ql-detail-tags">
-                                        {d.audience && <span className="ql-chip">{AUDIENCE_LABELS[d.audience]}</span>}
-                                        {d.channel && <span className="ql-chip soft">{CHANNEL_LABELS[d.channel]}</span>}
-                                        {d.outcome && <span className={`ql-chip ${OUTCOME_LABELS[d.outcome][1]}`}>{OUTCOME_LABELS[d.outcome][0]}</span>}
-                                        {m.webUrl && <a className="ql-open-mail" href={m.webUrl} target="_blank" rel="noreferrer">Open in Gmail ↗</a>}
-                                      </div>
-                                    </div>
-
-                                    <div className="ql-reply-col">
-                                      <span className="eyebrow">Agent’s drafted reply — edit before sending</span>
-                                      <div className="ql-reply-shell">
-                                        <span className="ql-reply-prefix">{AUTOMATED_RESPONSE_PREFIX}</span>
-                                        <textarea className="ql-reply" value={replyBody(d.text ?? '')} onChange={(e) => setById((p) => ({ ...p, [m.id]: { ...p[m.id], text: `${AUTOMATED_RESPONSE_PREFIX} ${e.target.value}` } }))} rows={5} />
-                                      </div>
-                                      {d.sources && d.sources.length > 0 && (
-                                        <div className="ql-sources">
-                                          <span className="ql-sources-k">Grounded in</span>
-                                          {d.sources.map((s) => <span key={s.id} className="ql-source-chip" title={s.source}>{s.title}</span>)}
-                                        </div>
-                                      )}
-                                      <div className="ql-actions">
-                                        {m.kind === 'gmail' ? (
-                                          <button type="button" className="btn" onClick={() => void send(m.id)} disabled={d.sending || d.sent}>{d.sent ? '✓ Reply sent' : d.sending ? 'Sending…' : 'Send reply'}</button>
-                                        ) : (
-                                          <>
-                                            <button type="button" className="btn" onClick={() => void act(m.id, { action: 'approve', text: d.text })} disabled={d.acting}>{d.acting ? 'Working…' : 'Approve & send'}</button>
-                                            <button type="button" className="btn-ghost" onClick={() => void act(m.id, { action: 'edit', text: d.text ?? '' })} disabled={d.acting}>Save edit</button>
-                                            <button type="button" className="btn-ghost danger" onClick={() => void act(m.id, { action: 'reject' })} disabled={d.acting}>Reject</button>
-                                          </>
-                                        )}
-                                        {d.sent && <span className="ql-sent-note">✓ Sent to the thread in Gmail.</span>}
-                                        {d.sendError && <span className="err" role="status">{d.sendError}</span>}
-                                        {d.actError && <span className="err" role="status">{d.actError}</span>}
-                                      </div>
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
-                        )}
-                      </FragmentRow>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-
-            <footer className="ql-footer">
-              <span className="ql-range">{start + 1}–{Math.min(start + PAGE_SIZE, visible.length)} of {visible.length}</span>
-              {totalPages > 1 && (
-                <div className="ql-pager">
-                  <button type="button" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={pageSafe === 1} aria-label="Previous page">←</button>
-                  <span>Page {pageSafe} / {totalPages}</span>
-                  <button type="button" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={pageSafe === totalPages} aria-label="Next page">→</button>
-                </div>
-              )}
-            </footer>
-          </>
+          <ul
+            ref={listRef}
+            className="ib-threads"
+            role="listbox"
+            aria-label="Threads"
+            tabIndex={-1}
+            onKeyDown={onListKey}
+          >
+            {visible.map((m, i) => {
+              const st = rowStatus(m);
+              const isSel = m.id === selected;
+              const tabbable = selected ? isSel || (!visible.some((r) => r.id === selected) && i === 0) : i === 0;
+              return (
+                <li
+                  key={m.id}
+                  data-id={m.id}
+                  role="option"
+                  aria-selected={isSel}
+                  tabIndex={tabbable ? 0 : -1}
+                  className={`ib-thread ${st.key === 'new' ? 'is-new' : ''}`}
+                  onClick={() => select(m.id, true)}
+                >
+                  <span className="ib-avatar" aria-hidden="true">{initials(senderLabel(m).replace(/•/g, ''))}</span>
+                  <span className="ib-thread-top">
+                    <Trunc text={senderLabel(m)} className="ib-from" />
+                    <span className="ib-date"><RelTime t={m.date} /></span>
+                  </span>
+                  <Trunc text={m.subject || '(no subject)'} className="ib-subj" />
+                  {m.snippet && <Trunc text={m.snippet} className="ib-snip" />}
+                  <span className="ib-thread-foot" style={{ gridColumn: 2 }}>
+                    <Pill tone={st.tone} dot>{st.label}</Pill>
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
         )}
-      </section>
+      </div>
 
-      {toast && (
-        <div className="ql-toast" role="status">
-          <span className="ql-toast-ico" aria-hidden="true">✉</span>
-          <span className="ql-toast-msg">{toast}</span>
-          <button type="button" className="ql-toast-x" onClick={() => setToast(null)} aria-label="Dismiss">✕</button>
-        </div>
-      )}
+      {/* ── Thread + draft ──────────────────────────────────────────────── */}
+      <div className="ib-detail" ref={detailRef} tabIndex={-1} aria-label="Selected thread">
+        {!current ? (
+          <div className="ib-detail-empty">
+            <EmptyState icon="mail" title="Select a thread" hint="Choose a message on the left to read it and review the agent’s drafted reply. Use ↑ and ↓ to move through the list." />
+          </div>
+        ) : (
+          <ThreadDetail
+            row={current}
+            sender={senderLabel(current)}
+            status={rowStatus(current)}
+            d={byId[current.id]}
+            onBack={back}
+            onText={(text) => patch(current.id, { text })}
+            onEditing={(editing) => patch(current.id, { editing })}
+            onRegenerate={() => void generate(current.id)}
+            onSend={() => void send(current.id)}
+            onAct={(a) => void act(current.id, a)}
+          />
+        )}
+      </div>
     </div>
   );
 }
 
-function FragmentRow({ children }: { children: ReactNode }) {
-  return <>{children}</>;
+// ─── Detail pane ──────────────────────────────────────────────────────────────
+function ThreadDetail({
+  row, sender, status, d, onBack, onText, onEditing, onRegenerate, onSend, onAct,
+}: {
+  row: QueryRow;
+  sender: string;
+  status: Status;
+  d: DraftState | undefined;
+  onBack: () => void;
+  onText: (text: string) => void;
+  onEditing: (editing: boolean) => void;
+  onRegenerate: () => void;
+  onSend: () => void;
+  onAct: (a: DraftAction) => void;
+}) {
+  const editorRef = useRef<HTMLTextAreaElement>(null);
+  const editing = !!d?.editing;
+  useEffect(() => { if (editing) editorRef.current?.focus(); }, [editing]);
+
+  const body = replyBody(d?.text ?? '');
+  const hasDraft = !!d && !d.loading && !d.error && d.text != null;
+  const reviewRequired = hasDraft && ((d!.outcome && REVIEW_OUTCOMES.includes(d!.outcome)) || !d!.sources?.length);
+  const haystack = `${row.subject}\n${row.snippet}\n${body}`;
+  const flags = SAFETY_FLAGS.filter((f) => f.re.test(haystack));
+  const finished = row.kind === 'gmail' ? !!d?.sent : row.draftStatus !== 'pending';
+  const busy = !!(d?.sending || d?.acting);
+
+  const reviewReason = !hasDraft ? '' :
+    d!.outcome === 'clarify' ? 'The agent needs more information before it can answer.' :
+    d!.outcome === 'handover' ? 'The agent handed this to the team — check the reply before sending.' :
+    d!.outcome === 'decline' ? 'The agent declined to answer — confirm this is appropriate.' :
+    'The reply isn’t grounded in any knowledge-base source.';
+
+  return (
+    <>
+      <header className="ib-thread-h">
+        <div className="ib-thread-h-row ib-back-row">
+          <button type="button" className="c-btn sm ghost ib-back" onClick={onBack}>
+            <Icon name="chevron" size={16} className="ib-back-ico" /> Back to inbox
+          </button>
+        </div>
+        <div className="ib-thread-h-row">
+          <h2>{row.subject || '(no subject)'}</h2>
+          {row.webUrl && (
+            <a className="c-btn sm" href={row.webUrl} target="_blank" rel="noreferrer noopener">
+              <Icon name="external" size={15} /> Open in Gmail
+            </a>
+          )}
+        </div>
+        <div className="ib-thread-meta">
+          <span>From <strong>{sender}</strong></span>
+          <span aria-hidden="true">·</span>
+          <time dateTime={row.date} title={fmtAbs(row.date)}>{fmtAbs(row.date)}</time>
+          <Pill tone={status.tone} dot>{status.label}</Pill>
+        </div>
+      </header>
+
+      <div className="ib-body">
+        {row.kind === 'gmail' && row.snippet && (
+          <div className="ib-msg">
+            <span className="ib-msg-k">Message preview</span>
+            {row.snippet}
+          </div>
+        )}
+        {row.kind === 'draft' && (
+          <div className="ib-msg">
+            <span className="ib-msg-k">Question received</span>
+            {row.subject}
+          </div>
+        )}
+
+        <section className="ib-draft" aria-labelledby="ib-draft-h">
+          <div className="ib-draft-h">
+            <h3 id="ib-draft-h"><Icon name="ai" size={16} /> AI draft</h3>
+            {hasDraft && d!.audience && <span className="ib-tag" title="Detected audience">{AUDIENCE_LABELS[d!.audience]}</span>}
+            {hasDraft && d!.channel && <span className="ib-tag" title="Channel">{CHANNEL_LABELS[d!.channel]}</span>}
+            {hasDraft && d!.outcome && <Pill tone={OUTCOME_TONE[d!.outcome]} dot>{OUTCOME_LABELS[d!.outcome][0]}</Pill>}
+          </div>
+
+          <div aria-live="polite" aria-busy={!!d?.loading}>
+            {!d || d.loading ? (
+              <div className="ib-loading">
+                <p>Reading the message and drafting a grounded reply…</p>
+                <span className="c-skel" /><span className="c-skel" /><span className="c-skel" />
+              </div>
+            ) : d.error ? (
+              <div className="ib-draft-b">
+                <ErrorState title="Couldn’t draft a reply" detail={d.error} onRetry={row.kind === 'gmail' ? onRegenerate : undefined} />
+              </div>
+            ) : (
+              <div className="ib-draft-b">
+                {reviewRequired && (
+                  <div className="c-banner t-warning" role="note">
+                    <Icon name="alert" />
+                    <span><strong>Human review required.</strong> {reviewReason}</span>
+                  </div>
+                )}
+
+                {flags.length > 0 && (
+                  <div className="ib-safety" aria-label="Safety flags">
+                    <Icon name="shield" size={14} />
+                    <span>Safety:</span>
+                    {flags.map((f) => <Pill key={f.label} tone={f.tone} title="Keyword match — check the reply follows safety guidance">{f.label}</Pill>)}
+                  </div>
+                )}
+
+                <div className="ib-reply">
+                  <span className="ib-reply-prefix">{AUTOMATED_RESPONSE_PREFIX}</span>
+                  {editing ? (
+                    <textarea
+                      ref={editorRef}
+                      value={body}
+                      onChange={(e) => onText(withPrefix(e.target.value))}
+                      aria-label="Edit reply"
+                      rows={8}
+                    />
+                  ) : (
+                    <div className="ib-reply-text">{body || <span className="c-muted">No reply drafted.</span>}</div>
+                  )}
+                </div>
+
+                {d.outcome === 'clarify' && !finished && (
+                  <div className="ib-quick">
+                    <span className="ib-quick-k">Quick replies — pre-fill the editor</span>
+                    <div className="ib-quick-row">
+                      {QUICK_REPLIES.map((q) => (
+                        <button key={q.label} type="button" className="c-btn sm" onClick={() => { onText(withPrefix(q.body)); onEditing(true); }}>
+                          {q.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {d.sources && d.sources.length > 0 && (
+                  <details className="ib-sources">
+                    <summary><Icon name="chevron" size={14} /> Sources ({d.sources.length})</summary>
+                    <ul>
+                      {d.sources.map((s) => (
+                        <li key={s.id}>
+                          <Trunc text={s.title} />
+                          <span>{s.source}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </div>
+            )}
+          </div>
+
+          {hasDraft && (
+            <div className="ib-actions">
+              {row.kind === 'gmail' ? (
+                d!.sent ? (
+                  <span className="ib-sent"><Icon name="check" size={16} /> Sent to the thread in Gmail</span>
+                ) : (
+                  <>
+                    <button type="button" className="c-btn primary" onClick={onSend} disabled={busy || !body.trim()}>
+                      <Icon name="send" size={15} /> {d!.sending ? 'Sending…' : 'Approve & send'}
+                    </button>
+                    <button type="button" className="c-btn" onClick={() => onEditing(!editing)} disabled={busy} aria-pressed={editing}>
+                      <Icon name="drafts" size={15} /> {editing ? 'Done editing' : 'Edit'}
+                    </button>
+                    <button type="button" className="c-btn ghost" onClick={onRegenerate} disabled={busy}>
+                      <Icon name="refresh" size={15} /> Regenerate
+                    </button>
+                  </>
+                )
+              ) : (
+                <>
+                  <button type="button" className="c-btn primary" onClick={() => onAct({ action: 'approve', text: d!.text })} disabled={busy || finished}>
+                    <Icon name="send" size={15} /> {d!.acting ? 'Working…' : 'Approve & send'}
+                  </button>
+                  {editing ? (
+                    <button type="button" className="c-btn" onClick={() => onAct({ action: 'edit', text: d!.text ?? '' })} disabled={busy}>
+                      <Icon name="check" size={15} /> Save edit
+                    </button>
+                  ) : (
+                    <button type="button" className="c-btn" onClick={() => onEditing(true)} disabled={busy}>
+                      <Icon name="drafts" size={15} /> Edit
+                    </button>
+                  )}
+                  <button type="button" className="c-btn ghost danger" onClick={() => onAct({ action: 'reject' })} disabled={busy || finished}>
+                    <Icon name="x" size={15} /> Reject
+                  </button>
+                </>
+              )}
+              <span className="c-spacer" />
+              {row.webUrl && (
+                <a className="c-btn sm ghost" href={row.webUrl} target="_blank" rel="noreferrer noopener">
+                  Open in Gmail <Icon name="external" size={14} />
+                </a>
+              )}
+              {d!.sendError && <span className="c-row" role="alert" style={{ color: 'var(--danger)', fontSize: 13 }}>{d!.sendError}</span>}
+              {d!.actError && <span className="c-row" role="alert" style={{ color: 'var(--danger)', fontSize: 13 }}>{d!.actError}</span>}
+            </div>
+          )}
+        </section>
+      </div>
+    </>
+  );
 }

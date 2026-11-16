@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   hasPermission,
   ROLE_LABELS,
@@ -7,233 +7,132 @@ import {
 } from '@tsba/shared';
 import { clearToken, getMe, getStoredUser, getToken } from './api';
 import { LoginForm } from './components/LoginForm';
-import { DashboardTab } from './components/DashboardTab';
+import { ConsoleProvider, useConsole, type Navigate, type Section } from './lib/console';
+import { CommandPalette } from './ui/CommandPalette';
+import { Icon, Menu, type IconName } from './ui';
+import { DashboardPage } from './pages/DashboardPage';
 import { SolarTab } from './components/SolarTab';
-// Lazy-loaded: pulls in globe.gl/three.js only when the energy wall is opened,
-// so the main console bundle stays light.
-const EnergyDashboard = lazy(() =>
-  import('./components/EnergyDashboard').then((m) => ({ default: m.EnergyDashboard })),
-);
+import { MapPage } from './pages/MapPage';
+import { DraftsPage } from './pages/DraftsPage';
 import { ConnectionsManager } from './components/ConnectionsManager';
 import { KnowledgeTab } from './components/KnowledgeTab';
 import { UsersPanel } from './components/UsersPanel';
-import { AskTab } from './components/AskTab';
 import { QueryList } from './components/QueryList';
 import { SupportChat } from './components/SupportChat';
 import { NotificationBell } from './components/NotificationBell';
 import { VoiceAgent } from './components/VoiceAgent';
 import { ProgressTab } from './components/ProgressTab';
 import { SettingsTab } from './components/SettingsTab';
+import logoLight from './assets/tsba-logo.png';
+import logoDark from './assets/tsba-logo-dark.png';
+import logoMark from './assets/tsba-mark.png';
+import { IntegrationsPanel } from './pages/IntegrationsPanel';
 
-type Section = 'dashboard' | 'solar' | 'energy' | 'connections' | 'knowledge' | 'ask' | 'drafts' | 'voice' | 'users' | 'progress' | 'settings';
+// Control-room wall display (dark, full-screen). Lazy: pulls in globe.gl/three.js
+// only when opened, so the console bundle stays light.
+const EnergyDashboard = lazy(() =>
+  import('./components/EnergyDashboard').then((m) => ({ default: m.EnergyDashboard })),
+);
 
-interface NavItem {
-  key: Section;
-  label: string;
-  icon: string;
-  perm: Permission;
-}
-
-const NAV: NavItem[] = [
-  { key: 'dashboard', label: 'Dashboard', icon: '▦', perm: 'view' },
-  { key: 'solar', label: 'Solar monitoring', icon: '☀', perm: 'view' },
-  { key: 'energy', label: 'Energy platform', icon: '🌐', perm: 'view' },
-  { key: 'connections', label: 'Connections', icon: '🔌', perm: 'view' },
-  { key: 'knowledge', label: 'Knowledge base', icon: '📚', perm: 'view' },
-  { key: 'ask', label: 'Support Inbox', icon: '💬', perm: 'ask' },
-  { key: 'voice', label: 'Voice agent', icon: '🎙️', perm: 'ask' },
-  { key: 'drafts', label: 'Drafts & approvals', icon: '📥', perm: 'ask' },
-  { key: 'users', label: 'Users & roles', icon: '👥', perm: 'manage_users' },
-  { key: 'settings', label: 'Settings', icon: '⚙️', perm: 'view' },
+const SECTIONS: Section[] = [
+  'dashboard', 'solar', 'map', 'energy', 'connections', 'knowledge', 'ask', 'drafts', 'voice', 'users', 'progress', 'settings',
 ];
+const isSection = (v: unknown): v is Section => SECTIONS.includes(v as Section);
+
+const PERM: Record<Section, Permission> = {
+  dashboard: 'view', solar: 'view', map: 'view', energy: 'view', connections: 'view', knowledge: 'view',
+  ask: 'ask', drafts: 'view', voice: 'ask', users: 'manage_users', progress: 'view', settings: 'view',
+};
 
 const TITLES: Record<Section, string> = {
-  dashboard: 'Dashboard',
-  solar: 'Solar monitoring',
-  energy: 'Energy platform',
-  connections: 'Connections & knowledge sources',
+  dashboard: 'Today’s work',
+  solar: 'Fleet',
+  map: 'Map',
+  energy: 'Control room',
+  connections: 'Connections',
   knowledge: 'Knowledge base',
-  ask: 'Support Inbox',
+  ask: 'Inbox',
   drafts: 'Drafts & approvals',
-  voice: 'Voice agent',
+  voice: 'Voice & chat agent',
   users: 'Users & roles',
-  settings: 'Settings',
   progress: 'Build progress',
+  settings: 'Settings',
 };
 
-const SUBTITLES: Record<Section, string> = {
-  dashboard: 'A live overview of the agent, its knowledge and recent activity.',
-  solar: 'Monitor energy production, plant health and performance across all connected solar installations.',
-  energy: 'Full-screen live monitoring wall across your whole solar fleet.',
-  connections: 'Connect Google Drive & Gmail, then select folders and scan email into the knowledge base.',
-  knowledge: 'Every document and folder source powering the agent’s answers.',
-  ask: 'Receive, review and reply to end-user support questions.',
-  drafts: 'Generate a grounded draft reply for review and approval.',
-  voice: 'Speak to the agent and hear grounded answers read back aloud.',
-  users: 'Create accounts and assign roles. Permissions follow the role.',
-  settings: 'System configuration, integrations and your account.',
-  progress: 'What’s done, in progress and next.',
-};
+const FLEET_VIEWS: { view: string; label: string }[] = [
+  { view: 'overview', label: 'Overview' },
+  { view: 'plants', label: 'Plants' },
+  { view: 'alerts', label: 'Alerts' },
+  { view: 'devices', label: 'Devices' },
+  { view: 'analytics', label: 'Analytics' },
+];
 
 const COLLAPSE_KEY = 'tsba.sidebar.collapsed';
 const SECTION_KEY = 'tsba.section';
 const THEME_KEY = 'tsba.theme';
-
 type Theme = 'light' | 'dark';
 
-// Crisp line icons (inherit the nav link colour via currentColor).
-const svgIcon = (paths: ReactNode): ReactNode => (
-  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
-    strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-    {paths}
-  </svg>
-);
-
-const ICONS: Record<Section, ReactNode> = {
-  dashboard: svgIcon(
-    <>
-      <rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" />
-      <rect x="14" y="14" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" />
-    </>,
-  ),
-  solar: svgIcon(
-    <>
-      <circle cx="12" cy="12" r="4.5" />
-      <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4" />
-    </>,
-  ),
-  energy: svgIcon(
-    <>
-      <circle cx="12" cy="12" r="9" />
-      <path d="M3 12h18" /><path d="M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18z" />
-    </>,
-  ),
-  connections: svgIcon(
-    <>
-      <path d="M9 17H7A5 5 0 0 1 7 7h2" /><path d="M15 7h2a5 5 0 0 1 0 10h-2" /><line x1="8" y1="12" x2="16" y2="12" />
-    </>,
-  ),
-  knowledge: svgIcon(
-    <>
-      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
-    </>,
-  ),
-  ask: svgIcon(<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />),
-  drafts: svgIcon(
-    <>
-      <path d="M22 12h-6l-2 3h-4l-2-3H2" /><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
-    </>,
-  ),
-  voice: svgIcon(
-    <>
-      <rect x="9" y="2" width="6" height="12" rx="3" /><path d="M5 10v2a7 7 0 0 0 14 0v-2" />
-      <line x1="12" y1="19" x2="12" y2="22" /><line x1="8" y1="22" x2="16" y2="22" />
-    </>,
-  ),
-  users: svgIcon(
-    <>
-      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" />
-      <path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" />
-    </>,
-  ),
-  settings: svgIcon(
-    <>
-      <circle cx="12" cy="12" r="3" />
-      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-    </>,
-  ),
-  progress: svgIcon(
-    <>
-      <polyline points="22 7 13.5 15.5 8.5 10.5 2 17" /><polyline points="16 7 22 7 22 13" />
-    </>,
-  ),
-};
-
-const SECTIONS: Section[] = [
-  'dashboard', 'solar', 'energy', 'connections', 'knowledge', 'ask', 'drafts', 'voice', 'users', 'progress', 'settings',
-];
-const isSection = (v: unknown): v is Section => SECTIONS.includes(v as Section);
-
-// Clean URL paths: /solar, /energy, …; the dashboard lives at the root.
 function pathForSection(s: Section): string {
   return s === 'dashboard' ? '/' : `/${s}`;
 }
 function sectionFromPath(pathname: string): Section | null {
   const seg = pathname.replace(/^\/+/, '').split('/')[0];
-  if (!seg) return null; // root → let the caller decide (OAuth / last-section)
+  if (!seg) return null;
   if (seg === 'admin') return 'dashboard'; // legacy alias
   return isSection(seg) ? seg : null;
 }
 
-function initialSection(): Section {
+interface Loc {
+  section: Section;
+  search: string;
+}
+
+function initialLoc(): Loc {
   try {
     const params = new URLSearchParams(window.location.search);
-    if (params.get('status')) return 'connections'; // returning from OAuth
-    // Clean path wins (e.g. /energy).
+    if (params.get('status')) return { section: 'connections', search: window.location.search }; // OAuth return
     const fromPath = sectionFromPath(window.location.pathname);
-    if (fromPath) return fromPath;
-    // Back-compat: the old ?tab= links still work.
-    const t = params.get('tab');
-    if (t === 'admin') return 'dashboard';
-    if (isSection(t)) return t;
-    // No section in the URL — restore the last section the user was on.
+    if (fromPath) return { section: fromPath, search: window.location.search };
+    const t = params.get('tab'); // legacy ?tab= links
+    if (t === 'admin') return { section: 'dashboard', search: '' };
+    if (isSection(t)) return { section: t, search: '' };
     const saved = localStorage.getItem(SECTION_KEY);
-    if (isSection(saved)) return saved;
+    if (isSection(saved)) return { section: saved, search: '' };
   } catch {
     /* ignore */
   }
-  return 'dashboard';
+  return { section: 'dashboard', search: '' };
+}
+
+function readPref(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+function writePref(key: string, v: string) {
+  try {
+    localStorage.setItem(key, v);
+  } catch {
+    /* ignore */
+  }
 }
 
 export function App() {
   const [user, setUser] = useState<AuthenticatedUser | null>(() => (getToken() ? getStoredUser() : null));
   const [restoring, setRestoring] = useState<boolean>(() => Boolean(getToken()));
-  const [section, setSection] = useState<Section>(initialSection);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [collapsed, setCollapsed] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem(COLLAPSE_KEY) === '1';
-    } catch {
-      return false;
-    }
-  });
-
-  const toggleCollapsed = () =>
-    setCollapsed((c) => {
-      const next = !c;
-      try {
-        localStorage.setItem(COLLAPSE_KEY, next ? '1' : '0');
-      } catch {
-        /* ignore */
-      }
-      return next;
-    });
-
-  // Light/dark theme. Saved choice wins; otherwise follow the OS preference.
+  const [loc, setLoc] = useState<Loc>(initialLoc);
   const [theme, setTheme] = useState<Theme>(() => {
-    try {
-      const saved = localStorage.getItem(THEME_KEY);
-      if (saved === 'light' || saved === 'dark') return saved;
-    } catch {
-      /* ignore */
-    }
-    return typeof window !== 'undefined' &&
-      window.matchMedia?.('(prefers-color-scheme: dark)').matches
-      ? 'dark'
-      : 'light';
+    const saved = readPref(THEME_KEY);
+    if (saved === 'light' || saved === 'dark') return saved;
+    return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   });
 
-  // Apply the theme to <html data-theme> and remember the choice.
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
-    try {
-      localStorage.setItem(THEME_KEY, theme);
-    } catch {
-      /* ignore */
-    }
+    writePref(THEME_KEY, theme);
   }, [theme]);
-
-  const toggleTheme = () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
 
   useEffect(() => {
     if (!getToken()) return;
@@ -246,50 +145,32 @@ export function App() {
       .finally(() => setRestoring(false));
   }, []);
 
-  // Remember the active section so a reload returns here, not to the dashboard.
-  useEffect(() => {
-    try {
-      localStorage.setItem(SECTION_KEY, section);
-    } catch {
-      /* ignore */
-    }
-  }, [section]);
+  useEffect(() => writePref(SECTION_KEY, loc.section), [loc.section]);
 
-  // Keep the URL path in sync with the active section (clean paths like /energy).
-  // First sync replaces (no history entry / strips a legacy ?tab=); later changes
-  // push, so browser back/forward moves between sections.
-  const didSyncUrl = useRef(false);
+  // Normalise the URL once (strip legacy ?tab=, map / → last section).
   useEffect(() => {
     if (!user) return;
-    try {
-      const params = new URLSearchParams(window.location.search);
-      params.delete('tab');
-      const qs = params.toString();
-      const target = pathForSection(section) + (qs ? `?${qs}` : '');
-      if (window.location.pathname + window.location.search !== target) {
-        if (didSyncUrl.current) window.history.pushState({}, '', target);
-        else window.history.replaceState({}, '', target);
-      }
-      didSyncUrl.current = true;
-    } catch {
-      /* ignore */
-    }
-  }, [section, user]);
+    const params = new URLSearchParams(loc.search);
+    params.delete('tab');
+    const qs = params.toString();
+    const target = pathForSection(loc.section) + (qs ? `?${qs}` : '');
+    if (window.location.pathname + window.location.search !== target) window.history.replaceState({}, '', target);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user]);
 
-  // Browser back/forward → switch section from the path.
+  const navigate = useCallback<Navigate>((section, search = '') => {
+    const target = pathForSection(section) + search;
+    if (window.location.pathname + window.location.search !== target) window.history.pushState({}, '', target);
+    setLoc({ section, search });
+    window.scrollTo({ top: 0 });
+  }, []);
+
   useEffect(() => {
-    const onPop = () => setSection(sectionFromPath(window.location.pathname) ?? 'dashboard');
+    const onPop = () =>
+      setLoc({ section: sectionFromPath(window.location.pathname) ?? 'dashboard', search: window.location.search });
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
   }, []);
-
-  // Close the profile menu on Escape.
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setMenuOpen(false);
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [menuOpen]);
 
   if (!user) {
     if (restoring) return null;
@@ -300,182 +181,222 @@ export function App() {
     clearToken();
     setUser(null);
   };
-  const signOut = () => {
-    clearToken();
-    setUser(null);
+
+  return (
+    <ConsoleProvider user={user} navigate={navigate} onAuthError={onAuthError}>
+      <Shell
+        loc={loc}
+        theme={theme}
+        onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+        onSignOut={onAuthError}
+      />
+    </ConsoleProvider>
+  );
+}
+
+function Shell({ loc, theme, onToggleTheme, onSignOut }: {
+  loc: Loc; theme: Theme; onToggleTheme: () => void; onSignOut: () => void;
+}) {
+  const { user, navigate, onAuthError, drafts, openGroups } = useConsole();
+  const [collapsed, setCollapsed] = useState(() => readPref(COLLAPSE_KEY) === '1');
+  const [navOpen, setNavOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+
+  const can = (s: Section) => hasPermission(user.role, PERM[s]);
+  const active: Section = can(loc.section) ? loc.section : 'dashboard';
+  const params = useMemo(() => new URLSearchParams(loc.search), [loc.search]);
+  const fleetView = params.get('station') ? 'plant' : params.get('view') ?? 'overview';
+
+  // Global shortcuts: Ctrl/⌘+K palette, "/" focuses palette too when not typing.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const typing = /^(INPUT|TEXTAREA|SELECT)$/.test((e.target as HTMLElement)?.tagName ?? '') || (e.target as HTMLElement)?.isContentEditable;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPaletteOpen((o) => !o);
+      } else if (e.key === '/' && !typing) {
+        e.preventDefault();
+        setPaletteOpen(true);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  useEffect(() => setNavOpen(false), [loc]);
+
+  const pendingDrafts = (drafts ?? []).filter((d) => d.status === 'pending').length;
+  const criticalAlerts = openGroups.filter((g) => g.severity === 'critical').length;
+
+  const toggleCollapsed = () => {
+    setCollapsed((c) => {
+      writePref(COLLAPSE_KEY, c ? '0' : '1');
+      return !c;
+    });
   };
 
-  const items = NAV.filter((n) => hasPermission(user.role, n.perm));
-  // Guard: if the current section isn't permitted, show the first available one.
-  const active: Section = items.some((i) => i.key === section) ? section : items[0]?.key ?? 'dashboard';
-
-  const initials = (user.name || user.email || '?').trim().slice(0, 2).toUpperCase() || '?';
-
-  // The energy platform is a full-screen monitoring wall — it takes over the
-  // whole viewport (its own dark theme) instead of rendering inside the console.
+  // Full-screen control-room wall display.
   if (active === 'energy') {
     return (
-      <Suspense
-        fallback={
-          <div style={{ position: 'fixed', inset: 0, display: 'grid', placeItems: 'center', background: '#040c18', color: '#27d3ff', fontFamily: 'system-ui' }}>
-            Loading energy platform…
-          </div>
-        }
-      >
-        <EnergyDashboard onExit={() => setSection('dashboard')} onAuthError={onAuthError} />
+      <Suspense fallback={<div className="c-wall-loading">Loading control room…</div>}>
+        <EnergyDashboard onExit={() => navigate('map')} onAuthError={onAuthError} />
       </Suspense>
     );
   }
 
-  return (
-    <div className={`app-shell ${collapsed ? 'collapsed' : ''}`}>
-      <aside className="sidebar">
-        <div className="side-brand">
-          <div className="logo">TSBA</div>
-          <div className="side-brand-text">
-            <strong>TSBA Admin</strong>
-            <span className="side-sub">Support AI console</span>
-          </div>
-        </div>
+  const link = (s: Section, icon: IconName, label: string, badge?: { n: number; tone?: 'danger' | 'brand' }, search = '') =>
+    can(s) ? (
+      <a
+        href={pathForSection(s) + search}
+        className="c-nav-link"
+        aria-current={active === s && (s !== 'solar' || !search) ? 'page' : undefined}
+        title={collapsed ? label : undefined}
+        onClick={(e) => {
+          if (e.metaKey || e.ctrlKey || e.shiftKey) return;
+          e.preventDefault();
+          navigate(s, search);
+        }}
+      >
+        <Icon name={icon} />
+        <span className="c-nav-label">{label}</span>
+        {badge && badge.n > 0 && (
+          <span className={`c-nav-badge ${badge.tone ?? ''}`} aria-label={`${badge.n} ${label.toLowerCase()} pending`}>
+            {badge.n > 99 ? '99+' : badge.n}
+          </span>
+        )}
+      </a>
+    ) : null;
 
-        <nav className="side-nav" aria-label="Admin sections">
-          {items.map((n) => (
-            <button
-              key={n.key}
-              className={`side-link ${active === n.key ? 'active' : ''}`}
-              aria-current={active === n.key ? 'page' : undefined}
-              onClick={() => setSection(n.key)}
-              title={collapsed ? n.label : undefined}
-            >
-              <span className="side-ico" aria-hidden="true">{ICONS[n.key]}</span>
-              <span className="side-label">{n.label}</span>
-            </button>
-          ))}
+  const initials = (user.name || user.email || '?').trim().slice(0, 2).toUpperCase();
+  const fleetLabel = FLEET_VIEWS.find((v) => v.view === fleetView)?.label ?? (fleetView === 'plant' ? 'Plant' : '');
+
+  let body: ReactNode = null;
+  switch (active) {
+    case 'dashboard': body = <DashboardPage />; break;
+    case 'solar': body = <SolarTab search={loc.search} />; break;
+    case 'map': body = <MapPage />; break;
+    case 'connections':
+      body = (
+        <div className="c-stack">
+          <IntegrationsPanel />
+          <div className="col"><ConnectionsManager user={user} onAuthError={onAuthError} /></div>
+        </div>
+      );
+      break;
+    case 'knowledge': body = <KnowledgeTab user={user} onAuthError={onAuthError} />; break;
+    case 'ask': body = <><QueryList onAuthError={onAuthError} /><SupportChat onAuthError={onAuthError} floatingOnly /></>; break;
+    case 'drafts': body = <DraftsPage search={loc.search} />; break;
+    case 'voice': body = <VoiceAgent onAuthError={onAuthError} />; break;
+    case 'users': body = <div className="col"><UsersPanel me={user} onAuthError={onAuthError} /></div>; break;
+    case 'settings': body = <SettingsTab user={user} onAuthError={onAuthError} />; break;
+    case 'progress': body = <ProgressTab onAuthError={onAuthError} />; break;
+  }
+
+  return (
+    <div className={`c-shell ${collapsed ? 'collapsed' : ''} ${navOpen ? 'nav-open' : ''}`}>
+      <a href="#c-main" className="c-skip">Skip to content</a>
+      {navOpen && <div className="c-nav-scrim" onClick={() => setNavOpen(false)} aria-hidden="true" />}
+      <aside className="c-side" aria-label="Console navigation">
+        <div className="c-side-brand">
+          <img className="c-brand-full" src={theme === 'dark' ? logoDark : logoLight} alt="TSBA — Trusted Solar, Bigger Advantage" />
+          <img className="c-brand-mark" src={logoMark} alt="TSBA" />
+          <span className="c-brand-sub">Support AI console</span>
+        </div>
+        <nav aria-label="Sections">
+          <div className="c-nav-group">
+            <div className="c-nav-h">Monitor</div>
+            {link('dashboard', 'dashboard', 'Dashboard')}
+            {/* The critical-alert badge sits on Fleet only while its sub-menu is hidden; otherwise on Alerts. */}
+            {link('solar', 'fleet', 'Fleet', active === 'solar' && !collapsed ? undefined : { n: criticalAlerts, tone: 'danger' })}
+            {active === 'solar' && !collapsed && (
+              <div className="c-nav-sub">
+                {FLEET_VIEWS.map((v) => (
+                  <a key={v.view} href={`/solar${v.view === 'overview' ? '' : `?view=${v.view}`}`} className="c-nav-link"
+                    aria-current={fleetView === v.view ? 'page' : undefined}
+                    onClick={(e) => { e.preventDefault(); navigate('solar', v.view === 'overview' ? '' : `?view=${v.view}`); }}>
+                    <span className="c-nav-label">{v.label}</span>
+                    {v.view === 'alerts' && criticalAlerts > 0 && <span className="c-nav-badge danger">{criticalAlerts}</span>}
+                  </a>
+                ))}
+              </div>
+            )}
+            {link('map', 'map', 'Map')}
+          </div>
+          {(can('ask') || can('drafts')) && (
+            <div className="c-nav-group">
+              <div className="c-nav-h">Support</div>
+              {link('ask', 'inbox', 'Inbox')}
+              {link('drafts', 'drafts', 'Drafts & approvals', { n: pendingDrafts, tone: 'brand' })}
+              {link('voice', 'voice', 'Voice / chat agent')}
+            </div>
+          )}
+          <div className="c-nav-group">
+            <div className="c-nav-h">Knowledge</div>
+            {link('connections', 'link', 'Connections')}
+            {link('knowledge', 'book', 'Knowledge base')}
+          </div>
+          <div className="c-nav-group">
+            <div className="c-nav-h">Admin</div>
+            {link('users', 'users', 'Users & roles')}
+            {link('settings', 'settings', 'Settings')}
+          </div>
         </nav>
 
-        <button
-          type="button"
-          className="side-link side-theme"
-          onClick={toggleTheme}
-          aria-pressed={theme === 'dark'}
-          title={collapsed ? (theme === 'dark' ? 'Light mode' : 'Dark mode') : undefined}
-        >
-          <span className="side-ico" aria-hidden="true">
-            {theme === 'dark' ? (
-              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
-                strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="4.5" />
-                <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4" />
-              </svg>
-            ) : (
-              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
-                strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" />
-              </svg>
-            )}
-          </span>
-          <span className="side-label">{theme === 'dark' ? 'Light mode' : 'Dark mode'}</span>
-        </button>
-
+        <div className="c-side-foot">
+          <span className="c-side-ver">Every AI reply is human-approved</span>
+        </div>
       </aside>
+      <button type="button" className="c-edge-toggle" onClick={toggleCollapsed} aria-pressed={collapsed}
+        aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'} title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}>
+        <Icon name="chevron" size={14} className={collapsed ? undefined : 'flip'} />
+      </button>
 
-      <div className="content">
-        <header className="content-head">
-          <div className="head-main">
-            <button
-              type="button"
-              className="head-collapse"
-              onClick={toggleCollapsed}
-              aria-pressed={collapsed}
-              aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-              title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-            >
-              <span aria-hidden="true">{collapsed ? '»' : '«'}</span>
+      <div className="c-main">
+        <header className="c-top">
+          <button type="button" className="c-iconbtn c-mobilenav-btn" onClick={() => setNavOpen(true)} aria-label="Open navigation">
+            <Icon name="menu" />
+          </button>
+          <h1>
+            {TITLES[active]}
+            {active === 'solar' && fleetLabel && <span className="c-crumb"> / {fleetLabel}</span>}
+          </h1>
+          <div className="c-top-right">
+            <button type="button" className="c-topsearch" onClick={() => setPaletteOpen(true)} aria-label="Search (Ctrl+K)">
+              <Icon name="search" size={16} />
+              <span className="c-topsearch-t">Search plants, serials, drafts…</span>
+              <kbd>Ctrl K</kbd>
             </button>
-            <h1 className="head-title">{TITLES[active]}</h1>
-          </div>
-
-          <div className="head-right">
+            <button type="button" className="c-iconbtn bordered" onClick={onToggleTheme} aria-pressed={theme === 'dark'}
+              aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'} title={theme === 'dark' ? 'Light mode' : 'Dark mode'}>
+              <Icon name={theme === 'dark' ? 'sun' : 'moon'} />
+            </button>
             {hasPermission(user.role, 'view') && (
-              <NotificationBell onNavigate={(section) => setSection(section)} onAuthError={onAuthError} />
+              <NotificationBell onNavigate={(s) => navigate(s)} onAuthError={onAuthError} />
             )}
-            <div className="profile-menu">
-              <button
-                type="button"
-                className={`profile-trigger ${menuOpen ? 'open' : ''}`}
-                onClick={() => setMenuOpen((o) => !o)}
-                aria-haspopup="menu"
-                aria-expanded={menuOpen}
-              >
-                <span className="profile-avatar" aria-hidden="true">{initials}</span>
-                <span className="profile-id">
-                  <span className="profile-name">{user.name || user.email}</span>
-                  <span className="profile-role">{ROLE_LABELS[user.role]}</span>
+            <Menu
+              label="Account"
+              trigger={
+                <span className="c-acct">
+                  <span className="c-avatar" aria-hidden="true">{initials}</span>
+                  <span className="c-acct-id c-hide-sm">
+                    <strong>{user.name || user.email}</strong>
+                    <span>{ROLE_LABELS[user.role]}</span>
+                  </span>
+                  <Icon name="chevronDown" size={14} />
                 </span>
-                <span className="profile-caret" aria-hidden="true">▾</span>
-              </button>
-
-              {menuOpen && (
-                <>
-                  <button
-                    type="button"
-                    className="menu-backdrop"
-                    aria-label="Close menu"
-                    onClick={() => setMenuOpen(false)}
-                  />
-                  <div className="profile-dropdown" role="menu">
-                    <div className="profile-dropdown-head">
-                      <span className="profile-name">{user.name || 'Account'}</span>
-                      <span className="profile-email">{user.email}</span>
-                    </div>
-                    <button
-                      type="button"
-                      className="menu-item"
-                      role="menuitem"
-                      onClick={() => {
-                        setSection('settings');
-                        setMenuOpen(false);
-                      }}
-                    >
-                      <span className="menu-item-ico" aria-hidden="true">⚙️</span> Settings
-                    </button>
-                    <button type="button" className="menu-item" role="menuitem" onClick={signOut}>
-                      <span className="menu-item-ico" aria-hidden="true">⏻</span> Sign out
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
+              }
+              items={[
+                { label: 'Sign out', icon: 'logout', onSelect: onSignOut },
+              ]}
+            />
           </div>
         </header>
-
-        <div className="content-body">
-          <p className="page-lead">{SUBTITLES[active]}</p>
-          {active === 'dashboard' && <DashboardTab onAuthError={onAuthError} />}
-          {active === 'solar' && <SolarTab onAuthError={onAuthError} />}
-          {active === 'connections' && (
-            <div className="col">
-              <ConnectionsManager user={user} onAuthError={onAuthError} />
-            </div>
-          )}
-          {active === 'knowledge' && <KnowledgeTab user={user} onAuthError={onAuthError} />}
-          {active === 'ask' && hasPermission(user.role, 'ask') && (
-            <>
-              <QueryList onAuthError={onAuthError} />
-              <SupportChat onAuthError={onAuthError} floatingOnly />
-            </>
-          )}
-          {active === 'drafts' && hasPermission(user.role, 'ask') && <AskTab onAuthError={onAuthError} />}
-          {active === 'voice' && hasPermission(user.role, 'ask') && <VoiceAgent onAuthError={onAuthError} />}
-          {active === 'users' && hasPermission(user.role, 'manage_users') && (
-            <div className="col">
-              <UsersPanel me={user} onAuthError={onAuthError} />
-            </div>
-          )}
-          {active === 'settings' && <SettingsTab user={user} onAuthError={onAuthError} />}
-          {active === 'progress' && <ProgressTab onAuthError={onAuthError} />}
-        </div>
+        <main id="c-main" className="c-body content-body" tabIndex={-1}>
+          {body}
+        </main>
       </div>
+
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
     </div>
   );
 }

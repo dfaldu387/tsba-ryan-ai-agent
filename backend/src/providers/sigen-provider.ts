@@ -1,4 +1,5 @@
 import { sigenConfigured } from '../env.js';
+import { pickCoords } from './coords.js';
 import { listSystems, systemEnergyFlow, systemSummary } from '../sigen.js';
 import { cached } from './cache.js';
 import type { SigenEnergyFlow, SigenSummary, SigenSystem } from '../sigen.js';
@@ -66,6 +67,7 @@ function toStation(s: SigenSystem, flow: SigenEnergyFlow, summary: SigenSummary)
     capacityKw: s.pvCapacity,
     batterySoc: flow.batterySoc,
     location: s.addr,
+    ...pickCoords(s),
   };
 }
 

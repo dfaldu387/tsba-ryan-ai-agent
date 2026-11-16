@@ -19,6 +19,15 @@ function extractJson(text: string): unknown {
   return JSON.parse(candidate.slice(start, end + 1));
 }
 
+/** extractJson + coerceResult, or null when the text holds no usable draft JSON. */
+function tryParseDraft(text: string): DraftResult | null {
+  try {
+    return coerceResult(extractJson(text));
+  } catch {
+    return null;
+  }
+}
+
 function coerceResult(raw: unknown): DraftResult {
   if (typeof raw !== 'object' || raw === null) throw new Error('Model response was not an object');
   const r = raw as Record<string, unknown>;
@@ -383,22 +392,39 @@ export async function draftReply(
     },
   ];
 
-  // Agentic loop: when the draft agent is given live-data tools, let it read the
-  // monitoring platforms (same tools as the chat/voice agent) before composing
-  // the final JSON draft. Bounded so a misbehaving loop can't run away. Without
-  // tools this runs exactly once, preserving the original single-shot behaviour.
-  const MAX_TURNS = 5;
-  for (let i = 0; i < MAX_TURNS; i++) {
+  const textOf = (m: Anthropic.Message) =>
+    m.content
+      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n')
+      .trim();
+
+  const call = async (withTools: boolean) => {
     const message = await client.messages.create(
       {
         model: env.anthropicModel,
-        max_tokens: 1200,
+        // Room for a full reply + sources in JSON. Extended thinking is disabled:
+        // on the Claude 5 models it can otherwise consume the whole budget and
+        // return no text at all, which surfaced as "No JSON object in model response".
+        max_tokens: 2500,
+        thinking: { type: 'disabled' },
         messages,
-        ...(tools ? { tools } : {}),
+        ...(withTools && tools ? { tools } : {}),
       },
       { signal },
     );
     recordFromUsage('draft', env.anthropicModel, message.usage);
+    return message;
+  };
+
+  // Agentic loop: when the draft agent is given live-data tools, let it read the
+  // monitoring platforms (same tools as the chat/voice agent) before composing
+  // the final JSON draft. Bounded; the last turn is made without tools so the
+  // model must write the answer instead of calling another tool.
+  const MAX_TURNS = 5;
+  let finalText = '';
+  for (let i = 0; i < MAX_TURNS; i++) {
+    const message = await call(i < MAX_TURNS - 1);
 
     if (message.stop_reason === 'tool_use' && toolset) {
       messages.push({ role: 'assistant', content: message.content });
@@ -421,11 +447,38 @@ export async function draftReply(
       continue;
     }
 
-    const text = message.content
-      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-      .map((b) => b.text)
-      .join('\n');
-    return coerceResult(extractJson(text));
+    finalText = textOf(message);
+    const parsed = tryParseDraft(finalText);
+    if (parsed) return parsed;
+
+    // One repair turn: show the model what it wrote and ask for the JSON only.
+    if (finalText) messages.push({ role: 'assistant', content: finalText });
+    messages.push({
+      role: 'user',
+      content:
+        (finalText ? 'That response was not in the required format. ' : 'You returned no answer. ') +
+        'Reply now with ONLY the JSON object described in the instructions ' +
+        '({"outcome", "reply", "sources", "note_for_ryan", "team_handover"}) — no prose, no code fences.',
+    });
+    const repaired = await call(false);
+    const repairedText = textOf(repaired);
+    const fixed = tryParseDraft(repairedText);
+    if (fixed) return fixed;
+    finalText = repairedText || finalText;
+    break;
   }
-  throw new Error('Model returned an empty draft');
+
+  // Last resort: keep the model's prose as a draft that must be reviewed, rather
+  // than failing the whole request. It cites no sources, so the UI shows it as
+  // ungrounded and a human checks it before anything is sent.
+  if (finalText) {
+    return {
+      outcome: 'answer',
+      reply: finalText.replace(/^```(?:json)?\s*|```$/g, '').trim(),
+      sources: [],
+      note_for_ryan: 'The AI did not return a structured draft; this is its raw answer with no cited sources. Check it carefully before sending.',
+      team_handover: null,
+    };
+  }
+  throw new Error('The AI returned an empty draft. Try again, or rephrase the question.');
 }

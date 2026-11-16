@@ -1,4 +1,5 @@
 import { env, elekeeperConfigured } from '../env.js';
+import { pickCoords } from './coords.js';
 import {
   ProviderError,
   ProviderNotConfiguredError,
@@ -112,6 +113,7 @@ export const elekeeperProvider: SolarProvider = {
       monthlyEnergyKwh: p.monthEnergy,
       totalEnergyKwh: p.totalEnergy,
       location: p.plantAddress,
+      ...pickCoords(p),
     }));
   },
 

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import { AUTOMATED_RESPONSE_PREFIX, type Audience, type SourceCard } from '@tsba/shared';
 import {
   ApiError,
@@ -9,7 +9,10 @@ import {
   type VoiceAttachment,
   type VoiceChatMessage,
 } from '../api';
+import { Drawer, Icon, Menu, type MenuItem } from '../ui';
+import { useConsole } from '../lib/console';
 import { ApprovalCard } from './ApprovalCard';
+import './voice-agent.css';
 
 // Files the agent can read: images (vision) and PDFs (document input).
 const ACCEPT_TYPES = 'image/png,image/jpeg,image/gif,image/webp,application/pdf';
@@ -131,7 +134,7 @@ function ReplyText({ text }: { text: string }) {
     const rest = trimmed.slice(AUTOMATED_RESPONSE_PREFIX.length).trimStart();
     return (
       <>
-        <em className="auto-prefix">{AUTOMATED_RESPONSE_PREFIX}</em>
+        <em className="va-auto-prefix">{AUTOMATED_RESPONSE_PREFIX}</em>
         {rest ? (
           <>
             <br />
@@ -142,6 +145,83 @@ function ReplyText({ text }: { text: string }) {
     );
   }
   return <>{text}</>;
+}
+
+// ─── Needs-human-review heuristic ─────────────────────────────────────────────
+// There's no explicit "handover" flag on a chat reply, so infer it from the text:
+// the agent says it lacks the information / defers to the team, or it answered
+// without citing a single knowledge-base source.
+const REVIEW_PATTERNS: RegExp[] = [
+  /\b(?:don['’]t|do not|doesn['’]t|does not) have\b/i,
+  /\bnot (?:in|covered (?:in|by)|included in|part of) (?:the |our |tsba['’]s )?(?:knowledge|documentation|docs|manuals?|datasheets?)/i,
+  /\b(?:can['’]t|cannot|can not|unable to|couldn['’]t|could not) (?:confirm|find|verify|locate)\b/i,
+  /\bno (?:information|details|data|record)\b/i,
+  /\bteam will\b/i,
+  /\bcontact\b/i,
+  /\bnot sure\b/i,
+  /\bhand(?:ed|ing)? (?:this |it )?over\b/i,
+];
+
+function needsHumanReview(t: Turn): boolean {
+  if (t.type === 'approvals' || t.pending || !t.reply) return false;
+  if (!t.sources || t.sources.length === 0) return true;
+  const body = spokenText(t.reply);
+  return REVIEW_PATTERNS.some((re) => re.test(body));
+}
+
+// Per-answer thumbs up/down. There's no feedback API, so it lives in this
+// browser only, keyed by the message (timestamp + id survive reloads/archives).
+const VOICE_FEEDBACK_KEY = 'tsba.voice.feedback';
+type Feedback = 'up' | 'down';
+const feedbackKey = (t: Turn) => `${t.at ?? ''}#${t.id}`;
+
+function loadFeedback(): Record<string, Feedback> {
+  try {
+    const raw = localStorage.getItem(VOICE_FEEDBACK_KEY);
+    const parsed = raw ? (JSON.parse(raw) as unknown) : {};
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, Feedback>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveFeedback(map: Record<string, Feedback>): void {
+  try {
+    localStorage.setItem(VOICE_FEEDBACK_KEY, JSON.stringify(map));
+  } catch {
+    /* ignore */
+  }
+}
+
+type ReviewStatus = 'pending' | 'done';
+interface ReviewState {
+  drafts?: ReviewStatus;
+  flag?: ReviewStatus;
+}
+
+function SpeakerIcon({ on }: { on: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth={1.9}
+      strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      {on ? (
+        <rect x="6" y="6" width="12" height="12" rx="2" />
+      ) : (
+        <>
+          <path d="M11 5 6 9H2v6h4l5 4z" />
+          <path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14" />
+        </>
+      )}
+    </svg>
+  );
+}
+
+function PaperclipIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={1.9}
+      strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="m21.4 11.1-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5" />
+    </svg>
+  );
 }
 
 // Persist the conversation so it survives tab switches and reloads.
@@ -251,8 +331,16 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
   // Manual-entry fallback when speech recognition isn't available.
   const [typed, setTyped] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const [flagged, setFlagged] = useState<Record<number, 'pending' | 'done' | 'error'>>({});
+  // Per-answer "Send to drafts" / "Flag for team" progress, keyed by message.
+  const [review, setReview] = useState<Record<string, ReviewState>>({});
+  // Which answer has its inline "Flag for team" note form open, and the note.
+  const [flagFormId, setFlagFormId] = useState<string | null>(null);
+  const [flagNote, setFlagNote] = useState('');
+  const [feedback, setFeedback] = useState<Record<string, Feedback>>(loadFeedback);
   const [copiedId, setCopiedId] = useState<number | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const { toast, navigate, upsertDraft } = useConsole();
+  const uid = useId();
   // KB-grounded opening suggestions for an empty chat (generated, not hardcoded).
   const [starters, setStarters] = useState<string[]>([]);
   // Past conversations + the history popup.
@@ -283,7 +371,7 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
   const wantListeningRef = useRef(false);
   // Pending end-of-speech commit; reset on every new word, fires after SILENCE_MS.
   const silenceTimerRef = useRef<number | null>(null);
-  const logRef = useRef<HTMLDivElement>(null);
+  const firstScrollRef = useRef(true);
   const nextId = useRef(turns.reduce((m, t) => Math.max(m, t.id), 0) + 1);
 
   // Fetch KB-grounded opening suggestions once, for the empty-chat state.
@@ -343,10 +431,15 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
     };
   }, [synthSupported]);
 
-  // Keep the conversation scrolled to the latest turn.
+  // Keep the latest turn in view. The PAGE scrolls (no nested scroll area), so
+  // scroll the window to the end; the composer is sticky at the bottom.
   useEffect(() => {
-    logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: 'smooth' });
-  }, [turns, thinking]);
+    if (turns.length === 0) return;
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    const behavior: ScrollBehavior = firstScrollRef.current || reduce ? 'auto' : 'smooth';
+    firstScrollRef.current = false;
+    window.scrollTo({ top: document.documentElement.scrollHeight, behavior });
+  }, [turns.length, thinking]);
 
   // Stop everything on unmount.
   useEffect(() => {
@@ -554,22 +647,79 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
     try {
       await navigator.clipboard.writeText(turn.reply);
       setCopiedId(turn.id);
-      window.setTimeout(() => setCopiedId((id) => (id === turn.id ? null : id)), 1500);
+      window.setTimeout(() => setCopiedId((id) => (id === turn.id ? null : id)), 2000);
+      toast({ text: 'Answer copied to the clipboard', tone: 'success' });
     } catch {
-      setError('Couldn’t copy to the clipboard.');
+      toast({ text: 'Couldn’t copy to the clipboard', tone: 'danger' });
     }
   }
 
-  async function flagAnswer(turn: Turn) {
-    setFlagged((f) => ({ ...f, [turn.id]: 'pending' }));
+  function rate(turn: Turn, value: Feedback) {
+    const key = feedbackKey(turn);
+    const clearing = feedback[key] === value;
+    setFeedback((prev) => {
+      const next = { ...prev };
+      if (clearing) delete next[key];
+      else next[key] = value;
+      saveFeedback(next);
+      return next;
+    });
+    if (!clearing) toast({ text: 'Thanks for the feedback', tone: 'success' });
+  }
+
+  function setReviewStatus(id: string, kind: keyof ReviewState, status: ReviewStatus | undefined) {
+    setReview((r) => ({ ...r, [id]: { ...r[id], [kind]: status } }));
+  }
+
+  // Both actions create a team-review draft in Drafts & approvals — the only
+  // "send to drafts / flag" endpoint. They differ in the note attached.
+  async function submitForReview(turn: Turn, kind: keyof ReviewState, note: string) {
+    setReviewStatus(feedbackKey(turn), kind, 'pending');
     try {
-      await flagVoiceAnswer(turn.question, turn.reply, audience);
-      setFlagged((f) => ({ ...f, [turn.id]: 'done' }));
+      const draft = await flagVoiceAnswer(turn.question, turn.reply, audience, note);
+      upsertDraft(draft);
+      setReviewStatus(feedbackKey(turn), kind, 'done');
+      toast({
+        text: kind === 'drafts' ? 'Sent to Drafts & approvals' : 'Flagged for team review',
+        tone: 'success',
+        action: { label: 'Open drafts', run: () => navigate('drafts') },
+      });
+      return true;
     } catch (err) {
-      if (err instanceof AuthError) return onAuthError();
-      setFlagged((f) => ({ ...f, [turn.id]: 'error' }));
+      setReviewStatus(feedbackKey(turn), kind, undefined);
+      if (err instanceof AuthError) {
+        onAuthError();
+        return false;
+      }
+      toast({
+        text: kind === 'drafts' ? 'Couldn’t send that to drafts — please try again' : 'Couldn’t flag that — please try again',
+        tone: 'danger',
+      });
+      return false;
     }
   }
+
+  function sendToDrafts(turn: Turn) {
+    void submitForReview(turn, 'drafts', 'Sent to drafts from chat');
+  }
+
+  function openFlagForm(turn: Turn) {
+    setFlagNote('');
+    setFlagFormId(feedbackKey(turn));
+  }
+
+  async function submitFlag(turn: Turn) {
+    const extra = flagNote.trim();
+    const note = extra ? `Flagged for team from chat: ${extra}` : 'Flagged for team from chat';
+    const ok = await submitForReview(turn, 'flag', note);
+    if (ok) {
+      setFlagFormId(null);
+      setFlagNote('');
+    }
+  }
+
+  const closeHistory = useCallback(() => setShowHistory(false), []);
+  const closeSettings = useCallback(() => setShowSettings(false), []);
 
   async function ask(questionText: string) {
     const q = questionText.trim();
@@ -797,377 +947,577 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
     }
   }
 
+
+  function submitComposer() {
+    if (thinking) return;
+    const q = typed;
+    setTyped('');
+    void ask(q);
+  }
+
+  const isEmpty = turns.length === 0;
+  // Follow-up suggestions are only offered under the most recent answer.
+  const lastAnswered = [...turns].reverse().find((t) => t.type !== 'approvals' && !t.pending && t.reply);
+  const followUps = lastAnswered?.suggestions ?? [];
+
+  // Everything that used to crowd the toolbar lives in ONE overflow menu.
+  const menuItems: (MenuItem | 'sep')[] = [];
+  if (recognitionSupported) {
+    menuItems.push({
+      label: handsFree ? 'Stop hands-free conversation' : 'Start hands-free conversation',
+      icon: 'voice',
+      hint: handsFree ? 'On' : undefined,
+      onSelect: toggleHandsFree,
+    });
+  }
+  if (synthSupported) {
+    menuItems.push({
+      label: 'Read replies aloud',
+      icon: 'bell',
+      hint: autoSpeak ? 'On' : 'Off',
+      onSelect: () => setAutoSpeak(!autoSpeak),
+    });
+    menuItems.push({ label: 'Voice settings…', icon: 'settings', onSelect: () => setShowSettings(true) });
+  }
+  menuItems.push({
+    label: 'Conversation history',
+    icon: 'clock',
+    hint: history.length > 0 ? String(history.length) : undefined,
+    onSelect: () => {
+      setViewing(null);
+      setShowHistory(true);
+    },
+  });
+  menuItems.push('sep');
+  menuItems.push({ label: APPROVALS_PROMPT, icon: 'inbox', onSelect: showApprovals, disabled: thinking });
+
   return (
-    <div className="voice-page full">
-      {/* ── Conversation (agentic chat, full-width) ──────────────────────── */}
-      <section className="card voice-log-card jchat voice-full">
-        <div className="voice-head">
-          {/* Controls (who's asking + voice) + chat actions on one row. */}
-          <div className="voice-head-right">
-          <div className="voice-head-controls">
-            {synthSupported && (
-              <select
-                className="voice-select"
-                aria-label="Voice"
-                value={voiceName}
-                onChange={(e) => setVoiceName(e.target.value)}
-              >
-                {VOICE_OPTIONS.map((o) => (
-                  <option key={o.name} value={o.name}>
-                    {o.name} ({o.lang})
-                  </option>
-                ))}
-              </select>
-            )}
-
-            {synthSupported && (
-              <label className="voice-toggle">
-                <input type="checkbox" checked={autoSpeak} onChange={(e) => setAutoSpeak(e.target.checked)} />
-                <span>Speak aloud</span>
-              </label>
-            )}
-          </div>
-
-          <div className="voice-head-actions">
-            {recognitionSupported && (
-              <button
-                className={`jbtn-ghost hands-free-btn ${handsFree ? 'on' : ''}`}
-                type="button"
-                onClick={toggleHandsFree}
-                aria-pressed={handsFree}
-                title={
-                  handsFree
-                    ? 'Stop the hands-free voice conversation'
-                    : 'Start a hands-free voice conversation (speak, listen, repeat)'
-                }
-              >
-                {handsFree ? (
-                  <>
-                    <span className="hf-dot" aria-hidden="true" /> Stop hands-free
-                  </>
-                ) : (
-                  <>🎙 Hands-free</>
-                )}
-              </button>
-            )}
-            {speakingId != null && (
-              <button className="jbtn-ghost" type="button" onClick={stopSpeaking}>
-                ■ Stop speaking
-              </button>
-            )}
-            <button
-              className="jbtn-ghost"
-              type="button"
-              onClick={showApprovals}
-              disabled={thinking}
-              title="Show replies awaiting approval"
-            >
-              ⚑ Approvals
-            </button>
-            <button
-              className="jbtn-ghost"
-              type="button"
-              onClick={() => {
-                setViewing(null);
-                setShowHistory(true);
-              }}
-              title="Browse past conversations"
-            >
-              🕑 History{history.length > 0 ? ` (${history.length})` : ''}
-            </button>
-            <button
-              className="jbtn-ghost"
-              type="button"
-              onClick={clearChat}
-              disabled={thinking || turns.length === 0}
-              title="Start a new conversation"
-            >
-              + New chat
-            </button>
-          </div>
-          </div>
-        </div>
-
-        {showHistory && (
-          <div className="chat-history">
-            <button
-              type="button"
-              className="chat-history-backdrop"
-              aria-label="Close history"
-              onClick={() => setShowHistory(false)}
-            />
-            <div className="chat-history-panel" role="dialog" aria-label="Conversation history">
-              <div className="chat-history-head">
-                <h3>{viewing ? 'Conversation' : 'Conversation history'}</h3>
-                <button type="button" className="chat-history-close" onClick={() => setShowHistory(false)} aria-label="Close">
-                  ✕
-                </button>
-              </div>
-
-              {viewing ? (
-                <div className="chat-history-body">
-                  <button type="button" className="jbtn-ghost" onClick={() => setViewing(null)}>← Back to list</button>
-                  <div className="chat-history-transcript">
-                    {viewing.turns.map((t) => (
-                      <div key={t.id} className="chat-history-turn">
-                        <p className="chat-history-q"><b>You:</b> {t.question}</p>
-                        <p className="chat-history-a"><ReplyText text={t.reply} /></p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : history.length === 0 ? (
-                <div className="chat-history-body">
-                  <p className="empty">No past conversations yet. They’re saved here when you start a new chat.</p>
-                </div>
-              ) : (
-                <ul className="chat-history-list">
-                  {history.map((s) => (
-                    <li key={s.id}>
-                      <button
-                        type="button"
-                        className="chat-history-item"
-                        onClick={() => resumeSession(s)}
-                        title="Open and continue this conversation"
-                      >
-                        <span className="chat-history-title">{s.title || '(untitled)'}</span>
-                        <span className="chat-history-meta">{formatDate(s.at)} · {s.turns.length} message{s.turns.length === 1 ? '' : 's'}</span>
-                      </button>
-                      <button type="button" className="chat-history-del" onClick={() => deleteSession(s.id)} aria-label="Delete conversation" title="Delete">
-                        🗑
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </div>
-        )}
-
-        <div className="voice-log jlog" ref={logRef}>
-          {turns.length === 0 && !thinking && (
-            <div className="jempty">
-              <div className="javatar big" aria-hidden="true">AI</div>
-              <p className="jempty-lead">Good day. Ask me anything about the inverters in TSBA’s knowledge base, or say what you need.</p>
-            </div>
+    <div className="va">
+      {/* ── Slim toolbar: status on the left, New chat + overflow on the right ── */}
+      <header className="va-bar">
+        <div className="va-bar-status">
+          {handsFree ? (
+            <span className="c-pill t-brand">
+              <span className="va-live-dot" aria-hidden="true" />
+              Hands-free on
+            </span>
+          ) : (
+            <span className="va-bar-hint">Grounded in TSBA manuals, warranties and datasheets</span>
           )}
+          {speakingId != null && (
+            <button type="button" className="c-btn sm" onClick={stopSpeaking}>
+              <SpeakerIcon on />
+              Stop speaking
+            </button>
+          )}
+        </div>
+        <div className="va-bar-actions">
+          {handsFree && (
+            <button type="button" className="c-btn sm" onClick={stopHandsFree}>
+              Stop hands-free
+            </button>
+          )}
+          <button
+            type="button"
+            className="c-btn sm"
+            onClick={clearChat}
+            disabled={thinking || isEmpty}
+            title="Archive this conversation and start a new one"
+          >
+            <Icon name="plus" size={16} />
+            New chat
+          </button>
+          <Menu label="Chat options" items={menuItems} />
+        </div>
+      </header>
 
-          {turns.map((t) => (
-            <div key={t.id} className="jturn">
+      {/* ── Empty state: starter questions only when there's no conversation ── */}
+      {isEmpty && !thinking && (
+        <section className="va-empty" aria-labelledby={`${uid}-empty`}>
+          <span className="va-empty-ico" aria-hidden="true">
+            <Icon name="ai" size={22} />
+          </span>
+          <h2 id={`${uid}-empty`}>Ask about TSBA’s products</h2>
+          <p>
+            Answers come from TSBA’s manuals, warranties and datasheets. Type a question, attach a photo or
+            PDF{recognitionSupported ? ', or tap the mic to speak' : ''}.
+          </p>
+          {starters.length > 0 && (
+            <>
+              <h3 className="va-empty-sub">Try asking</h3>
+              <ul className="va-starters">
+                {starters.map((p) => (
+                  <li key={p}>
+                    <button type="button" className="va-starter" onClick={() => handleStarter(p)} disabled={thinking}>
+                      <span>{p}</span>
+                      <Icon name="chevron" size={16} />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </section>
+      )}
+
+      {/* ── Conversation: the page scrolls, not this element ─────────────── */}
+      <div
+        className="va-log"
+        role="log"
+        aria-live="polite"
+        aria-relevant="additions text"
+        aria-label="Conversation with the agent"
+        aria-busy={thinking}
+      >
+        {turns.map((t) => {
+          const key = feedbackKey(t);
+          const rv = review[key] ?? {};
+          const fb = feedback[key];
+          const needsReview = needsHumanReview(t);
+          const flagOpen = flagFormId === key && rv.flag !== 'done';
+          const busy = rv.drafts === 'pending' || rv.flag === 'pending';
+          const noteId = `${uid}-note-${t.id}`;
+          return (
+            <article key={t.id} className="va-turn">
               {t.type !== 'approvals' && (
-                <div className="jmsg user">
-                  <div className="jbubble user">
+                <div className="va-q">
+                  <div className="va-q-bubble">
+                    <span className="c-sr">You asked: </span>
                     <p>{t.question}</p>
                     {t.attachments && t.attachments.length > 0 && (
-                      <div className="bubble-attachments">
+                      <ul className="va-q-files" aria-label="Attached files">
                         {t.attachments.map((name, i) => (
-                          <span key={i} className="bubble-attachment" title={name}>📎 {name}</span>
+                          <li key={i} title={name}>
+                            <PaperclipIcon />
+                            <span>{name}</span>
+                          </li>
                         ))}
-                      </div>
+                      </ul>
                     )}
                   </div>
                 </div>
               )}
 
-              <div className="jmsg agent">
-                <div className="javatar" aria-hidden="true">AI</div>
-                <div className="jagent-body">
-                  <span className="jeyebrow">{t.type === 'approvals' ? 'Awaiting approval' : 'Agent'}</span>
+              <div className="va-a">
+                <span className="va-avatar" aria-hidden="true">
+                  <Icon name="ai" size={16} />
+                </span>
+                <div className="va-a-body">
+                  <div className="va-a-head">
+                    <strong>{t.type === 'approvals' ? 'Awaiting your approval' : 'TSBA agent'}</strong>
+                    {t.at && (
+                      <time className="va-time" dateTime={t.at}>
+                        {formatTime(t.at)}
+                      </time>
+                    )}
+                  </div>
 
                   {t.type === 'approvals' ? (
                     <ApprovalCard onAuthError={onAuthError} />
                   ) : t.pending ? (
-                    <div className="thinking">
-                      <span className="spin" aria-hidden="true" />
-                      <span>Reading TSBA&rsquo;s knowledge and answering…</span>
+                    <div className="va-thinking">
+                      <span className="va-spin" aria-hidden="true" />
+                      <span>Reading TSBA’s knowledge and answering…</span>
                     </div>
                   ) : (
                     <>
-                      <div className="jcard">
-                        <p className="jreply"><ReplyText text={t.reply} /></p>
-                        {t.sources && t.sources.length > 0 && (
-                          <div className="jsources">
-                            <span className="jsources-label">Grounded in</span>
-                            <div className="jsource-chips">
-                              {t.sources.map((s) => (
-                                <span key={s.id} className="jsource-chip" title={s.source}>{s.title}</span>
-                              ))}
-                            </div>
-                          </div>
-                        )}
+                      <div className="va-reply">
+                        <ReplyText text={t.reply} />
                       </div>
 
-                      <div className="jmeta">
-                        <button type="button" className="jmeta-btn" onClick={() => void copyReply(t)}>
-                          {copiedId === t.id ? '✓ Copied' : '⧉ Copy'}
+                      {needsReview && (
+                        <div className="va-review" role="note">
+                          <Icon name="alert" size={18} />
+                          <div className="va-review-text">
+                            <strong>Human review required</strong>
+                            <span>The agent didn’t find this in the knowledge base.</span>
+                          </div>
+                          {rv.flag === 'done' ? (
+                            <span className="c-pill t-success">
+                              <Icon name="check" size={14} />
+                              Flagged
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              className="c-btn sm primary"
+                              onClick={() => openFlagForm(t)}
+                              disabled={busy || flagOpen}
+                              aria-controls={flagOpen ? noteId : undefined}
+                            >
+                              <Icon name="flag" size={16} />
+                              Flag for team
+                            </button>
+                          )}
+                        </div>
+                      )}
+
+                      {t.sources && t.sources.length > 0 && (
+                        <details className="va-sources">
+                          <summary>
+                            <Icon name="chevron" size={14} className="va-chev" />
+                            Sources <span className="va-num">({t.sources.length})</span>
+                          </summary>
+                          <ul>
+                            {t.sources.map((s) => (
+                              <li key={s.id}>
+                                <span className="va-src-title">{s.title}</span>
+                                {s.source && s.source !== s.title && <span className="va-src-file">{s.source}</span>}
+                              </li>
+                            ))}
+                          </ul>
+                        </details>
+                      )}
+
+                      <div className="va-actions" role="group" aria-label="Answer actions">
+                        <button
+                          type="button"
+                          className={`va-act icon ${fb === 'up' ? 'on' : ''}`}
+                          onClick={() => rate(t, 'up')}
+                          aria-pressed={fb === 'up'}
+                          aria-label="Helpful answer"
+                          title="Helpful"
+                        >
+                          <Icon name="thumbUp" size={16} />
+                        </button>
+                        <button
+                          type="button"
+                          className={`va-act icon ${fb === 'down' ? 'on' : ''}`}
+                          onClick={() => rate(t, 'down')}
+                          aria-pressed={fb === 'down'}
+                          aria-label="Not helpful"
+                          title="Not helpful"
+                        >
+                          <Icon name="thumbDown" size={16} />
+                        </button>
+                        <button
+                          type="button"
+                          className="va-act icon"
+                          onClick={() => void copyReply(t)}
+                          aria-label={copiedId === t.id ? 'Answer copied' : 'Copy answer'}
+                          title={copiedId === t.id ? 'Copied' : 'Copy'}
+                        >
+                          <Icon name={copiedId === t.id ? 'check' : 'copy'} size={16} />
                         </button>
                         {synthSupported && (
                           <button
                             type="button"
-                            className="jmeta-btn"
+                            className={`va-act icon ${speakingId === t.id ? 'on' : ''}`}
                             onClick={() => (speakingId === t.id ? stopSpeaking() : speak(t))}
+                            aria-label={speakingId === t.id ? 'Stop reading aloud' : 'Read answer aloud'}
+                            title={speakingId === t.id ? 'Stop' : 'Listen'}
                           >
-                            {speakingId === t.id ? '■ Stop' : '🔊 Listen'}
+                            <SpeakerIcon on={speakingId === t.id} />
                           </button>
                         )}
+                        <span className="va-act-sep" aria-hidden="true" />
                         <button
                           type="button"
-                          className="jmeta-btn flag"
-                          onClick={() => void flagAnswer(t)}
-                          disabled={flagged[t.id] === 'pending' || flagged[t.id] === 'done'}
+                          className={`va-act ${rv.drafts === 'done' ? 'done' : ''}`}
+                          onClick={() => sendToDrafts(t)}
+                          disabled={busy || rv.drafts === 'done'}
                         >
-                          {flagged[t.id] === 'done'
-                            ? '✓ Flagged for team'
-                            : flagged[t.id] === 'pending'
-                              ? 'Flagging…'
-                              : '⚑ Flag for team'}
+                          <Icon name={rv.drafts === 'done' ? 'check' : 'drafts'} size={16} />
+                          <span>
+                            {rv.drafts === 'done' ? 'In drafts' : rv.drafts === 'pending' ? 'Sending…' : 'Send to drafts'}
+                          </span>
                         </button>
-                        {t.at && <span className="jmeta-time">{formatTime(t.at)}</span>}
+                        <button
+                          type="button"
+                          className={`va-act ${rv.flag === 'done' ? 'done' : ''}`}
+                          onClick={() => (flagOpen ? setFlagFormId(null) : openFlagForm(t))}
+                          disabled={busy || rv.flag === 'done'}
+                          aria-expanded={rv.flag === 'done' ? undefined : flagOpen}
+                          aria-controls={flagOpen ? noteId : undefined}
+                        >
+                          <Icon name={rv.flag === 'done' ? 'check' : 'flag'} size={16} />
+                          <span>
+                            {rv.flag === 'done' ? 'Flagged' : rv.flag === 'pending' ? 'Flagging…' : 'Flag for team'}
+                          </span>
+                        </button>
                       </div>
-                      {flagged[t.id] === 'error' && (
-                        <span className="err" role="status">Couldn’t flag that — please try again.</span>
+
+                      {flagOpen && (
+                        <form
+                          className="va-flagform"
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            void submitFlag(t);
+                          }}
+                        >
+                          <label htmlFor={noteId}>
+                            Note for the team <span>(optional)</span>
+                          </label>
+                          <input
+                            id={noteId}
+                            className="c-input"
+                            value={flagNote}
+                            onChange={(e) => setFlagNote(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Escape') setFlagFormId(null);
+                            }}
+                            maxLength={280}
+                            placeholder="What should the team check?"
+                            autoFocus
+                            disabled={rv.flag === 'pending'}
+                          />
+                          <div className="va-flagform-actions">
+                            <button type="submit" className="c-btn sm primary" disabled={rv.flag === 'pending'}>
+                              <Icon name="flag" size={16} />
+                              {rv.flag === 'pending' ? 'Flagging…' : 'Flag for team'}
+                            </button>
+                            <button
+                              type="button"
+                              className="c-btn sm ghost"
+                              onClick={() => setFlagFormId(null)}
+                              disabled={rv.flag === 'pending'}
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </form>
+                      )}
+
+                      {t === lastAnswered && followUps.length > 0 && (
+                        <div className="va-followups" role="group" aria-label="Suggested follow-up questions">
+                          {followUps.map((p) => (
+                            <button
+                              key={p}
+                              type="button"
+                              className="va-followup"
+                              onClick={() => handleStarter(p)}
+                              disabled={thinking}
+                            >
+                              {p}
+                            </button>
+                          ))}
+                        </div>
                       )}
                     </>
                   )}
                 </div>
               </div>
-            </div>
-          ))}
-        </div>
-
-        {/* Suggested prompts — all generated: KB-grounded starters when empty,
-            follow-ups from the latest answer once the chat is going. */}
-        {(() => {
-          const last = [...turns].reverse().find((t) => t.type !== 'approvals' && !t.pending && t.suggestions);
-          const dynamic = last?.suggestions ?? [];
-          const chips = dynamic.length > 0 ? dynamic : starters;
-          if (chips.length === 0) return null;
-          return (
-            <div className="jsuggest">
-              {chips.map((p) => (
-                <button key={p} type="button" className="jchip" onClick={() => handleStarter(p)} disabled={thinking}>
-                  {p}
-                </button>
-              ))}
-            </div>
+            </article>
           );
-        })()}
+        })}
+      </div>
 
-        {attachments.length > 0 && (
-          <div className="composer-attachments">
-            {attachments.map((a, i) => (
-              <span key={i} className="composer-chip" title={a.name}>
-                <span className="composer-chip-ico" aria-hidden="true">
-                  {a.mediaType === 'application/pdf' ? '📄' : '🖼️'}
-                </span>
-                <span className="composer-chip-name">{a.name}</span>
-                <button
-                  type="button"
-                  className="composer-chip-x"
-                  onClick={() => removeAttachment(i)}
-                  aria-label={`Remove ${a.name}`}
-                  disabled={thinking}
-                >
-                  ✕
-                </button>
-              </span>
-            ))}
+      {/* ── Composer: sticky to the bottom of the viewport ───────────────── */}
+      <div className="va-dock">
+        {error && (
+          <div className="va-error" role="alert">
+            <Icon name="alert" size={16} />
+            <span>{error}</span>
+            <button type="button" className="c-iconbtn" onClick={() => setError('')} aria-label="Dismiss error">
+              <Icon name="x" size={16} />
+            </button>
           </div>
         )}
 
         {(listening || interim) && (
-          <div className="composer-listening" aria-live="polite">
-            <span className="listening-dot" aria-hidden="true" />
+          <div className="va-listening" aria-live="polite">
+            <span className="va-live-dot" aria-hidden="true" />
             <span>{interim || 'Listening…'}</span>
           </div>
         )}
-        {error && (
-          <span className="err" role="status" style={{ marginTop: 10 }}>
-            {error}
-          </span>
-        )}
 
         <form
-          className="voice-composer"
+          className="va-composer"
           onSubmit={(e) => {
             e.preventDefault();
-            const q = typed;
-            setTyped('');
-            void ask(q);
+            submitComposer();
           }}
         >
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept={ACCEPT_TYPES}
-            multiple
-            hidden
-            onChange={(e) => void addFiles(e.target.files)}
-          />
-          <button
-            type="button"
-            className="composer-icon-btn"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={thinking || attachments.length >= MAX_ATTACHMENTS}
-            aria-label="Attach files"
-            title="Attach images or PDFs"
-          >
-            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"
-              strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <line x1="12" y1="5" x2="12" y2="19" />
-              <line x1="5" y1="12" x2="19" y2="12" />
-            </svg>
-          </button>
-          <textarea
-            ref={taRef}
-            className="voice-input"
-            rows={1}
-            value={typed}
-            onChange={(e) => setTyped(e.target.value)}
-            onKeyDown={onComposerKey}
-            placeholder="Ask the agent anything, or say what you need…"
-            disabled={thinking}
-            aria-label="Type a message to the agent"
-          />
-          {recognitionSupported && (
+          {attachments.length > 0 && (
+            <ul className="va-files" aria-label="Files to send">
+              {attachments.map((a, i) => (
+                <li key={i} className="va-file" title={a.name}>
+                  <Icon name={a.mediaType === 'application/pdf' ? 'doc' : 'monitor'} size={14} />
+                  <span className="va-file-name">{a.name}</span>
+                  <button
+                    type="button"
+                    className="va-file-x"
+                    onClick={() => removeAttachment(i)}
+                    aria-label={`Remove ${a.name}`}
+                    disabled={thinking}
+                  >
+                    <Icon name="x" size={14} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="va-composer-row">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept={ACCEPT_TYPES}
+              multiple
+              hidden
+              onChange={(e) => void addFiles(e.target.files)}
+            />
             <button
               type="button"
-              className={`composer-icon-btn ${listening ? 'listening' : ''}`}
-              onClick={toggleMic}
-              disabled={thinking}
-              aria-pressed={listening}
-              aria-label={listening ? 'Stop listening' : 'Speak your message'}
-              title={listening ? 'Stop listening' : 'Speak'}
+              className="c-iconbtn"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={thinking || attachments.length >= MAX_ATTACHMENTS}
+              aria-label="Attach images or PDFs"
+              title="Attach images or PDFs"
             >
-              <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
-                strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <rect x="9" y="2" width="6" height="12" rx="3" />
-                <path d="M5 10v2a7 7 0 0 0 14 0v-2" />
-                <line x1="12" y1="19" x2="12" y2="22" />
-                <line x1="8" y1="22" x2="16" y2="22" />
-              </svg>
+              <PaperclipIcon />
             </button>
-          )}
-          <button
-            className="composer-icon-btn send"
-            type="submit"
-            disabled={thinking || (!typed.trim() && attachments.length === 0)}
-            aria-label={thinking ? 'Sending' : 'Send message'}
-            title="Send"
-          >
-            {thinking ? (
-              <span className="spin" aria-hidden="true" />
-            ) : (
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
-                strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <line x1="22" y1="2" x2="11" y2="13" />
-                <polygon points="22 2 15 22 11 13 2 9 22 2" />
-              </svg>
+            <textarea
+              ref={taRef}
+              className="va-input"
+              rows={1}
+              value={typed}
+              onChange={(e) => setTyped(e.target.value)}
+              onKeyDown={onComposerKey}
+              placeholder="Ask about a product, fault or warranty…"
+              disabled={thinking}
+              aria-label="Message the agent"
+            />
+            {recognitionSupported && (
+              <button
+                type="button"
+                className={`va-mic ${listening ? 'on' : ''}`}
+                onClick={toggleMic}
+                disabled={thinking}
+                aria-pressed={listening}
+                aria-label={listening ? 'Stop listening' : 'Speak your question'}
+                title={listening ? 'Stop listening' : 'Speak'}
+              >
+                <Icon name="voice" size={20} />
+              </button>
             )}
-          </button>
+            <button
+              className="va-send"
+              type="submit"
+              disabled={thinking || (!typed.trim() && attachments.length === 0)}
+              aria-label={thinking ? 'Sending' : 'Send message'}
+              title="Send"
+            >
+              {thinking ? <span className="va-spin" aria-hidden="true" /> : <Icon name="send" size={18} />}
+            </button>
+          </div>
         </form>
-        <p className="composer-hint">Enter to send · Shift+Enter for a new line</p>
-      </section>
+        <p className="va-hint">Enter to send · Shift+Enter for a new line</p>
+      </div>
+
+      {/* ── Conversation history ─────────────────────────────────────────── */}
+      <Drawer
+        open={showHistory}
+        onClose={closeHistory}
+        title={viewing ? 'Conversation' : 'Conversation history'}
+        sub={viewing ? formatDate(viewing.at) : 'Saved here when you start a new chat'}
+        footer={
+          viewing ? (
+            <>
+              <button type="button" className="c-btn primary" onClick={() => resumeSession(viewing)}>
+                Continue this conversation
+              </button>
+              <button type="button" className="c-btn ghost" onClick={() => setViewing(null)}>
+                Back to list
+              </button>
+            </>
+          ) : undefined
+        }
+      >
+        {viewing ? (
+          <div className="va-hist-transcript">
+            {viewing.turns.map((t) => (
+              <div key={t.id} className="va-hist-turn">
+                <p className="va-hist-q">{t.question}</p>
+                <p className="va-hist-a">
+                  <ReplyText text={t.reply} />
+                </p>
+              </div>
+            ))}
+          </div>
+        ) : history.length === 0 ? (
+          <p className="va-muted">No past conversations yet.</p>
+        ) : (
+          <ul className="va-hist-list">
+            {history.map((s) => (
+              <li key={s.id}>
+                <button
+                  type="button"
+                  className="va-hist-item"
+                  onClick={() => resumeSession(s)}
+                  title="Open and continue this conversation"
+                >
+                  <span className="va-hist-title">{s.title || '(untitled)'}</span>
+                  <span className="va-hist-meta">
+                    {formatDate(s.at)} · <span className="va-num">{s.turns.length}</span> message
+                    {s.turns.length === 1 ? '' : 's'}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="c-iconbtn"
+                  onClick={() => setViewing(s)}
+                  aria-label={`Preview “${s.title || 'untitled'}”`}
+                  title="Preview"
+                >
+                  <Icon name="doc" size={16} />
+                </button>
+                <button
+                  type="button"
+                  className="c-iconbtn va-hist-del"
+                  onClick={() => deleteSession(s.id)}
+                  aria-label={`Delete “${s.title || 'untitled'}”`}
+                  title="Delete"
+                >
+                  <Icon name="x" size={16} />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Drawer>
+
+      {/* ── Voice & reply settings ───────────────────────────────────────── */}
+      <Drawer open={showSettings} onClose={closeSettings} title="Voice settings" sub="Applies to this browser tab">
+        <label className="va-check">
+          <input type="checkbox" checked={autoSpeak} onChange={(e) => setAutoSpeak(e.target.checked)} />
+          <span>
+            <strong>Read replies aloud</strong>
+            <span className="va-muted">Speak each answer as it arrives (always on in hands-free).</span>
+          </span>
+        </label>
+        <div className="va-field">
+          <label htmlFor={`${uid}-voice`}>Voice</label>
+          <select
+            id={`${uid}-voice`}
+            className="c-select"
+            value={voiceName}
+            onChange={(e) => setVoiceName(e.target.value)}
+          >
+            {VOICE_OPTIONS.map((o) => (
+              <option key={o.name} value={o.name}>
+                {o.name} ({o.lang})
+              </option>
+            ))}
+          </select>
+          <span className="va-muted">If a voice isn’t installed on this device, the closest local English voice is used.</span>
+        </div>
+        {recognitionSupported && (
+          <div className="va-field">
+            <span className="va-field-label">Hands-free conversation</span>
+            <span className="va-muted">Listen, answer, speak, then listen again — no buttons needed.</span>
+            <div>
+              <button type="button" className={`c-btn sm ${handsFree ? '' : 'primary'}`} onClick={toggleHandsFree}>
+                <Icon name="voice" size={16} />
+                {handsFree ? 'Stop hands-free' : 'Start hands-free'}
+              </button>
+            </div>
+          </div>
+        )}
+        <div className="va-field">
+          <span className="va-field-label">Answers written for</span>
+          <span>{audience === 'installer' ? 'Installers' : audience}</span>
+        </div>
+      </Drawer>
     </div>
   );
 }

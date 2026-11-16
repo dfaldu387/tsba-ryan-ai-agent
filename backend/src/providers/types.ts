@@ -37,6 +37,9 @@ export interface NormalizedStation {
    *  plant's own location rather than a single fleet reference point. */
   lat?: number;
   lng?: number;
+  /** Where lat/lng came from: an admin-set pin, the platform itself, or the
+   *  geocoded address at house / street (road midpoint) / suburb precision. */
+  locationSource?: 'manual' | 'provider' | 'house' | 'street' | 'suburb';
   /** Last data update, epoch seconds. */
   lastUpdate?: number;
 }

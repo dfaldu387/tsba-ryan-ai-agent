@@ -1,0 +1,339 @@
+/* ══ Voice / chat agent (namespace `va-`) ══════════════════════════════════════
+   The PAGE scrolls — there is no nested scroll area. The composer dock is
+   sticky to the bottom of the viewport. Built on the console tokens: brand teal
+   for actions, status colours only for status (the "needs review" banner). */
+
+.va {
+  --va-dock-h: 132px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  width: 100%;
+  max-width: 920px;
+  margin: 0 auto;
+  /* Fill the viewport below the 56px top bar so the dock sits at the bottom
+     even when the chat is empty; eat .c-body's bottom padding so the dock can
+     reach the viewport edge. */
+  min-height: calc(100vh - 56px - var(--sp-5));
+  min-height: calc(100dvh - 56px - var(--sp-5));
+  margin-bottom: calc(-1 * var(--sp-7));
+  font-family: inherit;
+  font-variant-numeric: tabular-nums;
+}
+/* Keyboard focus must never land under the sticky composer. */
+html:has(.va) { scroll-padding-bottom: calc(var(--va-dock-h) + var(--sp-4)); }
+
+.va-num, .va-time { font-variant-numeric: tabular-nums; }
+.va-muted { color: var(--muted); font-size: 13.5px; line-height: 1.5; }
+
+/* ── Toolbar ──────────────────────────────────────────────────────────────── */
+.va-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2) var(--sp-3);
+  flex-wrap: wrap;
+  padding-bottom: var(--sp-3);
+  border-bottom: 1px solid var(--line);
+}
+.va-bar-status { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; min-width: 0; flex: 1 1 220px; }
+.va-bar-hint { color: var(--muted); font-size: 13.5px; }
+.va-bar-actions { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-left: auto; }
+.va-bar .c-btn svg, .va .c-btn svg { flex: none; }
+.va .c-btn { display: inline-flex; align-items: center; gap: 6px; }
+
+.va-live-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: var(--brand);
+  animation: va-blink 1.2s ease-in-out infinite;
+}
+.c-pill .va-live-dot { background: currentColor; }
+@keyframes va-blink { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+
+/* ── Empty state ──────────────────────────────────────────────────────────── */
+.va-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--sp-2);
+  padding: var(--sp-6) var(--sp-2) var(--sp-4);
+  margin: auto 0;
+}
+.va-empty-ico {
+  display: grid; place-items: center; width: 48px; height: 48px; border-radius: 50%;
+  background: var(--brand-soft); color: var(--brand-strong); margin-bottom: var(--sp-1);
+}
+.va-empty h2 { font-size: 20px; font-weight: 700; letter-spacing: -0.01em; color: var(--ink); margin: 0; }
+.va-empty p { color: var(--muted); font-size: 14.5px; line-height: 1.6; max-width: 52ch; margin: 0; }
+.va-empty-sub { margin: var(--sp-4) 0 0; font-size: 14px; font-weight: 600; color: var(--ink); }
+.va-starters {
+  list-style: none; margin: 0; padding: 0;
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-2);
+  width: 100%; max-width: 720px; text-align: left;
+}
+.va-starter {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2);
+  width: 100%; height: 100%; min-height: 48px; padding: 10px 12px 10px 14px;
+  border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface);
+  color: var(--ink); font: inherit; font-size: 14px; line-height: 1.4; text-align: left; cursor: pointer;
+  transition: border-color .12s, background .12s;
+}
+.va-starter svg { color: var(--muted); flex: none; }
+.va-starter:hover:not(:disabled) { border-color: var(--brand); background: var(--brand-soft); }
+.va-starter:hover:not(:disabled) svg { color: var(--brand-strong); }
+.va-starter:disabled { opacity: .5; cursor: default; }
+
+/* ── Conversation log ─────────────────────────────────────────────────────── */
+.va-log { display: flex; flex-direction: column; gap: var(--sp-5); flex: none; }
+.va-turn { display: flex; flex-direction: column; gap: var(--sp-3); }
+
+.va-q { display: flex; justify-content: flex-end; }
+.va-q-bubble {
+  max-width: min(78%, 620px);
+  padding: 10px 14px;
+  border-radius: var(--r-lg) var(--r-lg) var(--r-sm) var(--r-lg);
+  background: var(--brand-soft);
+  color: var(--ink);
+  border: 1px solid color-mix(in srgb, var(--brand) 22%, transparent);
+}
+.va-q-bubble p { margin: 0; white-space: pre-wrap; line-height: 1.55; font-size: 15px; overflow-wrap: anywhere; }
+.va-q-files { list-style: none; margin: var(--sp-2) 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.va-q-files li {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
+  font-size: 12.5px; color: var(--brand-strong);
+}
+.va-q-files li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.va-q-files svg { width: 14px; height: 14px; flex: none; }
+
+.va-a { display: flex; gap: var(--sp-3); align-items: flex-start; }
+.va-avatar {
+  display: grid; place-items: center; flex: none; width: 32px; height: 32px; border-radius: 50%;
+  background: var(--brand); color: var(--brand-ink);
+}
+.va-a-body { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; flex: 1; }
+.va-a-head { display: flex; align-items: baseline; gap: var(--sp-2); min-height: 32px; padding-top: 6px; }
+.va-a-head strong { font-size: 14px; font-weight: 600; color: var(--ink); }
+.va-time { font-size: 12.5px; color: var(--muted); }
+
+.va-reply {
+  color: var(--ink); font-size: 15px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.va-auto-prefix { font-style: italic; color: var(--muted); }
+
+.va-thinking { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 14px; min-height: 32px; }
+.va-spin {
+  width: 16px; height: 16px; flex: none; border-radius: 50%;
+  border: 2px solid color-mix(in srgb, currentColor 25%, transparent); border-top-color: currentColor;
+  animation: va-spin .8s linear infinite;
+}
+@keyframes va-spin { to { transform: rotate(360deg); } }
+
+/* Needs human review (status colour: warning). */
+.va-review {
+  display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap;
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-md);
+  background: var(--warning-soft);
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+  color: var(--ink);
+}
+.va-review > svg { color: var(--warning); flex: none; }
+.va-review-text { display: flex; flex-direction: column; gap: 2px; flex: 1 1 200px; min-width: 0; font-size: 14px; line-height: 1.45; }
+.va-review-text strong { font-weight: 700; }
+.va-review-text span { color: var(--muted); }
+.va-review .c-pill svg { flex: none; }
+
+/* Sources disclosure — collapsed by default. */
+.va-sources { border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); }
+.va-sources summary {
+  display: flex; align-items: center; gap: 6px; list-style: none; cursor: pointer;
+  min-height: 36px; padding: 0 12px; border-radius: var(--r-md);
+  font-size: 13.5px; font-weight: 600; color: var(--ink);
+}
+.va-sources summary::-webkit-details-marker { display: none; }
+.va-sources summary:hover { background: var(--sunk); }
+.va-sources summary .va-num { color: var(--muted); font-weight: 500; }
+.va-chev { color: var(--muted); transition: transform .15s ease; }
+.va-sources[open] .va-chev { transform: rotate(90deg); }
+.va-sources[open] summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom: 1px solid var(--line); }
+.va-sources ul { list-style: none; margin: 0; padding: var(--sp-2) 12px var(--sp-3); display: flex; flex-direction: column; gap: var(--sp-2); }
+.va-sources li { display: flex; flex-direction: column; gap: 1px; min-width: 0; font-size: 13.5px; line-height: 1.4; }
+.va-src-title { color: var(--ink); overflow-wrap: anywhere; }
+.va-src-file { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+
+/* Per-answer actions. */
+.va-actions { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; margin-left: -6px; }
+.va-act {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  min-height: 34px; min-width: 34px; padding: 0 10px;
+  border: 1px solid transparent; border-radius: var(--r-md); background: transparent;
+  color: var(--muted); font: inherit; font-size: 13.5px; font-weight: 500; cursor: pointer;
+  transition: background .12s, color .12s;
+}
+.va-act.icon { padding: 0; width: 34px; }
+.va-act:hover:not(:disabled) { background: var(--sunk); color: var(--ink); }
+.va-act.on { background: var(--brand-soft); color: var(--brand-strong); }
+.va-act.done, .va-act.done:disabled { color: var(--brand-strong); opacity: 1; cursor: default; }
+.va-act:disabled { opacity: .5; cursor: default; }
+.va-act svg { flex: none; }
+.va-act-sep { width: 1px; height: 20px; background: var(--line); margin: 0 4px; }
+
+/* Inline "Flag for team" note. */
+.va-flagform {
+  display: flex; flex-direction: column; gap: var(--sp-2);
+  padding: var(--sp-3); border-radius: var(--r-md); background: var(--sunk); border: 1px solid var(--line);
+}
+.va-flagform label { font-size: 13.5px; font-weight: 600; color: var(--ink); }
+.va-flagform label span { font-weight: 400; color: var(--muted); }
+.va-flagform-actions { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+
+/* Compact follow-up suggestions (latest answer only). */
+.va-followups { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--sp-1); }
+.va-followup {
+  display: inline-flex; align-items: center; min-height: 32px; max-width: 100%; padding: 4px 12px;
+  border: 1px solid var(--line); border-radius: var(--r-pill); background: var(--surface);
+  color: var(--ink); font: inherit; font-size: 13px; line-height: 1.35; text-align: left; cursor: pointer;
+}
+.va-followup:hover:not(:disabled) { border-color: var(--brand); color: var(--brand-strong); background: var(--brand-soft); }
+.va-followup:disabled { opacity: .5; cursor: default; }
+
+/* ── Sticky composer dock ─────────────────────────────────────────────────── */
+.va-dock {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  margin-top: auto; /* hug the viewport bottom when the chat is short */
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-4) 0 calc(var(--sp-3) + env(safe-area-inset-bottom, 0px));
+  background: linear-gradient(to bottom, transparent, var(--bg) var(--sp-4));
+}
+.va-error {
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding: 4px 4px 4px 12px; border-radius: var(--r-md);
+  background: var(--danger-soft); color: var(--danger); font-size: 13.5px;
+}
+.va-error > svg { flex: none; }
+.va-error span { flex: 1; color: var(--ink); }
+.va-error .c-iconbtn { width: 32px; height: 32px; color: var(--danger); }
+.va-listening {
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding: 8px 12px; border-radius: var(--r-md); background: var(--brand-soft);
+  color: var(--ink); font-size: 14px; font-style: italic;
+}
+
+.va-composer {
+  display: flex; flex-direction: column; gap: var(--sp-2);
+  padding: var(--sp-2);
+  border: 1px solid var(--line-strong); border-radius: var(--r-lg);
+  background: var(--surface); box-shadow: var(--sh-2);
+}
+.va-composer:focus-within { border-color: var(--brand); box-shadow: var(--sh-2), var(--focus); }
+.va-composer-row { display: flex; align-items: flex-end; gap: var(--sp-1); }
+.va-input {
+  flex: 1; min-width: 0; resize: none;
+  min-height: 36px; max-height: 140px; height: 36px; overflow-y: auto;
+  padding: 7px 6px; border: 0; background: transparent; color: var(--ink);
+  font: inherit; font-size: 15px; line-height: 1.5;
+}
+.va-input:focus, .va-input:focus-visible { outline: none; border: 0; box-shadow: none; background: transparent; }
+.va-input:disabled { opacity: .6; }
+
+.va-mic, .va-send {
+  display: grid; place-items: center; flex: none; width: 40px; height: 40px; border-radius: 50%;
+  border: 1px solid transparent; font: inherit; cursor: pointer; transition: background .12s, color .12s;
+}
+.va-mic { background: var(--sunk); color: var(--brand-strong); border-color: var(--line); }
+.va-mic:hover:not(:disabled) { background: var(--brand-soft); border-color: var(--brand); }
+.va-mic.on { background: var(--brand); color: var(--brand-ink); border-color: var(--brand); animation: va-pulse 1.4s ease-out infinite; }
+.va-send { background: var(--brand); color: var(--brand-ink); }
+.va-send:hover:not(:disabled) { background: var(--brand-strong); }
+.va-mic:disabled, .va-send:disabled { opacity: .45; cursor: default; }
+@keyframes va-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand) 50%, transparent); }
+  70% { box-shadow: 0 0 0 10px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+.va-files { list-style: none; margin: 0; padding: 0 4px; display: flex; flex-wrap: wrap; gap: 6px; }
+.va-file {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 260px;
+  padding: 2px 2px 2px 10px; border-radius: var(--r-pill);
+  background: var(--sunk); border: 1px solid var(--line); color: var(--ink); font-size: 13px;
+}
+.va-file > svg { color: var(--muted); flex: none; }
+.va-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.va-file-x {
+  display: grid; place-items: center; flex: none; width: 28px; height: 28px; border-radius: 50%;
+  border: 0; background: transparent; color: var(--muted); cursor: pointer;
+}
+.va-file-x:hover:not(:disabled) { background: var(--danger-soft); color: var(--danger); }
+
+.va-hint { margin: 0; text-align: center; font-size: 12.5px; color: var(--muted); }
+
+/* ── Drawers: history + settings ─────────────────────────────────────────── */
+.va-hist-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.va-hist-list li { display: flex; align-items: center; gap: 2px; }
+.va-hist-item {
+  flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px;
+  padding: 10px 12px; border: 0; border-radius: var(--r-md); background: transparent;
+  color: var(--ink); font: inherit; text-align: left; cursor: pointer;
+}
+.va-hist-item:hover { background: var(--sunk); }
+.va-hist-title { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.va-hist-meta { font-size: 12.5px; color: var(--muted); }
+.va-hist-del:hover { color: var(--danger); background: var(--danger-soft); }
+.va-hist-transcript { display: flex; flex-direction: column; gap: var(--sp-4); }
+.va-hist-turn { display: flex; flex-direction: column; gap: 6px; padding-top: var(--sp-3); border-top: 1px solid var(--line); }
+.va-hist-turn:first-child { border-top: 0; padding-top: 0; }
+.va-hist-q { margin: 0; font-weight: 600; color: var(--ink); white-space: pre-wrap; }
+.va-hist-a { margin: 0; color: var(--ink); line-height: 1.6; white-space: pre-wrap; }
+
+.va-check { display: flex; align-items: flex-start; gap: var(--sp-3); cursor: pointer; }
+.va-check input { width: 18px; height: 18px; margin-top: 2px; accent-color: var(--brand); flex: none; }
+.va-check > span { display: flex; flex-direction: column; gap: 2px; }
+.va-field { display: flex; flex-direction: column; gap: 6px; }
+.va-field > label, .va-field-label { font-size: 13.5px; font-weight: 600; color: var(--ink); }
+.va-field .c-select { width: 100%; }
+
+/* ── Touch: 44px targets on coarse pointers ──────────────────────────────── */
+@media (pointer: coarse) {
+  .va-act { min-height: 44px; min-width: 44px; }
+  .va-act.icon { width: 44px; }
+  .va-sources summary { min-height: 44px; }
+  .va-followup { min-height: 44px; }
+  .va-starter { min-height: 52px; }
+  .va-mic, .va-send { width: 44px; height: 44px; }
+  .va-file-x { width: 40px; height: 40px; }
+  .va-error .c-iconbtn { width: 44px; height: 44px; }
+  .va-hist-item { min-height: 52px; }
+  .va-hint { display: none; }
+  .va-input { font-size: 16px; } /* no iOS zoom-on-focus */
+}
+
+/* ── Small screens (down to 360px) ───────────────────────────────────────── */
+@media (max-width: 720px) {
+  .va { gap: var(--sp-3); }
+  .va-bar-hint { display: none; }
+  .va-starters { grid-template-columns: minmax(0, 1fr); }
+  .va-empty { padding-top: var(--sp-4); }
+  .va-q-bubble { max-width: 88%; }
+  .va-a { gap: var(--sp-2); }
+  .va-avatar { width: 28px; height: 28px; }
+  .va-a-head { min-height: 28px; padding-top: 4px; }
+  .va-review { padding: var(--sp-3); }
+  .va-review .c-btn { width: 100%; justify-content: center; }
+  .va-act-sep { display: none; }
+}
+@media (max-width: 420px) {
+  .va-a { flex-direction: column; }
+  .va-avatar { display: none; }
+  .va-a-head { padding-top: 0; min-height: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .va-live-dot, .va-mic.on, .va-spin { animation: none; }
+  .va-chev { transition: none; }
+}

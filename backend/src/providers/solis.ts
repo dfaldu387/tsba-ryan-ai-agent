@@ -1,4 +1,5 @@
 import { createHash, createHmac } from 'node:crypto';
+import { pickCoords } from './coords.js';
 import { env, solisConfigured } from '../env.js';
 import {
   ProviderError,
@@ -102,6 +103,8 @@ export const solisProvider: SolarProvider = {
       monthlyEnergyKwh: s.monthEnergy,
       totalEnergyKwh: s.allEnergy,
       batterySoc: s.batteryPercent,
+      location: (s as { addr?: string }).addr,
+      ...pickCoords(s),
     }));
   },
 
