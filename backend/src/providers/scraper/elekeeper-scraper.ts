@@ -1,4 +1,5 @@
 import type { Page } from 'playwright';
+import { pickCoords } from '../coords.js';
 import type { NormalizedDetail, NormalizedDevice, NormalizedStation, StationInfoItem, StationStatus } from '../types.js';
 import { SessionExpiredError } from './browser.js';
 import { createScraperProvider } from './scraper-provider.js';
@@ -66,6 +67,7 @@ function toStation(p: SajPlant): NormalizedStation {
     capacityKw: p.pvCapacity,
     batterySoc: p.batSoc,
     location: p.address,
+    ...pickCoords(p),
   };
 }
 

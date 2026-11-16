@@ -379,6 +379,16 @@ export interface SolarStation {
   capacityKw?: number;
   batterySoc?: number;
   location?: string;
+  /** Plant owner / contact when the platform exposes them (PII — mask for viewers). */
+  owner?: string;
+  contact?: string;
+  /** Installation coordinates (decimal degrees) when exposed. */
+  lat?: number;
+  lng?: number;
+  /** Where lat/lng came from: admin-set pin, the platform, or the geocoded
+   *  address at house / street (road midpoint) / suburb-centre precision. */
+  locationSource?: 'manual' | 'provider' | 'house' | 'street' | 'suburb';
+  /** Last data update, epoch seconds. */
   lastUpdate?: number;
 }
 
@@ -394,6 +404,8 @@ export interface SolarOverview {
   /** Optional/unverified providers that returned no data (awaiting verification). */
   unavailable?: string[];
   providerCount: number;
+  /** Addresses still queued for background geocoding (map coverage grows as it drains). */
+  geocodePending?: number;
 }
 
 export interface SolarDevice {
@@ -461,6 +473,11 @@ export interface SolarMonitorAlert {
   detail?: string;
   deviceSn?: string;
   at?: number;
+  /** Provider remediation / handling state, passed through when known. */
+  solution?: string;
+  status?: string;
+  lat?: number;
+  lng?: number;
 }
 
 export interface SolarAlertsResult {
@@ -595,6 +612,15 @@ export function updateAlertSettings(patch: Partial<SolarAlertSettings>): Promise
   });
 }
 
+// ─── Map pin correction ─────────────────────────────────────────────────────
+/** Save an admin-corrected map position for a plant, or clear it (back to automatic). */
+export function setPlantLocation(provider: string, id: string, loc: { lat: number; lng: number } | null): Promise<{ ok: true }> {
+  return request<{ ok: true }>(`/api/solar/plants/${encodeURIComponent(provider)}/${encodeURIComponent(id)}/location`, {
+    method: 'PUT',
+    body: JSON.stringify(loc ? { lat: loc.lat, lng: loc.lng } : { clear: true }),
+  });
+}
+
 // ─── Per-plant owner/contact store ──────────────────────────────────────────
 export function getPlantContacts(): Promise<{ contacts: PlantContacts }> {
   return request<{ contacts: PlantContacts }>('/api/solar/plant-contacts');
@@ -610,4 +636,25 @@ export function updatePlantContacts(contacts: PlantContacts): Promise<{ contacts
 /** Send a one-off test alert email to the configured recipients. */
 export function sendTestAlert(): Promise<{ test: boolean; sent: boolean; recipients?: string[]; detail?: string; error?: string }> {
   return request('/api/solar/alerts/run?test=1', { method: 'POST' });
+}
+
+/** One fleet-aggregate snapshot from the 15-min solar recorder. */
+export interface SolarFleetReading {
+  systems: number;
+  online: number;
+  waiting: number;
+  partial: number;
+  offline: number;
+  total_power_w?: number | null;
+  total_daily_kwh?: number | null;
+  total_energy_kwh?: number | null;
+  total_capacity_kw?: number | null;
+  total_devices?: number | null;
+  online_devices?: number | null;
+  captured_at?: string;
+}
+
+/** Fleet aggregate snapshots over the last `hours` (oldest first). */
+export function getSolarFleetHistory(hours = 24): Promise<{ readings: SolarFleetReading[] }> {
+  return request<{ readings: SolarFleetReading[] }>(`/api/solar/history/fleet?hours=${hours}`);
 }

@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
+import { geocodeBacklog } from '../geocode.js';
 import {
   AGENT_PROFILE,
   isAudience,
@@ -1036,7 +1037,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // a transient blip on one platform neither blanks it nor flashes an error.
   app.get('/api/solar/overview', { preHandler: requirePermission('view') }, async () => {
     const { stations, errors, stale, unavailable } = await aggregateStations();
-    return { stations, errors, stale, unavailable, providerCount: configuredProviders().length };
+    return { stations, errors, stale, unavailable, providerCount: configuredProviders().length, geocodePending: geocodeBacklog() };
   });
 
   // Fleet health alerts for the header notification panel: offline/partial
@@ -1175,6 +1176,26 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         return { contacts: await savePlantContacts(req.body?.contacts ?? {}) };
       } catch (err) {
         return reply.code(400).send({ error: 'invalid_contacts', detail: (err as Error).message });
+      }
+    },
+  );
+
+  // Correct a plant's map position (drag-to-fix on the map). null clears it.
+  app.put<{ Params: { provider: string; id: string }; Body: { lat?: number; lng?: number; clear?: boolean } }>(
+    '/api/solar/plants/:provider/:id/location',
+    { preHandler: requirePermission('manage_connections') },
+    async (req, reply) => {
+      const { setManualLocation } = await import('../geocode.js');
+      const { currentUser } = await import('../auth.js');
+      const b = req.body ?? {};
+      const who = (await currentUser(req))?.email;
+      try {
+        await setManualLocation(req.params.provider, req.params.id,
+          b.clear ? null : { lat: Number(b.lat), lng: Number(b.lng) },
+          who);
+        return { ok: true };
+      } catch (err) {
+        return reply.code(400).send({ error: 'invalid_location', detail: (err as Error).message });
       }
     },
   );

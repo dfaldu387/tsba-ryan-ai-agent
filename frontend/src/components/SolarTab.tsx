@@ -1,301 +1,86 @@
-// Solar Monitoring shell: owns the shared fleet data (providers, overview,
-// alerts) and the 60s polling, hosts the six sub-section views behind a sub-nav,
-// and manages plant-detail selection (persisted in the URL so reloads/back keep
-// the open plant). Each section lives in ./solar/*.
-import { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  AuthError,
-  getSolarAlerts,
-  getSolarOverview,
-  getSolarProviders,
-  getSolarStationDetail,
-  getStationOverview,
-  type SolarAlertsResult,
-  type SolarOverview,
-  type SolarProviderInfo,
-  type SolarStation,
-  type SolarStationDetail,
-  type StationOverview,
-} from '../api';
-import { StationDetail } from './solar/StationDetail';
-import { RefreshBar, SOLAR_VIEWS, SubNav, type SolarView } from './solar/ui';
+// Fleet shell. Data (providers, plants, alerts) and polling live in the shared
+// console context; the sub-view (?view=) and open plant (?station=provider:id,
+// optional &tab=) come from the URL so every screen is linkable and reload-safe.
+import { useMemo } from 'react';
+import { useConsole } from '../lib/console';
+import { EmptyState, Icon, RelTime, SkeletonRows } from '../ui';
 import type { SolarViewProps } from './solar/types';
-import { OverviewView } from './solar/OverviewView';
-import { PlantsView } from './solar/PlantsView';
+import { OverviewPage } from '../pages/fleet/OverviewPage';
 import { AnalyticsView } from './solar/AnalyticsView';
-import { DevicesView } from './solar/DevicesView';
-import { AlertsView } from './solar/AlertsView';
-import { IntegrationsView } from './solar/IntegrationsView';
+import { DevicesPage } from '../pages/fleet/DevicesPage';
+import { AlertsPage } from '../pages/fleet/AlertsPage';
+import { PlantsPage } from '../pages/fleet/PlantsPage';
+import { Plant360 } from '../pages/fleet/Plant360';
+import { IntegrationsPanel } from '../pages/IntegrationsPanel';
+import '../pages/pages.css';
 
-const EMPTY_STATIONS: SolarStation[] = [];
-const POLL_MS = 60_000;
+type View = 'overview' | 'plants' | 'analytics' | 'devices' | 'alerts' | 'integrations';
+const VIEWS: View[] = ['overview', 'plants', 'analytics', 'devices', 'alerts', 'integrations'];
 
-const isView = (v: unknown): v is SolarView => SOLAR_VIEWS.includes(v as SolarView);
+export function SolarTab({ search }: { search: string }) {
+  const c = useConsole();
+  const params = useMemo(() => new URLSearchParams(search), [search]);
+  const rawView = params.get('view');
+  const view: View = VIEWS.includes(rawView as View) ? (rawView as View) : 'overview';
+  const stationParam = params.get('station');
 
-function initialView(): SolarView {
-  try {
-    const v = new URLSearchParams(window.location.search).get('view');
-    if (isView(v)) return v;
-  } catch { /* ignore */ }
-  return 'overview';
-}
+  const goTo: SolarViewProps['goTo'] = (v) => c.navigate('solar', v === 'overview' ? '' : `?view=${v}`);
 
-export function SolarTab({ onAuthError }: { onAuthError: () => void }) {
-  const [providers, setProviders] = useState<SolarProviderInfo[] | null>(null);
-  const [overview, setOverview] = useState<SolarOverview | null>(null);
-  const [alerts, setAlerts] = useState<SolarAlertsResult | null>(null);
-  const [alertsLoading, setAlertsLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [view, setView] = useState<SolarView>(initialView);
-
-  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
-  const canPoll = useRef(false);
-
-  // Plant detail selection.
-  const [selected, setSelected] = useState<SolarStation | null>(null);
-  const [detail, setDetail] = useState<SolarStationDetail | null>(null);
-  const [detailLoading, setDetailLoading] = useState(false);
-  const [detailError, setDetailError] = useState('');
-  const [ovData, setOvData] = useState<StationOverview | null>(null);
-
-  // ── Shared data refresh (overview + fleet alert scan). Keeps last good data. ──
-  const refresh = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      const ov = await getSolarOverview();
-      setOverview(ov);
-      setLastUpdated(Date.now());
-      setError('');
-    } catch (err) {
-      if (err instanceof AuthError) onAuthError();
-    } finally {
-      setRefreshing(false);
-    }
-    getSolarAlerts()
-      .then((a) => setAlerts(a))
-      .catch((err) => { if (err instanceof AuthError) onAuthError(); })
-      .finally(() => setAlertsLoading(false));
-  }, [onAuthError]);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const { providers } = await getSolarProviders();
-        if (cancelled) return;
-        setProviders(providers);
-        if (providers.some((p) => p.configured)) {
-          canPoll.current = true;
-          const ov = await getSolarOverview();
-          if (cancelled) return;
-          setOverview(ov);
-          setLastUpdated(Date.now());
-          getSolarAlerts()
-            .then((a) => !cancelled && setAlerts(a))
-            .catch((err) => { if (err instanceof AuthError) onAuthError(); })
-            .finally(() => !cancelled && setAlertsLoading(false));
-        } else {
-          setAlertsLoading(false);
-        }
-      } catch (err) {
-        if (cancelled) return;
-        if (err instanceof AuthError) return onAuthError();
-        setError('Couldn’t load solar monitoring.');
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-
-    const id = window.setInterval(() => {
-      if (cancelled || !canPoll.current) return;
-      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
-      void refresh();
-    }, POLL_MS);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // ── URL: sub-view (?view=) is reload-safe (replace, no history spam). ──
-  const changeView = (v: SolarView) => {
-    setView(v);
-    try {
-      const params = new URLSearchParams(window.location.search);
-      if (v === 'overview') params.delete('view');
-      else params.set('view', v);
-      params.delete('station');
-      const qs = params.toString();
-      window.history.replaceState({}, '', window.location.pathname + (qs ? `?${qs}` : ''));
-    } catch { /* ignore */ }
-  };
-
-  // ── URL: plant selection (?station=provider:id) survives reload / back. ──
-  const writeStationParam = (value: string | null, push: boolean) => {
-    try {
-      const params = new URLSearchParams(window.location.search);
-      if (value) params.set('station', value);
-      else params.delete('station');
-      const qs = params.toString();
-      const url = window.location.pathname + (qs ? `?${qs}` : '');
-      if (push) window.history.pushState({}, '', url);
-      else window.history.replaceState({}, '', url);
-    } catch { /* ignore */ }
-  };
-
-  const loadStationData = (s: SolarStation) => {
-    setSelected(s);
-    setDetail(null);
-    setOvData(null);
-    setDetailError('');
-    setDetailLoading(true);
-    getSolarStationDetail(s.provider, s.id)
-      .then(setDetail)
-      .catch((err) => {
-        if (err instanceof AuthError) return onAuthError();
-        setDetailError('Couldn’t load this station’s data.');
-      })
-      .finally(() => setDetailLoading(false));
-    getStationOverview(s.provider, s.id)
-      .then(setOvData)
-      .catch((err) => { if (err instanceof AuthError) onAuthError(); });
-  };
-
-  const openStation = (s: SolarStation) => {
-    writeStationParam(`${s.provider}:${s.id}`, true);
-    loadStationData(s);
-  };
-  const closeStation = () => {
-    setSelected(null);
-    writeStationParam(null, true);
-  };
-
-  const providerName = (id: string) => providers?.find((p) => p.id === id)?.name ?? id;
-  const configured = providers?.filter((p) => p.configured) ?? [];
-  const stations = overview?.stations ?? EMPTY_STATIONS;
-
-  // Restore open plant from the URL once stations load; sync with back/forward.
-  useEffect(() => {
-    const fromUrl = (): SolarStation | null => {
-      try {
-        const raw = new URLSearchParams(window.location.search).get('station');
-        if (!raw) return null;
-        const i = raw.indexOf(':');
-        if (i < 0) return null;
-        return stations.find((s) => s.provider === raw.slice(0, i) && s.id === raw.slice(i + 1)) ?? null;
-      } catch {
-        return null;
-      }
-    };
-    if (!selected) {
-      const match = fromUrl();
-      if (match) loadStationData(match);
-    }
-    const onPop = () => {
-      const match = fromUrl();
-      if (match) loadStationData(match);
-      else setSelected(null);
-      const v = new URLSearchParams(window.location.search).get('view');
-      setView(isView(v) ? v : 'overview');
-    };
-    window.addEventListener('popstate', onPop);
-    return () => window.removeEventListener('popstate', onPop);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stations]);
-
-  // ── Nothing configured ──
-  if (!loading && providers && configured.length === 0) {
+  if (!c.fleetLoading && c.providers && !c.providers.some((p) => p.configured)) {
     return (
-      <div className="col solar-root">
-        <section className="card solar-setup">
-          <div className="card-h">
-            <h2>Connect a monitoring platform</h2>
-            <span className="eyebrow">Nothing connected</span>
-          </div>
-          <p className="how">
-            Add a provider’s credentials to the server’s <code>.env</code> file and restart the backend. Each platform
-            is read live — nothing is stored.
-          </p>
-          <ul className="solar-provider-status">
-            {providers.map((p) => (
-              <li key={p.id}>
-                <span className={`solar-dot ${p.configured ? 'ok' : 'flag'}`} />
-                <strong>{p.name}</strong>
-                <span className="solar-badge muted">{p.configured ? 'Connected' : 'Not configured'}</span>
-              </li>
-            ))}
-          </ul>
-          <pre className="solar-env">{`# Deye Cloud
-DEYE_APP_ID=...        DEYE_APP_SECRET=...
-DEYE_EMAIL=...         DEYE_PASSWORD=...
-DEYE_BASE_URL=https://eu1-developer.deyecloud.com
-
-# GoodWe (SEMS) — no app key needed
-GOODWE_EMAIL=...       GOODWE_PASSWORD=...
-GOODWE_REGION=au       # au | eu | us | global`}</pre>
-        </section>
-      </div>
+      <EmptyState
+        icon="link"
+        title="No monitoring platform connected"
+        hint="Connect Deye, GoodWe, SAJ, Solis, Sigenergy or another provider to start monitoring the fleet."
+        action={<button type="button" className="c-btn primary" onClick={() => c.navigate('connections')}>Set up a connection</button>}
+      />
     );
   }
 
-  if (loading) {
-    return (
-      <div className="col solar-root">
-        <p className="how">Loading solar monitoring…</p>
-      </div>
-    );
-  }
-
-  // Plant detail takes over the whole Solar area.
-  if (selected) {
-    return (
-      <div className="col solar-root">
-        <StationDetail
-          station={selected}
-          providerName={providerName(selected.provider)}
-          detail={detail}
-          overview={ovData}
-          loading={detailLoading}
-          error={detailError}
-          onClose={closeStation}
-        />
-      </div>
-    );
+  // ── Plant 360 ──
+  if (stationParam) {
+    const i = stationParam.indexOf(':');
+    const station = i > 0 ? c.findStation(stationParam.slice(0, i), stationParam.slice(i + 1)) : undefined;
+    const back = () => (window.history.length > 1 ? window.history.back() : c.navigate('solar', '?view=plants'));
+    if (!station) {
+      return c.fleetLoading ? <SkeletonRows rows={6} cols={4} /> : (
+        <EmptyState icon="search" title="Plant not found" hint="It may have been removed from its monitoring platform."
+          action={<button type="button" className="c-btn" onClick={() => c.navigate('solar', '?view=plants')}>Back to plants</button>} />
+      );
+    }
+    return <Plant360 key={stationParam} station={station} tab={params.get('tab') ?? undefined} onBack={back} />;
   }
 
   const viewProps: SolarViewProps = {
-    providers: providers ?? [],
-    overview,
-    stations,
-    alerts,
-    alertsLoading,
-    lastUpdated,
-    refreshing,
-    refresh,
-    providerName,
-    openStation,
-    goTo: changeView,
+    providers: c.providers ?? [],
+    overview: c.overview,
+    stations: c.stations,
+    alerts: c.alerts,
+    alertsLoading: c.alertsLoading,
+    lastUpdated: c.lastUpdated,
+    refreshing: c.refreshing,
+    refresh: () => void c.refreshFleet(),
+    providerName: c.providerName,
+    openStation: (s) => c.openPlant(s),
+    goTo,
   };
 
   return (
-    <div className="col solar-shell solar-root">
-      {error && <span className="err">{error}</span>}
-
-      <div className="solar-shell-head">
-        <SubNav active={view} onChange={changeView} alertCount={alerts?.alerts.length} />
-        <RefreshBar lastUpdated={lastUpdated} refreshing={refreshing} onRefresh={() => void refresh()} />
+    <div className="pg-fleet">
+      <div className="pg-fleet-bar">
+        <span className="c-muted">
+          {c.refreshing ? 'Updating…' : c.lastUpdated ? <>Live data · updated <RelTime t={c.lastUpdated} /> · refreshes every minute</> : null}
+        </span>
+        <button type="button" className="c-btn sm ghost" onClick={() => void c.refreshFleet()} disabled={c.refreshing}>
+          <Icon name="refresh" size={14} /> Refresh
+        </button>
       </div>
-
-      {view === 'overview' && <OverviewView {...viewProps} />}
-      {view === 'plants' && <PlantsView {...viewProps} />}
-      {view === 'analytics' && <AnalyticsView {...viewProps} />}
-      {view === 'devices' && <DevicesView {...viewProps} />}
-      {view === 'alerts' && <AlertsView {...viewProps} />}
-      {view === 'integrations' && <IntegrationsView {...viewProps} />}
+      {view === 'overview' && <OverviewPage />}
+      {view === 'plants' && <PlantsPage search={search} />}
+      {view === 'alerts' && <AlertsPage search={search} />}
+      {view === 'devices' && <DevicesPage />}
+      {view === 'analytics' && <div className="col solar-root"><AnalyticsView {...viewProps} /></div>}
+      {view === 'integrations' && <IntegrationsPanel />}
     </div>
   );
 }

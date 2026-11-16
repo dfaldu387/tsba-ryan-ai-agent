@@ -1,4 +1,5 @@
 import { ProviderError, type NormalizedStation, type SolarProvider } from './types.js';
+import { applyGeocodes } from '../geocode.js';
 import { deyeProvider } from './deye-provider.js';
 import { goodweProvider } from './goodwe.js';
 import { solarmanProvider } from './solarman.js';
@@ -142,7 +143,10 @@ export async function aggregateStations(): Promise<AggregateResult> {
     }),
   );
 
-  return { stations, errors, stale, unavailable };
+  // Plants whose platform reports no (or a 0,0) location get coordinates from
+  // their address — cached, with unknown addresses geocoded in the background.
+  const located = await applyGeocodes(stations).catch(() => stations);
+  return { stations: located, errors, stale, unavailable };
 }
 
 export * from './types.js';

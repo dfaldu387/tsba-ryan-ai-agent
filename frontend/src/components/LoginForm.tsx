@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import type { AuthenticatedUser } from '@tsba/shared';
 import { ApiError, login } from '../api';
+import logo from '../assets/tsba-logo.png';
 
 export function LoginForm({ onAuthed }: { onAuthed: (user: AuthenticatedUser) => void }) {
   const [email, setEmail] = useState('');
@@ -29,12 +30,10 @@ export function LoginForm({ onAuthed }: { onAuthed: (user: AuthenticatedUser) =>
   return (
     <div className="gate">
       <form className="card" onSubmit={submit}>
-        <div className="brand">
-          <div className="logo">TSBA</div>
-          <div>
-            <h1>TSBA Assistant</h1>
-            <small className="eyebrow">Admin panel · sign in</small>
-          </div>
+        <div className="gate-brand">
+          <img src={logo} alt="TSBA — Trusted Solar, Bigger Advantage" />
+          <h1>Support AI console</h1>
+          <small className="eyebrow">Admin panel · sign in</small>
         </div>
         <p>Use your admin-panel account to manage the agent, connections and knowledge base.</p>
         <div className="field">

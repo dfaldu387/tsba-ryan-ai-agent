@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { pickCoords } from './coords.js';
 import { env, solarmanConfigured } from '../env.js';
 import {
   ProviderError,
@@ -154,6 +155,7 @@ function toStation(s: SolarmanStation): NormalizedStation {
     capacityKw: s.installedCapacity,
     batterySoc: s.batterySoc,
     location: s.locationAddress,
+    ...pickCoords(s),
     owner: s.ownerName || s.creatorName || undefined,
     contact: s.contactPhone || undefined,
     lastUpdate: s.lastUpdateTime,

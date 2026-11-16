@@ -1,4 +1,5 @@
 import type { Page } from 'playwright';
+import { pickCoords } from '../coords.js';
 import type { NormalizedDetail, NormalizedStation, StationInfoItem, StationStatus } from '../types.js';
 import { SessionExpiredError } from './browser.js';
 import { createScraperProvider } from './scraper-provider.js';
@@ -67,6 +68,7 @@ function toStation(d: EcosDevice): NormalizedStation {
     capacityKw: ratedKw(d.ratedPower),
     batterySoc: d.batSoc ?? undefined,
     location: d.address || d.installCountry || undefined,
+    ...pickCoords(d),
   };
 }
 

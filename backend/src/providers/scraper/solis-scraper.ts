@@ -1,4 +1,5 @@
 import type { Page } from 'playwright';
+import { pickCoords } from '../coords.js';
 import type { NormalizedStation, StationStatus } from '../types.js';
 import { SessionExpiredError } from './browser.js';
 import { createScraperProvider } from './scraper-provider.js';
@@ -52,6 +53,7 @@ function toStation(s: SolisStation): NormalizedStation {
     totalEnergyKwh: s.allEnergy1,
     capacityKw: s.capacity,
     location: s.addr,
+    ...pickCoords(s),
     lastUpdate: s.dataTimestamp ? Math.floor(Number(s.dataTimestamp) / 1000) : undefined,
   };
 }

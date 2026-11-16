@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { pickCoords } from './coords.js';
 import { portalCreds } from './scraper/credentials.js';
 import { cached } from './cache.js';
 import {
@@ -220,6 +221,7 @@ function toStation(p: SajPlant): NormalizedStation {
     capacityKw: p.pvCapacity,
     batterySoc: p.batSoc,
     location: p.address,
+    ...pickCoords(p),
     owner: p.ownerName || undefined,
     contact: p.ownerPhone || undefined,
   };

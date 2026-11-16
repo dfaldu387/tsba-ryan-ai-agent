@@ -5,7 +5,7 @@
 import { useState } from 'react';
 import { AuthError, supportChat, type SolarAlertsResult, type SolarStation } from '../../api';
 import { fmtCapacity, fmtEnergy, fmtPower } from './format';
-import { ICON, SectionCard } from './ui';
+import { Icon, Section } from '../../ui';
 
 export interface FleetSummary {
   count: number;
@@ -146,50 +146,41 @@ export function AssistantCard({
   };
 
   return (
-    <SectionCard title="Ask the solar assistant" eyebrow="Answers from live fleet data" className="solar-ai">
-      <div className="solar-ai-row">
-        <span className="solar-ai-ico">{ICON.ai}</span>
-        <input
-          className="solar-ai-input"
-          placeholder="Ask about production, offline plants, capacity, alerts…"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && ask(q)}
-          aria-label="Ask the solar assistant"
-        />
-        <button type="button" className="solar-ai-send" onClick={() => ask(q)} disabled={busy || !q.trim()}>
-          {busy ? '…' : 'Ask'}
-        </button>
-      </div>
+    <Section title="Ask the fleet assistant" sub="Answers from live fleet data" className="fo-ai">
+      <div className="c-pad fo-ai-body">
+        <form className="fo-ai-row" onSubmit={(e) => { e.preventDefault(); void ask(q); }}>
+          <span className="fo-ai-ico" aria-hidden="true"><Icon name="ai" size={18} /></span>
+          <input className="c-input" placeholder="Ask about production, offline plants, capacity, alerts…" value={q}
+            onChange={(e) => setQ(e.target.value)} aria-label="Ask the fleet assistant" />
+          <button type="submit" className="c-btn primary" disabled={busy || !q.trim()}>{busy ? 'Thinking…' : 'Ask'}</button>
+        </form>
 
-      <div className="solar-ai-chips">
-        {SUGGESTED.map((s) => (
-          <button key={s} type="button" className="solar-ai-chip" onClick={() => { setQ(s); ask(s); }}>{s}</button>
-        ))}
-      </div>
-
-      {err && <span className="err">{err}</span>}
-
-      {answer && (
-        <div className="solar-ai-answer">
-          <p className="solar-ai-text">{answer.text}</p>
-          {answer.facts && answer.facts.length > 0 && (
-            <div className="solar-ai-facts">
-              {answer.facts.map((f, i) => (
-                <div className="solar-ai-fact" key={`${f.label}-${i}`}>
-                  <span className="solar-ai-fact-l">{f.label}</span>
-                  <span className="solar-ai-fact-v solar-mono">{f.value}</span>
-                </div>
-              ))}
-            </div>
-          )}
-          <div className="solar-ai-foot">
-            <span>Source: {answer.source}</span>
-            {answer.period && <span>· {answer.period}</span>}
-            {lastUpdated && <span>· Updated {new Date(lastUpdated).toLocaleTimeString()}</span>}
-          </div>
+        <div className="c-chips" role="group" aria-label="Suggested questions">
+          {SUGGESTED.map((s) => (
+            <button key={s} type="button" className="c-chip" onClick={() => { setQ(s); void ask(s); }}>{s}</button>
+          ))}
         </div>
-      )}
-    </SectionCard>
+
+        {err && <p className="fo-ai-err" role="alert">{err}</p>}
+
+        {answer && (
+          <div className="fo-ai-answer" aria-live="polite">
+            <p>{answer.text}</p>
+            {answer.facts && answer.facts.length > 0 && (
+              <dl className="fo-ai-facts">
+                {answer.facts.map((f, i) => (
+                  <div key={`${f.label}-${i}`}><dt>{f.label}</dt><dd>{f.value}</dd></div>
+                ))}
+              </dl>
+            )}
+            <div className="fo-ai-foot">
+              <span>Source: {answer.source}</span>
+              {answer.period && <span>· {answer.period}</span>}
+              {lastUpdated && <span>· Updated {new Date(lastUpdated).toLocaleTimeString('en-AU', { timeZone: 'Australia/Sydney', hour: 'numeric', minute: '2-digit' })}</span>}
+            </div>
+          </div>
+        )}
+      </div>
+    </Section>
   );
 }

@@ -1,4 +1,5 @@
 import type { Page } from 'playwright';
+import { pickCoords } from '../coords.js';
 import type { NormalizedDetail, NormalizedStation, StationInfoItem, StationStatus } from '../types.js';
 import { SessionExpiredError } from './browser.js';
 import { createScraperProvider } from './scraper-provider.js';
@@ -83,6 +84,7 @@ function toStation(s: SolarmanStation): NormalizedStation {
     totalEnergyKwh: s.generationTotal,
     capacityKw: s.installedCapacity,
     location: s.locationAddress,
+    ...pickCoords(s),
     lastUpdate: s.lastUpdateTime,
   };
 }
