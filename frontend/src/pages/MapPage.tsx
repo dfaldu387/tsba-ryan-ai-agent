@@ -11,7 +11,7 @@ import { useCan } from '../lib/console';
 import { useConsole } from '../lib/console';
 import { fmtInt, fmtKw, fmtKwp, mask, plural } from '../lib/format';
 import { PlantDrawer } from './fleet/PlantsPage';
-import { Chip, EmptyState, Icon, ProviderChip, SearchInput, Section, Segmented, SkeletonRows, STATION_TONE, StatusDot, StatusPill, usePref } from '../ui';
+import { Chip, EmptyState, ErrorState, Icon, ProviderChip, RelTime, SearchInput, Section, Segmented, SkeletonRows, STATION_TONE, StatusDot, StatusPill, usePref } from '../ui';
 import './pages.css';
 
 const RANK: Record<StationStatus, number> = { offline: 0, partial: 1, unknown: 2, waiting: 3, online: 4 };
@@ -66,7 +66,7 @@ function useDark(): boolean {
 const esc = (t: string) => t.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 
 export function MapPage() {
-  const { stations, fleetLoading, openGroups, navigate, openPlant, providerName, overview, canSeePii, toast, refreshFleet, onAuthError } = useConsole();
+  const { stations, fleetLoading, fleetError, openGroups, navigate, openPlant, providerName, overview, canSeePii, toast, refreshFleet, refreshing, lastUpdated, onAuthError } = useConsole();
   const can = useCan();
   const canEdit = can('manage_connections');
   const [editing, setEditing] = useState<{ lat: number; lng: number } | null>(null);
@@ -251,11 +251,17 @@ export function MapPage() {
                   count={onMap.filter((s) => s.status === st).length}>{STATION_TONE[st].label}</Chip>
               ))}
             </div>
+            <button type="button" className="c-btn sm" onClick={() => void refreshFleet(true)} disabled={refreshing}
+              title="Pull fresh data from every monitoring platform now">
+              <Icon name="refresh" size={14} /> {refreshing ? 'Refreshing…' : lastUpdated ? <>Updated <RelTime t={lastUpdated} /></> : 'Refresh'}
+            </button>
             <button type="button" className="c-btn sm" onClick={() => navigate('energy')} title="Full-screen dark wall display"><Icon name="monitor" size={14} /> Control room</button>
           </>
         }
       >
-        {fleetLoading && stations.length === 0 ? <SkeletonRows rows={8} cols={1} /> : stations.length === 0 ? (
+        {fleetLoading && stations.length === 0 ? <SkeletonRows rows={8} cols={1} /> : stations.length === 0 && fleetError ? (
+          <ErrorState title="Monitoring data unavailable" detail={fleetError} onRetry={() => void refreshFleet()} />
+        ) : stations.length === 0 ? (
           <EmptyState icon="map" title="No plants yet" hint="Connect a monitoring platform to see plants on the map."
             action={<button type="button" className="c-btn sm" onClick={() => navigate('connections')}>Connections</button>} />
         ) : (

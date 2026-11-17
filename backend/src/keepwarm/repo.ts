@@ -5,7 +5,7 @@ import type {
   KwClient, KwLoggedMetric, KwMessage, KwMessageKind, KwMessageStatus, KwMix, KwNote,
   KwConvo, KwProfile, KwSender, KwStage, KwTextType, KwTone, KwUnderstood, KwWarmth,
 } from '@tsba/shared';
-import { query } from '../db.js';
+import { query, withTransaction } from '../db.js';
 import { daysBetween, localDate } from './time.js';
 
 export const newId = (): string => randomUUID();
@@ -226,14 +226,17 @@ export async function isOptedOut(phoneNorm: string): Promise<boolean> {
 
 /** Record a STOP: the number is blocked for every rep, and nothing queued goes out. */
 export async function optOut(phoneNorm: string, source: string): Promise<void> {
-  await query('INSERT INTO kw_optouts (phone_norm, source) VALUES ($1, $2) ON CONFLICT DO NOTHING', [phoneNorm, source]);
-  await query('UPDATE kw_clients SET opted_out_at = COALESCE(opted_out_at, now()), paused = false, updated_at = now() WHERE phone_norm = $1', [phoneNorm]);
-  await query(
-    `UPDATE kw_messages SET status = 'skipped', error = 'Client opted out', updated_at = now()
-      WHERE status IN ('draft', 'scheduled') AND direction = 'out'
-        AND client_id IN (SELECT id FROM kw_clients WHERE phone_norm = $1)`,
-    [phoneNorm],
-  );
+  // All or nothing: a half-applied opt-out could leave texts queued to someone who said stop.
+  await withTransaction(async (q) => {
+    await q('INSERT INTO kw_optouts (phone_norm, source) VALUES ($1, $2) ON CONFLICT DO NOTHING', [phoneNorm, source]);
+    await q('UPDATE kw_clients SET opted_out_at = COALESCE(opted_out_at, now()), paused = false, updated_at = now() WHERE phone_norm = $1', [phoneNorm]);
+    await q(
+      `UPDATE kw_messages SET status = 'skipped', error = 'Client opted out', updated_at = now()
+        WHERE status IN ('draft', 'scheduled') AND direction = 'out'
+          AND client_id IN (SELECT id FROM kw_clients WHERE phone_norm = $1)`,
+      [phoneNorm],
+    );
+  });
 }
 
 // ─── Messages ───────────────────────────────────────────────────────────────
@@ -341,16 +344,30 @@ export async function updateMessage(id: string, p: {
 
 /** Cancel a client's pending scheduled texts (used when they reply mid-rhythm). */
 export async function holdScheduled(clientId: string, reason: string): Promise<void> {
+  // One statement, so a client's scheduled and draft texts are held together.
   await query(
-    `UPDATE kw_messages SET status = 'held', error = $2, updated_at = now()
-      WHERE client_id = $1 AND direction = 'out' AND status = 'scheduled' AND kind <> 'reply'`,
+    `UPDATE kw_messages
+        SET status = CASE status WHEN 'scheduled' THEN 'held' ELSE 'skipped' END,
+            error = $2, updated_at = now()
+      WHERE client_id = $1 AND direction = 'out' AND status IN ('scheduled', 'draft') AND kind <> 'reply'`,
     [clientId, reason],
   );
-  await query(
-    `UPDATE kw_messages SET status = 'skipped', error = $2, updated_at = now()
-      WHERE client_id = $1 AND direction = 'out' AND status = 'draft' AND kind <> 'reply'`,
-    [clientId, reason],
+}
+
+/**
+ * Atomically claim one due text for sending. Moves its send time 10 minutes out
+ * as a lease, so a concurrent loop tick, an approve click or a second process
+ * can't pick up the same row; dispatch then sets the final status. Returns
+ * null when someone else already claimed it (or it's no longer due).
+ */
+export async function claimForSend(id: string): Promise<StoredMessage | null> {
+  const res = await query<MessageRow>(
+    `UPDATE kw_messages SET scheduled_for = now() + interval '10 minutes', updated_at = now()
+      WHERE id = $1 AND status = 'scheduled' AND scheduled_for <= now()
+      RETURNING *`,
+    [id],
   );
+  return res.rows[0] ? toMessage(res.rows[0]) : null;
 }
 
 /** Approved texts whose send time has come, across all reps. */

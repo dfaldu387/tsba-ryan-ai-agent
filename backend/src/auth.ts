@@ -17,21 +17,28 @@ declare module 'fastify' {
 interface TokenPayload {
   uid: string;
   iat: number;
+  /** Password fingerprint: tokens stop working once the password changes. */
+  pv?: string;
 }
 
 function sign(payload: string): string {
   return createHmac('sha256', env.sessionSecret).update(payload).digest('base64url');
 }
 
-/** Issue a signed session token for a user id. */
-export function issueToken(userId: string): string {
-  const payload = JSON.stringify({ uid: userId, iat: Date.now() } satisfies TokenPayload);
+/** Short keyed fingerprint of the stored password hash (reveals nothing about it). */
+export function passwordVersion(passwordHash: string): string {
+  return createHmac('sha256', env.sessionSecret).update(`pv:${passwordHash}`).digest('base64url').slice(0, 16);
+}
+
+/** Issue a signed session token for a user. */
+export function issueToken(user: { id: string; password_hash: string }): string {
+  const payload = JSON.stringify({ uid: user.id, iat: Date.now(), pv: passwordVersion(user.password_hash) } satisfies TokenPayload);
   const body = Buffer.from(payload).toString('base64url');
   return `${body}.${sign(body)}`;
 }
 
-/** Verify signature + expiry; returns the payload or null. */
-function verifyToken(token: string | undefined): TokenPayload | null {
+/** Verify signature + expiry; returns the payload or null. (Exported for tests.) */
+export function verifyToken(token: string | undefined): TokenPayload | null {
   if (!token) return null;
   const [body, mac] = token.split('.');
   if (!body || !mac) return null;
@@ -62,6 +69,9 @@ export async function currentUser(req: FastifyRequest): Promise<AuthenticatedUse
   const storage = await getStorage();
   const user = await storage.users.getById(payload.uid);
   if (!user || user.disabled) return null;
+  // A password change (e.g. after a suspected leak) revokes every older token.
+  // Tokens issued before this check existed carry no `pv` and run to expiry.
+  if (payload.pv && payload.pv !== passwordVersion(user.password_hash)) return null;
   return toAuthenticatedUser(user);
 }
 

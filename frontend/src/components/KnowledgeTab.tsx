@@ -131,7 +131,15 @@ interface Row {
   stale: boolean;
 }
 
-export function KnowledgeTab({ user, onAuthError }: { user: AuthenticatedUser; onAuthError: () => void }) {
+/** Filters a deep link can set: ?status=<DocStatus|flagged>&q=<text>. "flagged" = unreadable text (the dashboard link). */
+function filtersFromSearch(search?: string): { status: 'all' | DocStatus; q: string } {
+  const p = new URLSearchParams(search ?? '');
+  const raw = p.get('status');
+  const status = raw === 'flagged' ? 'corrupted' : raw && raw in DOC_STATUS ? (raw as DocStatus) : 'all';
+  return { status, q: p.get('q') ?? '' };
+}
+
+export function KnowledgeTab({ user, onAuthError, search: urlSearch }: { user: AuthenticatedUser; onAuthError: () => void; search?: string }) {
   const { toast, navigate } = useConsole();
   const canIngest = hasPermission(user.role, 'run_ingest');
 
@@ -152,10 +160,19 @@ export function KnowledgeTab({ user, onAuthError }: { user: AuthenticatedUser; o
   const [gmailRunning, setGmailRunning] = useState(false);
 
   // Filters
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useState(() => filtersFromSearch(urlSearch).q);
   const [brand, setBrand] = useState('all');
   const [type, setType] = useState<'all' | DocType>('all');
-  const [status, setStatus] = useState<'all' | DocStatus>('all');
+  const [status, setStatus] = useState<'all' | DocStatus>(() => filtersFromSearch(urlSearch).status);
+  // A new deep link while this tab is already open (dashboard → KB) re-applies its filters.
+  const lastUrl = useRef(urlSearch);
+  useEffect(() => {
+    if (lastUrl.current === urlSearch) return;
+    lastUrl.current = urlSearch;
+    const f = filtersFromSearch(urlSearch);
+    setStatus(f.status);
+    setSearch(f.q);
+  }, [urlSearch]);
   const [sort, setSort] = usePref<SortKey>('kb.sort', 'newest');
 
 

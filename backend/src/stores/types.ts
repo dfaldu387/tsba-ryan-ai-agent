@@ -26,6 +26,12 @@ export interface KnowledgeStore {
   add(entries: KnowledgeEntry[]): Promise<void>;
   /** Remove entries whose id starts with the given prefix (e.g. a document's chunks). */
   removeByPrefix(idPrefix: string): Promise<void>;
+  /**
+   * Atomically swap a document's chunks: embeds the new entries first, then
+   * removes every entry under `idPrefix` and inserts the new set in one step.
+   * If embedding or the write fails, the previous chunks stay untouched.
+   */
+  replaceByPrefix(idPrefix: string, entries: KnowledgeEntry[]): Promise<void>;
   /** All chunk text for entries whose id starts with the prefix, joined — for quality assessment. */
   getTextByPrefix(idPrefix: string): Promise<string>;
 }

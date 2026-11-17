@@ -20,8 +20,10 @@ export function LoginForm({ onAuthed }: { onAuthed: (user: AuthenticatedUser) =>
     } catch (err) {
       setError(
         err instanceof ApiError && err.code === 'invalid_credentials'
-          ? 'That email and password didn’t match.'
-          : 'Couldn’t sign in. Try again.',
+          ? 'Wrong email or password.'
+          : err instanceof ApiError && err.code === 'too_many_attempts'
+            ? err.message || 'Too many sign-in attempts. Try again in a few minutes.'
+            : 'Couldn’t sign in. Check your connection and try again.',
       );
     } finally {
       setBusy(false);

@@ -13,7 +13,7 @@
 // a letter and a digit, allowing '-' and '.' inside (SUN-8K-SG05LP1-AU,
 // AI-W5.1-B-ESS, S6-GC25K, GW5000-EH, SG5.0RS). The lookaheads require the
 // letter+digit mix so plain words ("inverter") and bare numbers ("5kW") don't match.
-const MODEL_RE = /\b(?=[A-Za-z0-9.\-]*[A-Za-z])(?=[A-Za-z0-9.\-]*\d)[A-Za-z][A-Za-z0-9.\-]{3,}\b/g;
+const MODEL_RE = /\b(?=[A-Za-z0-9.-]*[A-Za-z])(?=[A-Za-z0-9.-]*\d)[A-Za-z][A-Za-z0-9.-]{3,}\b/g;
 
 /** Strip everything but letters/digits and lowercase — so "SUN-8K-SG05LP1-AU" ≈ "sun 8k sg05lp1 au". */
 function normalizeCode(s: string): string {

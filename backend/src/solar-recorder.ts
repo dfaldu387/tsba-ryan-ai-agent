@@ -23,8 +23,30 @@ const sum = (xs: (number | undefined)[]): number | null => {
   return vals.length ? vals.reduce((a, b) => a + b, 0) : null;
 };
 
-/** Run one capture now. Exported so a route/test can force a snapshot. */
+/**
+ * Run one capture now (route/test entry point). Shares the scheduled capture's
+ * overlap guard so a manual snapshot during a scheduled one can't double-write.
+ */
 export async function captureSolarSnapshot(): Promise<{ stations: number } | null> {
+  if (running) return null;
+  running = true;
+  try {
+    return await capture();
+  } finally {
+    running = false;
+  }
+}
+
+/** True when another process (a second instance, a dev server on the same DB) captured very recently. */
+async function capturedRecently(): Promise<boolean> {
+  if (env.storage !== 'postgres') return false;
+  const { query } = await import('./db.js');
+  const windowMin = Math.max(1, Math.floor(env.solarSnapshotIntervalMin / 2));
+  const res = await query(`SELECT 1 FROM solar_fleet_readings WHERE captured_at > now() - make_interval(mins => $1) LIMIT 1`, [windowMin]);
+  return (res.rowCount ?? 0) > 0;
+}
+
+async function capture(): Promise<{ stations: number } | null> {
   const { stations } = await aggregateStations();
   // Nothing to record (no providers configured, or a cold/empty fetch) — skip so
   // we don't write a bogus all-zero row.
@@ -85,9 +107,12 @@ async function tick(): Promise<void> {
   if (running) return; // never overlap captures
   running = true;
   try {
-    const res = await captureSolarSnapshot();
+    if (await capturedRecently().catch(() => false)) return; // another process just captured
+    const res = await capture();
     if (res && env.storage === 'postgres' && env.solarRetentionDays > 0) {
       await pruneSolarReadings(env.solarRetentionDays).catch(() => {});
+      const { prunePlantHistory } = await import('./plant-history-repo.js');
+      await prunePlantHistory(env.solarRetentionDays).catch(() => {});
     }
   } catch (err) {
     console.error('[solar-recorder] capture failed:', (err as Error).message);

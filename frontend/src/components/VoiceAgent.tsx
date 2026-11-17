@@ -7,8 +7,7 @@ import {
   getVoiceStarters,
   voiceChat,
   type VoiceAttachment,
-  type VoiceChatMessage,
-} from '../api';
+  type VoiceChatMessage, userScopedKey } from '../api';
 import { Drawer, Icon, Menu, type MenuItem } from '../ui';
 import { useConsole } from '../lib/console';
 import { ApprovalCard } from './ApprovalCard';
@@ -177,7 +176,7 @@ const feedbackKey = (t: Turn) => `${t.at ?? ''}#${t.id}`;
 
 function loadFeedback(): Record<string, Feedback> {
   try {
-    const raw = localStorage.getItem(VOICE_FEEDBACK_KEY);
+    const raw = localStorage.getItem(userScopedKey(VOICE_FEEDBACK_KEY));
     const parsed = raw ? (JSON.parse(raw) as unknown) : {};
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, Feedback>) : {};
   } catch {
@@ -187,7 +186,7 @@ function loadFeedback(): Record<string, Feedback> {
 
 function saveFeedback(map: Record<string, Feedback>): void {
   try {
-    localStorage.setItem(VOICE_FEEDBACK_KEY, JSON.stringify(map));
+    localStorage.setItem(userScopedKey(VOICE_FEEDBACK_KEY), JSON.stringify(map));
   } catch {
     /* ignore */
   }
@@ -240,7 +239,7 @@ interface ChatSession {
 
 function loadHistory(): ChatSession[] {
   try {
-    const raw = localStorage.getItem(VOICE_HISTORY_KEY);
+    const raw = localStorage.getItem(userScopedKey(VOICE_HISTORY_KEY));
     const parsed = raw ? (JSON.parse(raw) as unknown) : [];
     if (!Array.isArray(parsed)) return [];
     return parsed.filter(
@@ -254,7 +253,7 @@ function loadHistory(): ChatSession[] {
 
 function saveHistory(list: ChatSession[]): void {
   try {
-    localStorage.setItem(VOICE_HISTORY_KEY, JSON.stringify(list.slice(0, MAX_SESSIONS)));
+    localStorage.setItem(userScopedKey(VOICE_HISTORY_KEY), JSON.stringify(list.slice(0, MAX_SESSIONS)));
   } catch {
     /* ignore */
   }
@@ -294,7 +293,7 @@ const DEFAULT_VOICE = 'Microsoft Zira - English (United States)';
 
 function loadTurns(): Turn[] {
   try {
-    const raw = localStorage.getItem(VOICE_LOG_KEY);
+    const raw = localStorage.getItem(userScopedKey(VOICE_LOG_KEY));
     const parsed = raw ? (JSON.parse(raw) as unknown) : [];
     if (!Array.isArray(parsed)) return [];
     return parsed.filter(
@@ -410,7 +409,7 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
   // Persist the conversation whenever it changes.
   useEffect(() => {
     try {
-      localStorage.setItem(VOICE_LOG_KEY, JSON.stringify(turns));
+      localStorage.setItem(userScopedKey(VOICE_LOG_KEY), JSON.stringify(turns));
     } catch {
       /* ignore */
     }
@@ -447,6 +446,7 @@ export function VoiceAgent({ onAuthError }: { onAuthError: () => void }) {
       handsFreeRef.current = false; // stop the loop from reopening the mic
       wantListeningRef.current = false; // and stop onend from restarting it
       if (silenceTimerRef.current != null) window.clearTimeout(silenceTimerRef.current);
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- a counter ref, not a DOM node: reading it at cleanup is intended
       speakSeqRef.current++; // invalidate any pending delayed speak
       if (keepAliveRef.current != null) window.clearInterval(keepAliveRef.current);
       try {

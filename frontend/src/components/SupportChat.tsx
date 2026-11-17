@@ -14,8 +14,7 @@ import {
   getVoiceStarters,
   supportChat,
   type VoiceAttachment,
-  type VoiceChatMessage,
-} from '../api';
+  type VoiceChatMessage, userScopedKey } from '../api';
 
 // ─── Support chat ─────────────────────────────────────────────────────────────
 // A customer-support-style chat widget (NOT the voice console). The agent
@@ -97,7 +96,7 @@ function ReplyText({ text }: { text: string }) {
 
 function loadSessions(): ChatSession[] {
   try {
-    const raw = localStorage.getItem(SESSIONS_KEY);
+    const raw = localStorage.getItem(userScopedKey(SESSIONS_KEY));
     const parsed = raw ? (JSON.parse(raw) as unknown) : [];
     if (!Array.isArray(parsed)) return [];
     return parsed.filter(
@@ -113,7 +112,7 @@ function loadSessions(): ChatSession[] {
 
 function saveSessions(list: ChatSession[]): void {
   try {
-    localStorage.setItem(SESSIONS_KEY, JSON.stringify(list.slice(0, MAX_SESSIONS)));
+    localStorage.setItem(userScopedKey(SESSIONS_KEY), JSON.stringify(list.slice(0, MAX_SESSIONS)));
   } catch {
     /* ignore */
   }

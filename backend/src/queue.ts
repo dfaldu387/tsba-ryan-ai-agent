@@ -10,22 +10,31 @@ import { embeddingProvider, entryEmbeddingText } from './embeddings.js';
 export const EMBED_ENTRY = 'embed-entry';
 
 let boss: PgBoss | null = null;
+let starting: Promise<PgBoss> | null = null;
 
-export async function startQueue(): Promise<PgBoss> {
-  if (boss) return boss;
-  boss = new PgBoss({ connectionString: env.databaseUrl });
-  boss.on('error', (err) => console.error('[pg-boss]', err));
-  await boss.start();
-  await boss.createQueue(EMBED_ENTRY);
+export function startQueue(): Promise<PgBoss> {
+  // Share one start: callers (enqueue during ingest) must not use the queue
+  // before start() has resolved.
+  starting ??= (async () => {
+    const b = new PgBoss({ connectionString: env.databaseUrl });
+    b.on('error', (err) => console.error('[pg-boss]', err));
+    await b.start();
+    await b.createQueue(EMBED_ENTRY);
 
-  await boss.work<{ id: string }>(EMBED_ENTRY, { batchSize: 10 }, async (jobs) => {
-    for (const job of jobs) {
-      await embedEntry(job.data.id);
-    }
+    // One job per batch: a single bad entry fails (and retries) only itself,
+    // not the nine healthy jobs that happened to share its batch.
+    await b.work<{ id: string }>(EMBED_ENTRY, { batchSize: 1 }, async (jobs) => {
+      for (const job of jobs) await embedEntry(job.data.id);
+    });
+
+    boss = b;
+    console.log('[pg-boss] queue started, worker listening on', EMBED_ENTRY);
+    return b;
+  })().catch((err) => {
+    starting = null; // allow a later retry
+    throw err;
   });
-
-  console.log('[pg-boss] queue started, worker listening on', EMBED_ENTRY);
-  return boss;
+  return starting;
 }
 
 async function embedEntry(id: string): Promise<void> {
@@ -56,4 +65,5 @@ export async function enqueueEmbedJobs(ids: string[]): Promise<void> {
 export async function stopQueue(): Promise<void> {
   if (boss) await boss.stop({ graceful: true });
   boss = null;
+  starting = null;
 }

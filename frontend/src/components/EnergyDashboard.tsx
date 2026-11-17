@@ -13,6 +13,7 @@ import {
   type MonthlyProductionPoint,
   type StationStatus,
 } from '../api';
+import { PLANT_TZ, mask } from '../lib/format';
 import './EnergyDashboard.css';
 
 /* ── Tunable constants ────────────────────────────────────────────────────
@@ -81,19 +82,23 @@ const sum = (arr: SolarStation[], pick: (s: SolarStation) => number | undefined)
 const fmt = (n: number, d = 0): string =>
   n.toLocaleString('en-AU', { minimumFractionDigits: d, maximumFractionDigits: d });
 
-/** Rich hover-tooltip markup for a plant. */
-function tipHTML(s: SolarStation): string {
+const esc = (t: string) => t.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+
+/** Rich hover-tooltip markup for a plant. globe.gl renders this as HTML, so every
+ *  string from a vendor portal is escaped; addresses are masked for viewers. */
+function tipHTML(s: SolarStation, canSeePii: boolean): string {
   const row = (label: string, val: string) =>
-    `<div style="display:flex;justify-content:space-between;gap:14px"><span style="color:#7fa6cc">${label}</span><span>${val}</span></div>`;
+    `<div style="display:flex;justify-content:space-between;gap:14px"><span style="color:#7fa6cc">${esc(label)}</span><span>${esc(val)}</span></div>`;
+  const where = s.location ? (canSeePii ? s.location : mask(s.location)) : '';
   return (
-    `<div style="font-weight:700;margin-bottom:5px">${s.name}</div>` +
+    `<div style="font-weight:700;margin-bottom:5px">${esc(s.name)}</div>` +
     row('Status', s.status) +
     (s.capacityKw != null ? row('Capacity', `${fmt(s.capacityKw, 1)} kW`) : '') +
     (s.currentPowerW != null ? row('Power now', `${fmt(s.currentPowerW / 1000, 2)} kW`) : '') +
     (s.dailyEnergyKwh != null ? row('Today', `${fmt(s.dailyEnergyKwh, 1)} kWh`) : '') +
     (s.totalEnergyKwh != null ? row('Total', `${fmt(s.totalEnergyKwh / 1000, 2)} MWh`) : '') +
     (s.batterySoc != null ? row('Battery SOC', `${fmt(s.batterySoc, 0)}%`) : '') +
-    (s.location ? `<div style="color:#7fa6cc;margin-top:5px">${s.location}</div>` : '')
+    (where ? `<div style="color:#7fa6cc;margin-top:5px">${esc(where)}</div>` : '')
   );
 }
 
@@ -138,9 +143,13 @@ function shortStatus(a: SolarMonitorAlert): string {
 interface Props {
   onExit: () => void;
   onAuthError: () => void;
+  /** Viewers see masked addresses (same rule as the console). */
+  canSeePii: boolean;
 }
 
-export function EnergyDashboard({ onExit, onAuthError }: Props) {
+export function EnergyDashboard({ onExit, onAuthError, canSeePii }: Props) {
+  const piiRef = useRef(canSeePii);
+  piiRef.current = canSeePii;
   const [stations, setStations] = useState<SolarStation[]>([]);
   const [alerts, setAlerts] = useState<SolarMonitorAlert[]>([]);
   // Fleet device tally from the alert scan (0 for providers with no device API).
@@ -334,7 +343,7 @@ export function EnergyDashboard({ onExit, onAuthError }: Props) {
       .pointColor((d: object) => (d as { color: string }).color)
       .pointLabel((d: object) => {
         const s = (d as { s: SolarStation }).s;
-        return `<div style="background:rgba(8,20,38,.96);border:1px solid rgba(39,211,255,.4);border-radius:8px;padding:9px 11px;color:#eaf6ff;font:12px/1.5 system-ui;min-width:180px;max-width:240px;box-shadow:0 6px 20px rgba(0,0,0,.5)">${tipHTML(s)}</div>`;
+        return `<div style="background:rgba(8,20,38,.96);border:1px solid rgba(39,211,255,.4);border-radius:8px;padding:9px 11px;color:#eaf6ff;font:12px/1.5 system-ui;min-width:180px;max-width:240px;box-shadow:0 6px 20px rgba(0,0,0,.5)">${tipHTML(s, piiRef.current)}</div>`;
       })
       .ringColor(() => (t: number) => `rgba(39,211,255,${Math.sqrt(1 - t)})`)
       .ringMaxRadius(2.4)
@@ -403,7 +412,8 @@ export function EnergyDashboard({ onExit, onAuthError }: Props) {
     return () => window.removeEventListener('keydown', onKey);
   }, [onExit]);
 
-  const dateStr = new Date().toISOString().slice(0, 10);
+  // Plant-local date (the fleet is in Australia), not the UTC date.
+  const dateStr = new Date().toLocaleDateString('en-CA', { timeZone: PLANT_TZ });
   const maxTotal = Math.max(1, ...m.platforms.map((p) => p.totalMwh));
   const maxToday = Math.max(1, ...m.platforms.map((p) => p.todayKwh));
   const maxRank = Math.max(1, ...m.ranking.map((r) => r.mwh));

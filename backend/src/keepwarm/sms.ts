@@ -46,6 +46,9 @@ export async function sendSms(to: string, body: string, from?: string): Promise<
         'Content-Type': 'application/x-www-form-urlencoded',
       },
       body: new URLSearchParams({ To: to, From: sender, Body: body }).toString(),
+      // Bounded: a hung request must not stall the send loop. A timeout is
+      // recorded as 'failed' (never auto-retried), so it can't double-send.
+      signal: AbortSignal.timeout(20_000),
     });
     const json = (await res.json().catch(() => ({}))) as { sid?: string; message?: string };
     if (!res.ok) return { ok: false, error: json.message || `Twilio HTTP ${res.status}` };

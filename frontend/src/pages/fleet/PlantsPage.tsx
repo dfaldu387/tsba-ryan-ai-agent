@@ -9,7 +9,7 @@ import type { AlertGroup } from '../../lib/alerts';
 import { EMPTY, fmtInt, fmtKw, fmtKwh, fmtKwp, fmtPct, mask, staleness, toMs } from '../../lib/format';
 import {
   Chip, Drawer, EmptyState, Icon, Menu, Pill, ProviderChip, RatioBar, RelTime, SearchInput, Segmented, SeverityPill,
-  SkeletonRows, STATION_TONE, StatusDot, StatusPill, neverReported, usePref, usePaged, Pager,
+  SkeletonRows, STATION_TONE, StatusDot, StatusPill, neverReported, usePref, usePaged, Pager, ErrorState,
 } from '../../ui';
 
 type ColKey = 'status' | 'plant' | 'provider' | 'capacity' | 'power' | 'today' | 'perf' | 'battery' | 'lastComm' | 'alerts';
@@ -36,7 +36,7 @@ function useFleetYield(stations: SolarStation[]) {
 interface SavedFilter { name: string; status: StationStatus | 'all'; provider: string; q: string }
 
 export function PlantsPage({ search }: { search: string }) {
-  const { stations, providers, providerName, openGroups, fleetLoading, canSeePii, openPlant, overview } = useConsole();
+  const { stations, providers, providerName, openGroups, fleetLoading, fleetError, refreshFleet, canSeePii, openPlant, overview } = useConsole();
   const params = useMemo(() => new URLSearchParams(search), [search]);
 
   const [status, setStatus] = useState<StationStatus | 'all'>((params.get('status') as StationStatus) || 'all');
@@ -68,6 +68,9 @@ export function PlantsPage({ search }: { search: string }) {
   // connected-but-empty account (GoodWe, Dyness) look like it wasn't there at all.
   const configured = (providers ?? []).filter((p) => p.configured || stations.some((s) => s.provider === p.id));
   const emptyProvider = provider !== 'all' && !stations.some((s) => s.provider === provider);
+  // A slow platform (portal scrape, GoodWe) that hasn't answered yet is "stale",
+  // not empty — say it's loading instead of blaming the account.
+  const providerLoading = emptyProvider && (overview?.stale ?? []).includes(provider);
   const scoped = useMemo(() => (provider === 'all' ? stations : stations.filter((s) => s.provider === provider)), [stations, provider]);
   const statusCounts = useMemo(() => {
     const c = {} as Record<StationStatus, number>;
@@ -208,11 +211,13 @@ export function PlantsPage({ search }: { search: string }) {
 
         {fleetLoading ? (
           <SkeletonRows rows={10} cols={6} />
+        ) : stations.length === 0 && fleetError ? (
+          <ErrorState title="Monitoring data unavailable" detail={fleetError} onRetry={() => void refreshFleet()} />
         ) : rows.length === 0 ? (
           <EmptyState
             icon={stations.length && !emptyProvider ? 'search' : 'plant'}
-            title={emptyProvider ? `No plants on ${providerName(provider)}` : stations.length ? 'No plants match' : 'No plants on the connected accounts'}
-            hint={emptyProvider ? 'This platform is connected, but its account returned no plants. Check the account has sites shared with it.' : stations.length ? 'Clear the search or a filter.' : undefined}
+            title={providerLoading ? `Loading plants from ${providerName(provider)}…` : emptyProvider ? `No plants on ${providerName(provider)}` : stations.length ? 'No plants match' : 'No plants on the connected accounts'}
+            hint={providerLoading ? 'This platform is slow to answer after a restart. Its plants appear here automatically within a minute or two.' : emptyProvider ? 'This platform is connected, but its account returned no plants. Check the account has sites shared with it.' : stations.length ? 'Clear the search or a filter.' : undefined}
             action={filtersActive ? <button type="button" className="c-btn sm" onClick={() => { setStatus('all'); setProvider('all'); setQ(''); }}>Clear filters</button> : undefined}
           />
         ) : (
@@ -229,6 +234,7 @@ export function PlantsPage({ search }: { search: string }) {
                       </button>
                     </th>
                   ))}
+                  <th className="pg-act-col"><span className="c-sr">Actions</span></th>
                 </tr>
               </thead>
               <tbody>
@@ -239,6 +245,14 @@ export function PlantsPage({ search }: { search: string }) {
                     {cols.map((c) => (
                       <td key={c.key} className={c.key === 'plant' ? 'name' : c.num ? 'num' : undefined} data-label={c.key === 'plant' ? undefined : c.label}>{c.render(s)}</td>
                     ))}
+                    <td className="pg-act-col">
+                      {/* Straight to the full plant page (Overview tab); the row itself still opens the quick drawer. */}
+                      <button type="button" className="c-iconbtn" title="View details" aria-label={`View ${s.name} details`}
+                        onClick={(e) => { e.stopPropagation(); openPlant(s, { tab: 'overview' }); }}
+                        onKeyDown={(e) => e.stopPropagation()}>
+                        <Icon name="send" size={16} />
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>

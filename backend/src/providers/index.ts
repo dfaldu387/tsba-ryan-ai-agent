@@ -1,5 +1,7 @@
 import { ProviderError, type NormalizedStation, type SolarProvider } from './types.js';
 import { applyGeocodes } from '../geocode.js';
+import { env } from '../env.js';
+import { invalidate } from './cache.js';
 import { deyeProvider } from './deye-provider.js';
 import { goodweProvider } from './goodwe.js';
 import { solarmanProvider } from './solarman.js';
@@ -135,7 +137,35 @@ function fetchStations(p: SolarProvider): Promise<StationWithProvider[]> {
 
 class StillLoading extends Error {}
 
-export async function aggregateStations(): Promise<AggregateResult> {
+/** Last saved snapshot of a provider's plants (≤24 h old), shaped like a live list. Null if none. */
+async function snapshotFallback(providerId: string): Promise<StationWithProvider[] | null> {
+  if (env.storage !== 'postgres') return null;
+  try {
+    const { latestReadingsForProvider } = await import('../solar-repo.js');
+    const rows = await latestReadingsForProvider(providerId);
+    if (!rows.length) return null;
+    const num = (v: number | null | undefined) => (v == null ? undefined : Number(v));
+    return rows.map((r) => ({
+      provider: providerId,
+      id: r.station_id,
+      name: r.name,
+      status: (r.status as StationWithProvider['status']) ?? 'unknown',
+      currentPowerW: num(r.current_power_w),
+      dailyEnergyKwh: num(r.daily_kwh),
+      monthlyEnergyKwh: num(r.monthly_kwh),
+      totalEnergyKwh: num(r.total_kwh),
+      capacityKw: num(r.capacity_kw),
+      batterySoc: num(r.battery_soc),
+      location: r.location ?? undefined,
+      // No lastUpdate: the snapshot time is not when the plant last reported,
+      // and showing it would make a long-offline plant look recent.
+    }));
+  } catch {
+    return null;
+  }
+}
+
+export async function aggregateStations(timeoutMs = PROVIDER_TIMEOUT_MS): Promise<AggregateResult> {
   const stations: StationWithProvider[] = [];
   const errors: AggregateResult['errors'] = [];
   const stale: string[] = [];
@@ -146,12 +176,15 @@ export async function aggregateStations(): Promise<AggregateResult> {
       try {
         // Bounded so a slow platform can't stall the page; the fetch itself keeps going.
         const run = fetchStations(p);
-        const withProvider = await withTimeout(run, PROVIDER_TIMEOUT_MS).catch((e) => {
+        const withProvider = await withTimeout(run, timeoutMs).catch((e) => {
           throw inflightList.get(p.id) === run ? new StillLoading((e as Error).message) : e;
         });
         stations.push(...withProvider);
       } catch (err) {
-        const cached = lastGood.get(p.id);
+        // In-memory last-good first; after a restart/deploy there is none yet, so
+        // fall back to the provider's most recent saved snapshot instead of
+        // showing 0 plants while a slow portal scrape or API warms up.
+        const cached = lastGood.get(p.id) ?? (await snapshotFallback(p.id));
         if (cached) {
           stations.push(...cached);
           stale.push(p.id);
@@ -186,9 +219,9 @@ const STALE_MS = 10 * 60_000;
 let cachedAgg: { at: number; value: AggregateResult } | null = null;
 let inflightAgg: Promise<AggregateResult> | null = null;
 
-function sweep(): Promise<AggregateResult> {
+function sweep(timeoutMs?: number): Promise<AggregateResult> {
   if (!inflightAgg) {
-    inflightAgg = aggregateStations()
+    inflightAgg = aggregateStations(timeoutMs)
       .then((value) => {
         cachedAgg = { at: Date.now(), value };
         return value;
@@ -208,6 +241,46 @@ export async function aggregateStationsCached(): Promise<AggregateResult> {
     return cachedAgg.value;
   }
   return sweep();
+}
+
+/** When the fleet snapshot served by aggregateStationsCached() was taken (ms epoch), or null. */
+export function fleetUpdatedAt(): number | null {
+  return cachedAgg?.at ?? null;
+}
+
+// ─── "Refresh now" ──────────────────────────────────────────────────────────
+// Drops the per-provider station-list caches (portal scrapes are otherwise
+// reused for minutes) and runs a sweep that waits long enough for a re-scrape,
+// so the result matches what the vendor portals show right now. Sigenergy is
+// left alone: its OpenAPI rate-limits to one call per ~5 min. Throttled so a
+// burst of clicks can't hammer the portals.
+const LIVE_CACHE_PREFIXES = ['scraper:', 'elekeeper:plants', 'dyness:rt', 'deye:rawlist'];
+// A platform still answering after FORCE_TIMEOUT_MS (a slow portal scrape) keeps
+// going in the background; it shows on the next poll instead of holding the button.
+const FORCE_TIMEOUT_MS = 30_000;
+const FORCE_MIN_GAP_MS = 60_000; // one forced re-scrape per minute, fleet-wide
+let forcedAt = 0; // when the last forced refresh finished
+let inflightForce: Promise<AggregateResult> | null = null;
+
+export function refreshStationsNow(): Promise<AggregateResult> {
+  if (inflightForce) return inflightForce; // a click already pulling: share it
+  if (Date.now() - forcedAt < FORCE_MIN_GAP_MS) return aggregateStationsCached();
+  inflightForce = (async () => {
+    // A sweep already running started on old caches; let it finish first.
+    if (inflightAgg) await inflightAgg.catch(() => {});
+    for (const p of LIVE_CACHE_PREFIXES) invalidate(p);
+    const result = await sweep(FORCE_TIMEOUT_MS);
+    // Platforms that were still answering keep running; once they land, re-sweep
+    // so the next poll gets their fresh data instead of the last-good copy.
+    if (result.stale.length) {
+      void Promise.allSettled([...inflightList.values()]).then(() => sweep()).catch(() => {});
+    }
+    return result;
+  })().finally(() => {
+    forcedAt = Date.now();
+    inflightForce = null;
+  });
+  return inflightForce;
 }
 
 export * from './types.js';

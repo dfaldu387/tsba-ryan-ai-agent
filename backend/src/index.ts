@@ -13,9 +13,35 @@ const here = dirname(fileURLToPath(import.meta.url));
 const frontendDist = resolve(here, '../../frontend/dist');
 
 async function main(): Promise<void> {
-  // 32MB body limit so the voice agent can attach images/PDFs (base64-inflated)
-  // for the model to read. Individual attachments are also capped server-side.
-  const app = Fastify({ logger: { level: env.isProd ? 'info' : 'warn' }, bodyLimit: 32_000_000 });
+  // 2MB default body limit (public routes like /api/login must not buffer huge
+  // bodies); the voice agent route raises its own limit for image/PDF attachments.
+  // trustProxy: loopback only — nginx sits in front in production, so req.ip is
+  // the real client (needed for login rate limiting) without trusting spoofed
+  // X-Forwarded-For from direct connections.
+  const app = Fastify({ logger: { level: env.isProd ? 'info' : 'warn' }, bodyLimit: 2_000_000, trustProxy: '127.0.0.1' });
+
+  // Unhandled errors: Fastify's default reply includes err.message, which for a
+  // 500 can be SQL, a hostname or a stack detail. Log it in full; send clients a
+  // plain message. 4xx errors (bad JSON, body too large…) keep their message.
+  app.setErrorHandler((error, req, reply) => {
+    const err = error as { statusCode?: number; code?: string; message?: string };
+    const status = err.statusCode && err.statusCode >= 400 ? err.statusCode : 500;
+    if (status >= 500) {
+      req.log.error({ err }, 'unhandled error');
+      return reply.code(status).send({ error: 'server_error', message: 'Something went wrong on our side. Try again in a moment.' });
+    }
+    return reply.code(status).send({ error: err.code ?? 'bad_request', message: err.message });
+  });
+
+  // Baseline security headers on every response (no CSP here: the SPA loads map
+  // tiles/fonts from several origins; a CSP needs its own tested allow-list).
+  app.addHook('onSend', async (_req, reply, payload) => {
+    reply.header('X-Content-Type-Options', 'nosniff');
+    reply.header('X-Frame-Options', 'DENY');
+    reply.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+    reply.header('Permissions-Policy', 'camera=(), geolocation=(), microphone=(self)');
+    return payload;
+  });
 
   // Dev: the Vite server runs on another origin and needs CORS.
   if (!env.isProd) {
@@ -129,19 +155,38 @@ async function main(): Promise<void> {
     })();
   }, 20_000).unref?.();
 
+  let shuttingDown = false;
   const shutdown = async () => {
-    await app.close();
-    // Tear down the shared headless Chromium so it (and its child processes)
-    // aren't orphaned across restarts/deploys.
-    const { closeBrowser } = await import('./providers/scraper/browser.js');
-    await closeBrowser();
-    if (env.storage === 'postgres') {
-      const { stopQueue } = await import('./queue.js');
-      const { closePool } = await import('./db.js');
-      await stopQueue();
-      await closePool();
+    if (shuttingDown) return; // SIGINT + SIGTERM together must not run this twice
+    shuttingDown = true;
+    // Hard stop if a step hangs (a wedged browser, a slow DB) — PM2 would SIGKILL anyway.
+    setTimeout(() => process.exit(1), 10_000).unref();
+    try {
+      // Stop background loops first so nothing new starts mid-shutdown.
+      const { stopSolarAlertMonitor } = await import('./solar-alert-monitor.js');
+      stopSolarAlertMonitor();
+      const { stopSolarRecorder } = await import('./solar-recorder.js');
+      stopSolarRecorder();
+      if (env.storage === 'postgres') {
+        const { stopKeepwarm } = await import('./keepwarm/service.js');
+        stopKeepwarm();
+      }
+      await app.close();
+      // Tear down the shared headless Chromium so it (and its child processes)
+      // aren't orphaned across restarts/deploys.
+      const { closeBrowser } = await import('./providers/scraper/browser.js');
+      await closeBrowser();
+      if (env.storage === 'postgres') {
+        const { stopQueue } = await import('./queue.js');
+        const { closePool } = await import('./db.js');
+        await stopQueue();
+        await closePool();
+      }
+    } catch (err) {
+      console.error('[shutdown]', err);
+    } finally {
+      process.exit(0);
     }
-    process.exit(0);
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);

@@ -7,7 +7,7 @@ import { getSolarMonthlyProduction, type MonthlyProductionPoint, type StationSta
 import { useConsole } from '../../lib/console';
 import { fmtInt, fmtKwh, fmtKwp, fmtPowerBig, installedCapacityKw, plural } from '../../lib/format';
 import {
-  EmptyState, Icon, KpiTile, ProviderChip, Section, SkeletonRows, STATION_HINT, STATION_TONE, StatusDot, type IconName,
+  EmptyState, ErrorState, Icon, KpiTile, ProviderChip, Section, SkeletonRows, STATION_HINT, STATION_TONE, StatusDot, type IconName,
 } from '../../ui';
 import { AssistantCard } from '../../components/solar/AssistantCard';
 
@@ -58,6 +58,7 @@ export function OverviewPage() {
   const onlinePct = summary.count ? Math.round((summary.online / summary.count) * 100) : 0;
 
   if (fleetLoading && stations.length === 0) return <SkeletonRows rows={8} cols={4} />;
+  if (c.fleetError && stations.length === 0) return <ErrorState title="Monitoring data unavailable" detail={c.fleetError} onRetry={() => void c.refreshFleet()} />;
 
   return (
     <div className="fo">

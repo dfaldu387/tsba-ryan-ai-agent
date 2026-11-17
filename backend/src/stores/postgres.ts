@@ -14,7 +14,7 @@ import {
   removeConnection,
   upsertConnection,
 } from '../connections-repo.js';
-import { addEntries, getEntryTextByPrefix, removeEntriesByPrefix } from '../knowledge-repo.js';
+import { addEntries, getEntryTextByPrefix, removeEntriesByPrefix, replaceEntriesByPrefix } from '../knowledge-repo.js';
 import {
   getDocument,
   listDocuments,
@@ -71,6 +71,9 @@ export class PgKnowledgeStore implements KnowledgeStore {
   }
   removeByPrefix(idPrefix: string): Promise<void> {
     return removeEntriesByPrefix(idPrefix);
+  }
+  replaceByPrefix(idPrefix: string, entries: KnowledgeEntry[]): Promise<void> {
+    return replaceEntriesByPrefix(idPrefix, entries);
   }
   getTextByPrefix(idPrefix: string): Promise<string> {
     return getEntryTextByPrefix(idPrefix);

@@ -153,8 +153,19 @@ interface SolisInverter {
   sn?: string;
   stationId?: string;
   state?: number; // 1 online, 2 offline, 3 alarm
-  productModel?: string;
+  productModel?: string; // internal product code (e.g. "110B") — not the model name
   model?: string;
+  machine?: string; // marketed model, e.g. "S6-EH1P8K-L-PLUS"
+  inverterSeries?: string; // e.g. "S6-EH1P(3-8)K-L-PLUS"
+  batteryCapacitySoc?: number | string; // %; 0 on grid-tied (no battery) models
+}
+
+/** Hybrid (battery) inverter series — SOC of 0 on these is a real reading. */
+const HYBRID_SERIES = /(^|-)(EH|RHI|RAI|ESINV|ES)/i;
+
+interface SolisInverterFacts {
+  model?: string;
+  soc?: number;
 }
 interface SolisCollector {
   sn?: string;
@@ -178,6 +189,17 @@ interface SolisAlarm {
 interface SolisExtras {
   devices: Map<string, NormalizedDevice[]>;
   alarms: Map<string, NormalizedAlert[]>;
+  /** Per-plant inverter model / battery SOC (from the inverter list). */
+  inverters: Map<string, SolisInverterFacts[]>;
+}
+
+function inverterFacts(d: SolisInverter): SolisInverterFacts {
+  const soc = Number(d.batteryCapacitySoc);
+  const hybrid = HYBRID_SERIES.test(d.inverterSeries ?? '') || HYBRID_SERIES.test(d.machine ?? '');
+  return {
+    model: d.machine?.trim() || undefined,
+    soc: Number.isFinite(soc) && soc >= 0 && soc <= 100 && (hybrid || soc > 0) ? soc : undefined,
+  };
 }
 
 function solisDevice(sn: string, type: string, state?: number): NormalizedDevice {
@@ -207,8 +229,13 @@ async function loadExtras(): Promise<SolisExtras> {
     const collectors = await capture<Paged<SolisCollector>>(page, '/overview/device/details/collector', '/api/collector/listV2', 100);
     const alarms = await capture<Paged<SolisAlarm>>(page, '/overview/alarm/inverterAlarm', '/api/alarm/list', 100);
     if (!inverters && !collectors) throw new Error('solis_devices_not_captured');
-    const out: SolisExtras = { devices: new Map(), alarms: new Map() };
-    for (const d of recordsOf(inverters)) if (d.sn && d.stationId) addTo(out.devices, String(d.stationId), solisDevice(d.sn, 'Inverter', d.state));
+    const out: SolisExtras = { devices: new Map(), alarms: new Map(), inverters: new Map() };
+    for (const d of recordsOf(inverters)) {
+      if (!d.sn || !d.stationId) continue;
+      const f = inverterFacts(d);
+      addTo(out.inverters, String(d.stationId), f);
+      addTo(out.devices, String(d.stationId), solisDevice(d.sn, f.model ? `Inverter · ${f.model}` : 'Inverter', d.state));
+    }
     for (const d of recordsOf(collectors)) if (d.sn && d.stationId) addTo(out.devices, String(d.stationId), solisDevice(d.sn, 'Logger', d.state));
     for (const a of recordsOf(alarms)) {
       if (!a.stationId) continue;
@@ -248,6 +275,13 @@ function detailFromList(stationId: string, stations: NormalizedStation[]): Norma
   push('This month', s.monthlyEnergyKwh != null ? `${s.monthlyEnergyKwh} kWh` : undefined);
   push('Total', s.totalEnergyKwh != null ? `${s.totalEnergyKwh} kWh` : undefined);
   push('Station ID', s.id);
+  const inv = extras?.inverters.get(stationId) ?? [];
+  const models = [...new Set(inv.map((f) => f.model).filter((m): m is string => !!m))];
+  const socs = inv.map((f) => f.soc).filter((v): v is number => v != null);
+  const batterySoc = socs.length ? Math.round(socs.reduce((a, b) => a + b, 0) / socs.length) : undefined;
+  if (inv.length) push('Manufacturer', 'Solis');
+  push('Inverter model', models.join(', '));
+  push('Battery SOC', batterySoc != null ? `${batterySoc}%` : undefined);
   return {
     info,
     latest: {
@@ -255,6 +289,7 @@ function detailFromList(stationId: string, stations: NormalizedStation[]): Norma
       dailyEnergyKwh: s.dailyEnergyKwh,
       monthlyEnergyKwh: s.monthlyEnergyKwh,
       totalEnergyKwh: s.totalEnergyKwh,
+      batterySoc,
       lastUpdate: s.lastUpdate,
     },
     devices: extras?.devices.get(stationId) ?? [],

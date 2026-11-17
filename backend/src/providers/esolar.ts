@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { pickCoords } from './coords.js';
+import { fleetToday, pickCoords } from './coords.js';
 import { portalCreds } from './scraper/credentials.js';
 import { cached } from './cache.js';
 import { flattenSajDevices, type SajDeviceNode } from './saj-device.js';
@@ -76,7 +76,7 @@ function commonBody(): Record<string, unknown> {
     appProjectName: 'elekeeper',
     // Date-only (YYYY-MM-DD), matching the SPA. The chart endpoints reject a full
     // ISO datetime here with "Incorrect date format"; date-only is accepted by all.
-    clientDate: new Date().toISOString().slice(0, 10),
+    clientDate: fleetToday(),
     lang: 'en',
     timeStamp: Date.now(),
     clientId: 'esolar-monitor-admin',
@@ -503,7 +503,7 @@ function mapChart(c: SajChart): ChartData | undefined {
   return { kind: c.showType === 'line' ? 'line' : 'bar', xLabels: x, series };
 }
 
-const todayStr = () => new Date().toISOString().slice(0, 10);
+const todayStr = () => fleetToday();
 
 export const esolarProvider: SolarProvider = {
   id: 'elekeeper',

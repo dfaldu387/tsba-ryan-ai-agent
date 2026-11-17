@@ -323,3 +323,32 @@ ALTER TABLE kw_messages ADD COLUMN IF NOT EXISTS sent_by TEXT NOT NULL DEFAULT '
 ALTER TABLE kw_agent_tasks DROP CONSTRAINT IF EXISTS kw_agent_tasks_kind_check;
 ALTER TABLE kw_agent_tasks ADD CONSTRAINT kw_agent_tasks_kind_check
   CHECK (kind IN ('move_stage', 'chase', 'call', 'log_outcome', 'set_rhythm', 'add_value', 'close_lost', 'handback'));
+
+-- ─── Folded in from db/migrations/0001 (fresh installs were missing these) ────
+ALTER TABLE drafts    ADD COLUMN IF NOT EXISTS recipient    TEXT;   -- email / phone / chat id
+ALTER TABLE drafts    ADD COLUMN IF NOT EXISTS delivery     JSONB;  -- {status, channel, detail, at}
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS text_quality TEXT;   -- 'ok' | 'low' | 'corrupted'
+
+-- ─── Indexes for queries the app actually runs (audit Nov 2026) ───────────────
+-- Rep-scoped message lookups (open drafts, last activity, per-day counts, team view).
+CREATE INDEX IF NOT EXISTS kw_messages_user_open_idx ON kw_messages (user_id, direction, status, created_at);
+-- Agent snooze/dedupe lookup by client + kind across all statuses.
+CREATE INDEX IF NOT EXISTS kw_agent_tasks_client_kind_idx ON kw_agent_tasks (client_id, kind, status);
+-- FK cascade from kw_clients and per-client activity.
+CREATE INDEX IF NOT EXISTS kw_activity_client_idx ON kw_activity (client_id);
+-- "starts with" deletes/reads of a document's chunks (id LIKE 'drive:<id>:%').
+CREATE INDEX IF NOT EXISTS knowledge_entries_id_pattern_idx ON knowledge_entries (id text_pattern_ops);
+
+-- Emails are unique regardless of case (lookups already use lower(email)). Only
+-- created when no case-duplicates exist, so this can never fail a deploy; if it
+-- is skipped, the notice says which addresses to merge first.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'users_email_lower_uq') THEN
+    IF EXISTS (SELECT lower(email) FROM users GROUP BY lower(email) HAVING count(*) > 1) THEN
+      RAISE NOTICE 'users_email_lower_uq not created: some emails differ only by case';
+    ELSE
+      CREATE UNIQUE INDEX users_email_lower_uq ON users (lower(email));
+    END IF;
+  END IF;
+END $$;

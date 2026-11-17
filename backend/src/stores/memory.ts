@@ -1,3 +1,4 @@
+import { DraftAlreadyDecidedError } from '../draft-errors.js';
 import { randomUUID } from 'node:crypto';
 import type {
   ConnectionProvider,
@@ -139,6 +140,21 @@ export class MemoryKnowledgeStore implements KnowledgeStore {
     });
   }
 
+  async replaceByPrefix(idPrefix: string, entries: KnowledgeEntry[]): Promise<void> {
+    // Embed first: if it throws, the existing chunks are left as they were.
+    const vectors = entries.length ? await embeddingProvider.embed(entries.map((e) => entryEmbeddingText(e))) : [];
+    for (let i = this.makers.length - 1; i >= 0; i--) {
+      if (this.makers[i].id.startsWith(idPrefix)) {
+        this.makers.splice(i, 1);
+        this.makerVectors.splice(i, 1);
+      }
+    }
+    entries.forEach((e, i) => {
+      this.makers.push(e);
+      this.makerVectors.push(vectors[i]);
+    });
+  }
+
   async removeByPrefix(idPrefix: string): Promise<void> {
     for (let i = this.makers.length - 1; i >= 0; i--) {
       if (this.makers[i].id.startsWith(idPrefix)) {
@@ -208,6 +224,8 @@ export class MemoryDraftStore implements DraftStore {
       const newText = (text ?? '').trim();
       row.reply = newText;
       row.edited = newText !== row.reply_original.trim();
+    } else if (row.status !== 'pending') {
+      throw new DraftAlreadyDecidedError();
     } else if (action === 'approve') {
       if (text !== undefined) row.reply = text.trim();
       row.edited = row.edited || row.reply.trim() !== row.reply_original.trim();

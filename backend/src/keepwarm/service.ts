@@ -320,7 +320,10 @@ export async function unschedule(p: StoredProfile, id: string): Promise<KwMessag
 }
 
 // ─── Sending (the only path to a client's phone) ────────────────────────────
-async function dispatch(m: StoredMessage): Promise<StoredMessage> {
+async function dispatch(due: StoredMessage): Promise<StoredMessage> {
+  // Claim first: only one caller (loop tick or approve) may send a given text.
+  const m = await repo.claimForSend(due.id);
+  if (!m) return (await repo.getMessage(due.userId, due.id)) ?? due;
   const p = await repo.getProfile(m.userId);
   const c = p ? await repo.getClient(m.userId, m.clientId, p.timezone) : null;
   if (!p || !c) return repo.updateMessage(m.id, { status: 'failed', error: 'Client or rep no longer exists' });
@@ -509,15 +512,26 @@ export async function team(): Promise<KwTeamRow[]> {
 // ─── Background loop ────────────────────────────────────────────────────────
 let timers: NodeJS.Timeout[] = [];
 
+/** Stop the background loops (graceful shutdown). */
+export function stopKeepwarm(): void {
+  for (const t of timers) clearInterval(t);
+  timers = [];
+}
+
 export function startKeepwarm(): void {
   if (timers.length) return;
   // Every minute: send approved texts whose time has come.
+  let sending = false;
   timers.push(setInterval(() => {
+    if (sending) return; // previous tick still sending — never overlap
+    sending = true;
     void (async () => {
       try {
         for (const m of await repo.dueScheduled()) await dispatch(m).catch((err) => console.warn('[keepwarm] dispatch failed:', err));
       } catch (err) {
         console.warn('[keepwarm] dispatch loop:', (err as Error).message);
+      } finally {
+        sending = false;
       }
     })();
   }, 60_000));

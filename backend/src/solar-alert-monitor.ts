@@ -1,11 +1,13 @@
 import type { SolarAlertSettings } from '@tsba/shared';
-import { getProvider, aggregateStations } from './providers/index.js';
+import { getProvider, aggregateStationsCached } from './providers/index.js';
 import { getSolarAlerts } from './solar-alerts.js';
 import { sendMail, MailSendError } from './smtp-mailer.js';
 import { isNight } from './sun.js';
 import { getAlertSettings } from './solar-alert-settings.js';
 import { resolveAttachment, resolveSolution } from './solar-alert-resolution.js';
 import type { SolarMonitorAlert, StationInfoItem } from './providers/types.js';
+import { env } from './env.js';
+import { getSetting, setSetting } from './settings-repo.js';
 
 /**
  * Background solar-alert monitor.
@@ -54,6 +56,48 @@ const recoveredPending = new Map<string, SolarMonitorAlert>();
 let digestDay = ''; // 'YYYY-MM-DD' in the configured timezone
 const digestSentSlots = new Set<string>(); // "HH:MM" slots already consumed today
 let digestSends = 0; // digests actually emailed today (enforces maxPerDay)
+
+// ─── Restart-safe state ───────────────────────────────────────────────────────
+// The bookkeeping above (plus which open issues were already emailed and when
+// each was first seen) is saved to app_settings after every scan and restored
+// on the first scan after boot. Without it, every deploy/restart re-emailed all
+// open issues (and re-sent today's digest slots).
+const RUNTIME_KEY = 'solar_alert_runtime';
+interface RuntimeState {
+  digestDay: string;
+  slots: string[];
+  sends: number;
+  open: [id: string, firstSeen: number, adminNotified: boolean][];
+}
+let restored = false;
+const restoredOpen = new Map<string, { firstSeen: number; adminNotified: boolean }>();
+
+async function restoreRuntime(): Promise<void> {
+  if (restored) return;
+  restored = true;
+  if (env.storage !== 'postgres') return;
+  try {
+    const st = await getSetting<RuntimeState>(RUNTIME_KEY);
+    if (!st) return;
+    digestDay = st.digestDay ?? '';
+    for (const sl of st.slots ?? []) digestSentSlots.add(sl);
+    digestSends = st.sends ?? 0;
+    for (const [id, firstSeen, adminNotified] of st.open ?? []) restoredOpen.set(id, { firstSeen, adminNotified });
+  } catch (err) {
+    console.warn('[solar-alert] could not restore monitor state:', (err as Error).message);
+  }
+}
+
+async function saveRuntime(): Promise<void> {
+  if (env.storage !== 'postgres' || !restored) return; // never overwrite saved state before it was loaded
+  const state: RuntimeState = {
+    digestDay,
+    slots: [...digestSentSlots],
+    sends: digestSends,
+    open: [...active].map(([id, t]) => [id, t.firstSeen, t.adminNotified]),
+  };
+  await setSetting(RUNTIME_KEY, state).catch((err) => console.warn('[solar-alert] could not save monitor state:', (err as Error).message));
+}
 
 /** Current { date:'YYYY-MM-DD', minutes:sinceMidnight } in an IANA timezone. */
 function localNow(tz: string): { date: string; minutes: number } {
@@ -116,7 +160,9 @@ async function plantInfo(a: SolarMonitorAlert): Promise<StationInfoItem[]> {
   // Primary source: the fleet overview, which is cheap, cached and reliable even
   // for offline plants (the per-plant detail call can be empty/rate-limited).
   try {
-    const { stations } = await aggregateStations();
+    // Cached: this runs once per emailed plant; an uncached sweep per plant hit
+    // every provider (and their rate limits) again each time.
+    const { stations } = await aggregateStationsCached();
     const s = stations.find((x) => x.provider === a.provider && x.id === a.plantId);
     if (s) {
       push('Status', s.status);
@@ -430,6 +476,7 @@ export async function runAlertMonitorOnce(): Promise<MonitorRunResult> {
   };
 
   if (!settings.enabled) return { ...base, reason: 'alerts disabled in settings' };
+  await restoreRuntime();
 
   /**
    * Is it night at a plant's own location? Uses the plant's installation
@@ -441,9 +488,22 @@ export async function runAlertMonitorOnce(): Promise<MonitorRunResult> {
     return isNight(a.lat ?? settings.lat, a.lng ?? settings.lng);
   };
 
-  const { alerts, scannedPlants } = await getSolarAlerts();
+  const { alerts, scannedPlants, coverage } = await getSolarAlerts();
   base.scanned = scannedPlants;
   const seen = new Set(alerts.map((a) => a.id));
+  // An issue may only clear if its plant was actually checked this scan:
+  // plant-level (offline/partial) needs the plant in the overview; device and
+  // fault issues need its detail fetched — or the plant now being offline,
+  // which the plant-level alert covers. Otherwise a portal timeout or a
+  // provider dropping out sent a false "Recovered" and then a "new" alert.
+  const listed = new Set(coverage?.listed ?? []);
+  const detailed = new Set(coverage?.detailed ?? []);
+  const checked = (a: SolarMonitorAlert): boolean => {
+    if (!coverage) return true; // older scan shape: previous behaviour
+    const k = plantKey(a);
+    if (a.severity === 'offline' || a.severity === 'partial') return listed.has(k);
+    return detailed.has(k) || alerts.some((x) => x.severity === 'offline' && plantKey(x) === k);
+  };
 
   // Insert/refresh currently-open issues.
   let newIssues = 0;
@@ -451,15 +511,17 @@ export async function runAlertMonitorOnce(): Promise<MonitorRunResult> {
     const t = active.get(a.id);
     if (t) t.alert = a;
     else {
-      active.set(a.id, { alert: a, firstSeen: Date.now(), adminNotified: false, customerNotified: false });
-      newIssues++;
+      const prev = restoredOpen.get(a.id); // still open from before a restart
+      active.set(a.id, { alert: a, firstSeen: prev?.firstSeen ?? Date.now(), adminNotified: prev?.adminNotified ?? false, customerNotified: false });
+      if (!prev) newIssues++;
     }
   }
+  restoredOpen.clear(); // only the first scan after boot reconciles
 
   // Detect cleared issues.
   let cleared = 0;
   for (const [id, t] of [...active]) {
-    if (!seen.has(id)) {
+    if (!seen.has(id) && checked(t.alert)) {
       active.delete(id);
       cleared++;
       if (t.adminNotified && settings.recovery) recoveredPending.set(id, t.alert);
@@ -783,6 +845,21 @@ export async function sendSampleDigest(): Promise<{
   return { sent: true, plants: new Set(due.map((t) => plantKey(t.alert))).size, synthetic, recipients };
 }
 
+/**
+ * Manual "run now" (from the API): shares the scheduled scan's overlap guard, so
+ * a click during a scheduled scan can't email the same issues twice.
+ */
+export async function runAlertMonitorNow(): Promise<MonitorRunResult | { busy: true; reason: string }> {
+  if (running) return { busy: true, reason: 'A scan is already running. Try again in a minute.' };
+  running = true;
+  try {
+    return await runAlertMonitorOnce();
+  } finally {
+    await saveRuntime();
+    running = false;
+  }
+}
+
 async function tick(): Promise<void> {
   if (running) return;
   running = true;
@@ -796,6 +873,7 @@ async function tick(): Promise<void> {
   } catch (err) {
     console.error('[solar-alert] monitor tick failed:', (err as Error).message);
   } finally {
+    await saveRuntime();
     running = false;
   }
 }

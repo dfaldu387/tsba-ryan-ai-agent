@@ -18,10 +18,17 @@
     "ingest": "npm run ingest -w @tsba/backend",
     "portal-login": "npm run portal-login -w @tsba/backend --",
     "start": "npm run start -w @tsba/backend",
-    "typecheck": "npm run typecheck -w @tsba/shared && npm run typecheck -w @tsba/backend && npm run typecheck -w @tsba/frontend"
+    "typecheck": "npm run typecheck -w @tsba/shared && npm run typecheck -w @tsba/backend && npm run typecheck -w @tsba/frontend",
+    "lint": "eslint .",
+    "test": "npm run test -w @tsba/backend"
   },
   "devDependencies": {
-    "concurrently": "^9.1.0"
+    "@eslint/js": "^9.39.5",
+    "concurrently": "^9.1.0",
+    "eslint": "^9.39.5",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "globals": "^17.14.0",
+    "typescript-eslint": "^8.73.0"
   },
   "engines": {
     "node": ">=20"

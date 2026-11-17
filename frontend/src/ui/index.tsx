@@ -1,6 +1,7 @@
 // Console component library. Namespaced `c-` (see console.css). Every component
 // covers its default / hover / loading / empty / error states.
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import type { StationStatus } from '../api';
 import { fmtAbs, fmtInt, fmtRel, staleness, toMs } from '../lib/format';
 import type { Severity } from '../lib/alerts';
@@ -318,12 +319,17 @@ export function Drawer({ open, onClose, title, sub, children, footer, wide }: {
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const hid = useId();
+  // Callers often pass an inline onClose; keeping it in a ref means the focus
+  // effect below runs only when the drawer opens/closes — not on every parent
+  // re-render (e.g. the 30s fleet poll), which used to yank focus out of inputs.
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
   useEffect(() => {
     if (!open) return;
     const prev = document.activeElement as HTMLElement | null;
     ref.current?.focus();
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') closeRef.current();
       if (e.key === 'Tab' && ref.current) {
         const f = ref.current.querySelectorAll<HTMLElement>('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
         if (!f.length) return;
@@ -338,7 +344,7 @@ export function Drawer({ open, onClose, title, sub, children, footer, wide }: {
       window.removeEventListener('keydown', onKey);
       prev?.focus?.();
     };
-  }, [open, onClose]);
+  }, [open]);
   if (!open) return null;
   return (
     <div className="c-drawer-root">
@@ -372,13 +378,47 @@ export function Menu({ label, icon = 'more', items, align = 'right', trigger }: 
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  // The popup is portalled to <body> with fixed positioning so a scrolling or
+  // overflow-clipped ancestor (e.g. the deal board) can't cut it off. Placed
+  // under the trigger, flipped above when there's no room, clamped on-screen.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const btn = ref.current?.getBoundingClientRect();
+      const pop = popRef.current;
+      if (!btn || !pop) return;
+      const m = 8, vw = window.innerWidth, vh = window.innerHeight;
+      const pw = pop.offsetWidth, ph = pop.offsetHeight;
+      let top = btn.bottom + 4;
+      if (top + ph > vh - m && btn.top - 4 - ph >= m) top = btn.top - 4 - ph;
+      top = Math.max(m, Math.min(top, vh - ph - m));
+      let left = align === 'right' ? btn.right - pw : btn.left;
+      left = Math.max(m, Math.min(left, vw - pw - m));
+      pop.style.top = `${top}px`;
+      pop.style.left = `${left}px`;
+    };
+    place();
+    const onScroll = (e: Event) => { if (!popRef.current?.contains(e.target as Node)) setOpen(false); };
+    window.addEventListener('resize', place);
+    window.addEventListener('scroll', onScroll, true);
+    return () => {
+      window.removeEventListener('resize', place);
+      window.removeEventListener('scroll', onScroll, true);
+    };
+  }, [open, align]);
   useEffect(() => {
     if (!open) return;
-    const onDoc = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false); };
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    const inside = (t: EventTarget | null) => !!t && (ref.current?.contains(t as Node) || popRef.current?.contains(t as Node));
+    const onDoc = (e: MouseEvent) => { if (!inside(e.target)) setOpen(false); };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      setOpen(false);
+      ref.current?.querySelector<HTMLElement>('button')?.focus();
+    };
     document.addEventListener('mousedown', onDoc);
     window.addEventListener('keydown', onKey);
-    ref.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+    popRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus({ preventScroll: true });
     return () => {
       document.removeEventListener('mousedown', onDoc);
       window.removeEventListener('keydown', onKey);
@@ -387,7 +427,7 @@ export function Menu({ label, icon = 'more', items, align = 'right', trigger }: 
   const onMenuKey = (e: React.KeyboardEvent) => {
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
     e.preventDefault();
-    const els = [...(ref.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? [])];
+    const els = [...(popRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? [])];
     const i = els.indexOf(document.activeElement as HTMLElement);
     els[(i + (e.key === 'ArrowDown' ? 1 : -1) + els.length) % els.length]?.focus();
   };
@@ -397,8 +437,9 @@ export function Menu({ label, icon = 'more', items, align = 'right', trigger }: 
         aria-label={trigger ? undefined : label} title={trigger ? undefined : label} onClick={() => setOpen((o) => !o)}>
         {trigger ?? <Icon name={icon} />}
       </button>
-      {open && (
-        <div className={`c-menu-pop ${align}`} role="menu" aria-label={label} onKeyDown={onMenuKey}>
+      {open && createPortal(
+        <div ref={popRef} className={`c-menu-pop ${align}`} role="menu" aria-label={label} onKeyDown={onMenuKey}
+          onClick={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()}>
           {items.map((it, i) =>
             it === 'sep' ? (
               <div key={i} className="c-menu-sep" role="separator" />
@@ -411,7 +452,8 @@ export function Menu({ label, icon = 'more', items, align = 'right', trigger }: 
               </button>
             ),
           )}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

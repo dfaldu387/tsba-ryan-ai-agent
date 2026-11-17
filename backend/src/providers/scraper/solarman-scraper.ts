@@ -47,8 +47,13 @@ const API = `${ORIGIN}/maintain-s`;
 let bearer: string | null = null;
 
 async function api<T>(path: string, body?: unknown): Promise<T> {
+  return apiAt<T>(API, path, body);
+}
+
+/** Same as api() but against another portal service base (e.g. /device-s). */
+async function apiAt<T>(base: string, path: string, body?: unknown): Promise<T> {
   if (!bearer) throw new Error('solarman_no_token (list scrape has not run yet)');
-  const res = await fetch(`${API}${path}`, {
+  const res = await fetch(`${base}${path}`, {
     method: body === undefined ? 'GET' : 'POST',
     headers: { authorization: bearer, 'content-type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -145,6 +150,7 @@ function tsToDate(sec?: number): string | undefined {
 // ─── Fleet extras: devices, today's curves, latest alerts (one pass) ─────────
 
 interface SmDevice {
+  id?: number; // portal device id (needed for /device-s/ per-device calls)
   siteId?: number;
   deviceSn?: string;
   type?: string;
@@ -167,6 +173,8 @@ interface SmLatestAlert {
 }
 interface FleetExtras {
   devices: Map<string, NormalizedDevice[]>;
+  /** Raw device rows per plant (keeps the portal device id for per-device calls). */
+  rawDevices: Map<string, SmDevice[]>;
   curves: Map<string, NormalizedPowerPoint[]>;
   alerts: Map<string, NormalizedAlert[]>;
 }
@@ -194,7 +202,7 @@ function pushTo<T>(m: Map<string, T[]>, k: string, v: T): void {
 
 async function loadFleetExtras(): Promise<FleetExtras> {
   const ids = [...rawById.keys()].map(Number);
-  const out: FleetExtras = { devices: new Map(), curves: new Map(), alerts: new Map() };
+  const out: FleetExtras = { devices: new Map(), rawDevices: new Map(), curves: new Map(), alerts: new Map() };
   const chunks: number[][] = [];
   for (let i = 0; i < ids.length; i += 50) chunks.push(ids.slice(i, i + 50));
 
@@ -206,7 +214,11 @@ async function loadFleetExtras(): Promise<FleetExtras> {
       ).catch(() => null);
       if (!r) return;
       ok++;
-      for (const d of r.data ?? []) if (d.siteId != null && d.deviceSn) pushTo(out.devices, String(d.siteId), toDevice(d));
+      for (const d of r.data ?? []) {
+        if (d.siteId == null || !d.deviceSn) continue;
+        pushTo(out.devices, String(d.siteId), toDevice(d));
+        pushTo(out.rawDevices, String(d.siteId), d);
+      }
     }),
     ...chunks.map(async (stationIds) => {
       const r = await api<SmCurve[]>('/history/power/day/overview', { stationIds }).catch(() => null);
@@ -249,6 +261,67 @@ async function fleetExtras(): Promise<FleetExtras | null> {
   if (!rawById.size || !bearer) return null;
   return cached('scraper:solarman:extras', 300_000, loadFleetExtras, { swr: true }).catch(() => null);
 }
+
+// ─── Per-device facts (model, maker, battery SOC) ────────────────────────────
+
+/**
+ * The device lists carry no model. The portal's per-device "original data"
+ * (the logger's raw register dump, `/device-s/device/originalData`) does, under
+ * Solarman's standard keys: `5` = product model (e.g. "HYD 15KTL-3PH",
+ * "BTS 5K"), `INV_MAN` = inverter maker, `B_left_cap1` = battery SOC (%).
+ */
+interface DeviceFacts {
+  model?: string;
+  maker?: string;
+  soc?: number;
+  /** Battery stack module serials (`B_P_SN1..n`). The portal lists each module as
+   *  its own "Battery" row, but the device lists only return the stack itself. */
+  packs?: string[];
+  /** Battery control units (`BDU_SN`, `BDU_SN1..n`) — the portal lists these as
+   *  "Battery <model>-BDU" rows; no device list returns them either. */
+  bdus?: string[];
+}
+
+function deviceFacts(deviceId: number): Promise<DeviceFacts | null> {
+  return cached(
+    `scraper:solarman:devfacts:${deviceId}`,
+    600_000,
+    async () => {
+      const o = await apiAt<Record<string, string>>(`${ORIGIN}/device-s`, `/device/originalData?deviceId=${deviceId}`);
+      const str = (v?: string) => (v && v.trim() ? v.trim() : undefined);
+      const soc = Number(o.B_left_cap1);
+      return {
+        model: str(o['5']) ?? str(o.PM1_AAC) ?? str(o.B_T),
+        maker: str(o.INV_MAN),
+        soc: o.B_left_cap1 != null && Number.isFinite(soc) && soc >= 0 && soc <= 100 ? soc : undefined,
+        packs: Object.entries(o)
+          .filter(([k, v]) => /^B_P_SN\d+$/.test(k) && str(v))
+          .sort(([a], [b]) => Number(a.slice(6)) - Number(b.slice(6)))
+          .map(([, v]) => v.trim()),
+        bdus: Object.entries(o)
+          .filter(([k, v]) => /^BDU_SN\d*$/.test(k) && str(v))
+          .sort(([a], [b]) => Number(a.slice(6) || 0) - Number(b.slice(6) || 0))
+          .map(([, v]) => v.trim()),
+      };
+    },
+    { swr: true },
+  ).catch(() => null);
+}
+
+/** Facts for a plant's inverters + batteries (loggers/meters carry no model). */
+async function plantDeviceFacts(raw: SmDevice[]): Promise<Map<string, DeviceFacts>> {
+  const out = new Map<string, DeviceFacts>();
+  const wanted = raw.filter((d) => d.id != null && d.deviceSn && (d.type === 'INVERTER' || d.type === 'BATTERY')).slice(0, 12);
+  await Promise.all(
+    wanted.map(async (d) => {
+      const f = await deviceFacts(d.id!);
+      if (f) out.set(d.deviceSn!, f);
+    }),
+  );
+  return out;
+}
+
+const uniq = (xs: (string | undefined)[]) => [...new Set(xs.filter((x): x is string => !!x))];
 
 // ─── Per-plant Overview (live flow, today's totals, day curve) ───────────────
 
@@ -367,6 +440,72 @@ async function detailFromList(stationId: string): Promise<NormalizedDetail | nul
   push('Last update', tsToDate(s.lastUpdateTime));
   push('Station ID', s.id);
 
+  // Enrich with per-device model / maker / battery SOC (cached, best-effort).
+  const raw = extras?.rawDevices.get(stationId) ?? [];
+  const facts = raw.length ? await plantDeviceFacts(raw) : new Map<string, DeviceFacts>();
+  const ofType = (t: string) => raw.filter((d) => d.type === t).map((d) => facts.get(d.deviceSn ?? ''));
+  const invFacts = ofType('INVERTER');
+  const batFacts = ofType('BATTERY');
+  const socs = invFacts.map((f) => f?.soc).filter((v): v is number => v != null);
+  const batterySoc = socs.length ? Math.round(socs.reduce((a, b) => a + b, 0) / socs.length) : undefined;
+  push('Manufacturer', uniq(invFacts.map((f) => f?.maker)).join(', '));
+  push('Inverter model', uniq(invFacts.map((f) => f?.model)).join(', '));
+  push('Battery model', uniq(batFacts.map((f) => f?.model)).join(', '));
+  push('Battery SOC', batterySoc != null ? `${batterySoc}%` : undefined);
+
+  const listed = (extras?.devices.get(stationId) ?? []).map((d) => {
+    const model = facts.get(d.sn)?.model;
+    return model && d.type ? { ...d, type: `${d.type} · ${model}` } : d;
+  });
+  // Battery stacks: the portal shows every module (B_P_SN*) and control unit
+  // (BDU_SN*) of a stack as its own Battery row, but the device lists return
+  // only the stack. A module can also have a stale standalone record (e.g.
+  // offline since 2025) while its live stack reports it — the stack wins.
+  const isBattery = (d: NormalizedDevice) => /^Battery/.test(d.type ?? '');
+  const stackOf = new Map<string, NormalizedDevice>(); // module/BDU sn → its stack
+  const claim = (sn: string, stack: NormalizedDevice) => {
+    const cur = stackOf.get(sn);
+    // Prefer an online stack's report over an offline one.
+    if (!cur || (cur.online === false && stack.online !== false)) stackOf.set(sn, stack);
+  };
+  for (const d of listed.filter(isBattery)) {
+    for (const sn of facts.get(d.sn)?.packs ?? []) if (sn !== d.sn) claim(sn, d);
+  }
+  const bduStack = new Map<string, NormalizedDevice>(); // bdu sn → stack
+  for (const d of listed.filter(isBattery)) {
+    for (const sn of facts.get(d.sn)?.bdus ?? []) {
+      const cur = bduStack.get(sn);
+      if (!cur || (cur.online === false && d.online !== false)) bduStack.set(sn, d);
+    }
+  }
+  const asModule = (stack: NormalizedDevice, sn: string): NormalizedDevice => ({ ...stack, sn });
+  const asBdu = (stack: NormalizedDevice, sn: string): NormalizedDevice => {
+    const model = facts.get(stack.sn)?.model;
+    return { ...stack, sn, type: model ? `Battery · ${model}-BDU` : 'Battery · BDU' };
+  };
+
+  // A listed battery that a live (online) stack claims as a module: take the stack's view.
+  const fixed = listed.map((d) => {
+    const owner = isBattery(d) ? stackOf.get(d.sn) : undefined;
+    return owner && owner.online !== false && (d.online === false || !facts.get(d.sn)?.model) ? asModule(owner, d.sn) : d;
+  });
+  const seen = new Set(fixed.map((d) => d.sn));
+  const devices: NormalizedDevice[] = [];
+  for (const d of fixed) {
+    devices.push(d);
+    if (!isBattery(d) || stackOf.has(d.sn)) continue; // only expand real stacks
+    for (const sn of facts.get(d.sn)?.bdus ?? []) {
+      if (seen.has(sn) || bduStack.get(sn) !== d) continue;
+      seen.add(sn);
+      devices.push(asBdu(d, sn));
+    }
+    for (const sn of facts.get(d.sn)?.packs ?? []) {
+      if (seen.has(sn) || stackOf.get(sn) !== d) continue;
+      seen.add(sn);
+      devices.push(asModule(d, sn));
+    }
+  }
+
   return {
     info,
     latest: {
@@ -375,16 +514,22 @@ async function detailFromList(stationId: string): Promise<NormalizedDetail | nul
       dailyEnergyKwh: s.generationValue,
       monthlyEnergyKwh: s.generationMonth,
       totalEnergyKwh: s.generationTotal,
+      batterySoc,
       lastUpdate: s.lastUpdateTime,
     },
-    devices: extras?.devices.get(stationId) ?? [],
+    devices,
     alerts: extras?.alerts.get(stationId) ?? [],
     power: extras?.curves.get(stationId) ?? [],
   };
 }
 
 async function scrapeStations(page: Page): Promise<NormalizedStation[]> {
-  let body: string | null = null;
+  // The plant page fires the search more than once: first filtered to the
+  // account's OWN plants (`stationSource: 0`), then the full list including
+  // plants shared from other accounts. Keeping whichever answered first made
+  // the fleet flip between e.g. 44 and 57 plants. Collect every response and
+  // keep the unfiltered one (or, failing that, the one with the most rows).
+  const bodies: { body: string; filtered: boolean; rows: number }[] = [];
 
   await page.route(`**${SEARCH_MATCH}*`, (route) => {
     try {
@@ -401,21 +546,24 @@ async function scrapeStations(page: Page): Promise<NormalizedStation[]> {
     if (a && req.url().includes('/maintain-s/')) bearer = a;
   });
   page.on('response', async (resp) => {
-    if (resp.url().includes(SEARCH_MATCH) && resp.status() === 200 && !body) {
-      try {
-        body = await resp.text();
-      } catch {
-        /* ignore */
-      }
+    if (!resp.url().includes(SEARCH_MATCH) || resp.status() !== 200) return;
+    try {
+      const text = await resp.text();
+      const post = resp.request().postData() ?? '';
+      const rows = ((JSON.parse(text) as { data?: unknown[] }).data ?? []).length;
+      bodies.push({ body: text, filtered: /stationSource/.test(post), rows });
+    } catch {
+      /* ignore */
     }
   });
 
   await page.goto(PLANT_URL, { waitUntil: 'networkidle', timeout: 40_000 }).catch(() => {});
   if (/\/login/.test(page.url())) throw new SessionExpiredError('solarman');
   await page.waitForTimeout(3000);
-  if (!body) throw new Error('station list response not captured');
+  const best = bodies.find((b) => !b.filtered) ?? [...bodies].sort((a, b) => b.rows - a.rows)[0];
+  if (!best) throw new Error('station list response not captured');
 
-  const data = JSON.parse(body) as { total?: number; data?: { station: SolarmanStation }[] };
+  const data = JSON.parse(best.body) as { total?: number; data?: { station: SolarmanStation }[] };
   const raws = (data.data ?? []).map((it) => it.station);
   rawById.clear();
   for (const s of raws) rawById.set(String(s.id), s);

@@ -164,10 +164,14 @@ async function fetchAttachment(documentId: string, titleHint?: string): Promise<
     const doc = await storage.documents.get(documentId);
     if (!doc) return null;
     const mime = doc.mime_type || 'application/pdf';
-    const { buffer, contentType } = await cached(`resolution:${documentId}`, BYTES_TTL_MS, () =>
-      fetchFileBytes(documentId, mime),
-    );
-    if (buffer.length > MAX_ATTACH_BYTES) return null;
+    // Size-check before caching: an oversize file is remembered as "too big"
+    // instead of keeping its bytes in memory for the cache lifetime.
+    const got = await cached(`resolution:${documentId}`, BYTES_TTL_MS, async () => {
+      const f = await fetchFileBytes(documentId, mime);
+      return f.buffer.length > MAX_ATTACH_BYTES ? null : f;
+    });
+    if (!got) return null;
+    const { buffer, contentType } = got;
     const title = (doc.title || titleHint || 'resolution').replace(/[\\/:*?"<>|]+/g, '_');
     const filename = /\.(pdf|docx?|txt|csv|xlsx?)$/i.test(title)
       ? title

@@ -12,15 +12,7 @@ import { CommandPalette } from './ui/CommandPalette';
 import { Icon, Menu, SkeletonRows, type IconName } from './ui';
 import { DashboardPage } from './pages/DashboardPage';
 import { SolarTab } from './components/SolarTab';
-import { DraftsPage } from './pages/DraftsPage';
-import { ConnectionsManager } from './components/ConnectionsManager';
-import { KnowledgeTab } from './components/KnowledgeTab';
-import { UsersPanel } from './components/UsersPanel';
-import { QueryList } from './components/QueryList';
-import { SupportChat } from './components/SupportChat';
 import { NotificationBell } from './components/NotificationBell';
-import { ProgressTab } from './components/ProgressTab';
-import { SettingsTab } from './components/SettingsTab';
 import logoLight from './assets/tsba-logo.png';
 import logoDark from './assets/tsba-logo-dark.png';
 import logoMark from './assets/tsba-mark.png';
@@ -45,6 +37,15 @@ const EnergyDashboard = lazy(() =>
 );
 
 // Separate workspaces / heavy screens, loaded on first visit.
+// Sections off the default landing path load on demand (smaller first bundle).
+const DraftsPage = lazy(() => import('./pages/DraftsPage').then((m) => ({ default: m.DraftsPage })));
+const ConnectionsManager = lazy(() => import('./components/ConnectionsManager').then((m) => ({ default: m.ConnectionsManager })));
+const KnowledgeTab = lazy(() => import('./components/KnowledgeTab').then((m) => ({ default: m.KnowledgeTab })));
+const UsersPanel = lazy(() => import('./components/UsersPanel').then((m) => ({ default: m.UsersPanel })));
+const QueryList = lazy(() => import('./components/QueryList').then((m) => ({ default: m.QueryList })));
+const SupportChat = lazy(() => import('./components/SupportChat').then((m) => ({ default: m.SupportChat })));
+const ProgressTab = lazy(() => import('./components/ProgressTab').then((m) => ({ default: m.ProgressTab })));
+const SettingsTab = lazy(() => import('./components/SettingsTab').then((m) => ({ default: m.SettingsTab })));
 const SalesPage = lazy(() => import('./pages/sales/SalesPage').then((m) => ({ default: m.SalesPage })));
 const VoiceAgent = lazy(() => import('./components/VoiceAgent').then((m) => ({ default: m.VoiceAgent })));
 // Map: Leaflet (~150 KB) is only needed on this one screen.
@@ -107,8 +108,12 @@ interface Loc {
 function initialLoc(): Loc {
   try {
     const params = new URLSearchParams(window.location.search);
-    if (params.get('status')) return { section: 'connections', search: window.location.search }; // OAuth return
     const fromPath = sectionFromPath(window.location.pathname);
+    // Google OAuth returns to `/?tab=admin&status=…`; only that (or the
+    // connections page itself) is a callback — `/knowledge?status=flagged` isn't.
+    if (params.get('status') && (params.get('tab') === 'admin' || fromPath === 'connections')) {
+      return { section: 'connections', search: window.location.search };
+    }
     if (fromPath) return { section: fromPath, search: window.location.search };
     const t = params.get('tab'); // legacy ?tab= links
     if (t === 'admin') return { section: 'dashboard', search: '' };
@@ -194,15 +199,17 @@ export function App() {
     return () => window.removeEventListener('popstate', onPop);
   }, []);
 
+  // Stable identity: effects across the app depend on it, so a fresh closure
+  // per render used to refetch/re-arm their intervals on every navigation.
+  const onAuthError = useCallback(() => {
+    clearToken();
+    setUser(null);
+  }, []);
+
   if (!user) {
     if (restoring) return null;
     return <LoginForm onAuthed={setUser} />;
   }
-
-  const onAuthError = () => {
-    clearToken();
-    setUser(null);
-  };
 
   return (
     <ConsoleProvider user={user} navigate={navigate} onAuthError={onAuthError}>
@@ -263,7 +270,7 @@ function Shell({ loc, theme, onToggleTheme, onSignOut }: {
   if (active === 'energy') {
     return (
       <Suspense fallback={<div className="c-wall-loading">Loading control room…</div>}>
-        <EnergyDashboard onExit={() => navigate('map')} onAuthError={onAuthError} />
+        <EnergyDashboard onExit={() => navigate('map')} onAuthError={onAuthError} canSeePii={user.role !== 'viewer'} />
       </Suspense>
     );
   }
@@ -328,7 +335,7 @@ function Shell({ loc, theme, onToggleTheme, onSignOut }: {
         </div>
       );
       break;
-    case 'knowledge': body = <KnowledgeTab user={user} onAuthError={onAuthError} />; break;
+    case 'knowledge': body = <KnowledgeTab user={user} onAuthError={onAuthError} search={loc.search} />; break;
     case 'ask': body = <><QueryList onAuthError={onAuthError} /><SupportChat onAuthError={onAuthError} floatingOnly /></>; break;
     case 'drafts': body = <DraftsPage search={loc.search} />; break;
     case 'voice': body = <Suspense fallback={<SkeletonRows rows={4} cols={1} />}><VoiceAgent onAuthError={onAuthError} /></Suspense>; break;
@@ -524,7 +531,7 @@ function Shell({ loc, theme, onToggleTheme, onSignOut }: {
           </div>
         </header>
         <main id="c-main" className="c-body content-body" tabIndex={-1}>
-          {body}
+          <Suspense fallback={<SkeletonRows rows={5} cols={3} />}>{body}</Suspense>
         </main>
       </div>
 

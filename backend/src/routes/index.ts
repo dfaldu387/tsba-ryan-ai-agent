@@ -11,8 +11,9 @@ import {
   type DraftStatus,
   type SourceCard,
 } from '@tsba/shared';
-import { cacheLookup, cacheStore, invalidateAnswerCache, isStandaloneQuestion } from '../answer-cache.js';
-import { currentUser, issueToken, requireAuth, requirePermission } from '../auth.js';
+import { cacheLookup, cacheStore, isStandaloneQuestion } from '../answer-cache.js';
+import { issueToken, requireAuth, requirePermission } from '../auth.js';
+import { clearLoginFailures, loginBlockedFor, noteLoginFailure } from '../login-throttle.js';
 import { appWebUrl, env, googleOAuthConfigured } from '../env.js';
 import {
   PROVIDERS,
@@ -20,6 +21,8 @@ import {
   ProviderNotConfiguredError,
   aggregateStationsCached,
   configuredProviders,
+  fleetUpdatedAt,
+  refreshStationsNow,
   getProvider,
 } from '../providers/index.js';
 import { SOLAR_TOOLS, executeSolarTool, solarToolsAvailable } from '../solar-tools.js';
@@ -58,13 +61,22 @@ This OVERRIDES RULE 5 and any "hand over anything needing live data" guidance FO
 function draftReplyWithData(
   prompt: { stable: string; volatile: string },
   signal?: AbortSignal,
+  onLiveData?: () => void,
 ): ReturnType<typeof draftReply> {
   if (!solarToolsAvailable()) return draftReply(prompt, signal);
   return draftReply(
     { stable: prompt.stable + SOLAR_DRAFT_NOTE, volatile: prompt.volatile },
     signal,
-    { tools: SOLAR_TOOLS, runTool: executeSolarTool },
+    { tools: SOLAR_TOOLS, runTool: liveTool(onLiveData) },
   );
+}
+
+/** executeSolarTool, but reports that live monitoring data was read (so the answer isn't cached). */
+function liveTool(onLiveData?: () => void): typeof executeSolarTool {
+  return (name, input) => {
+    onLiveData?.();
+    return executeSolarTool(name, input);
+  };
 }
 import {
   anthropicConfigured,
@@ -113,6 +125,9 @@ import {
 import { isLowQualityExtract, looksCorrupted } from '../text-quality.js';
 import type { TextQuality } from '@tsba/shared';
 import { removeIngestedDocument } from '../documents-service.js';
+import { DraftAlreadyDecidedError } from '../draft-errors.js';
+import { canSeePii, maskText, redactInfo, redactStations } from '../pii.js';
+import { publicMessage } from '../errors.js';
 import { GmailAuthError, getMessage, listInbox, listLabels } from '../google-gmail.js';
 import { sendReply } from '../smtp-mailer.js';
 import { scanLabel } from '../gmail-ingest.js';
@@ -129,14 +144,24 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // Email + password login. Returns a signed token and the authenticated user
   // (with the permissions their role grants).
   app.post<{ Body: { email?: string; password?: string } }>('/api/login', async (req, reply) => {
-    const email = (req.body?.email ?? '').trim();
-    const password = req.body?.password ?? '';
+    const email = (typeof req.body?.email === 'string' ? req.body.email : '').trim().slice(0, 320);
+    const password = typeof req.body?.password === 'string' ? req.body.password.slice(0, 1024) : '';
     if (!email || !password) return reply.code(400).send({ error: 'credentials_required' });
 
-    const user = await authenticate(email, password);
-    if (!user) return reply.code(401).send({ error: 'invalid_credentials' });
+    // Brute-force guard: failed attempts are counted per IP+email and per IP.
+    const wait = loginBlockedFor(req.ip, email);
+    if (wait > 0) {
+      reply.header('Retry-After', String(Math.ceil(wait / 1000)));
+      return reply.code(429).send({ error: 'too_many_attempts', message: 'Too many sign-in attempts. Try again in a few minutes.' });
+    }
 
-    return { token: issueToken(user.id), user: toAuthenticatedUser(user) };
+    const user = await authenticate(email, password);
+    if (!user) {
+      noteLoginFailure(req.ip, email);
+      return reply.code(401).send({ error: 'invalid_credentials' });
+    }
+    clearLoginFailures(req.ip, email);
+    return { token: issueToken(user), user: toAuthenticatedUser(user) };
   });
 
   // Who am I — used by the SPA to restore the session and gate the UI.
@@ -199,8 +224,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
           // Use Claude when a key is set; otherwise fall back to an offline draft
           // composed from the retrieved knowledge so the preview still works.
+          let usedLiveData = false;
           result = anthropicConfigured()
-            ? await draftReplyWithData(buildPrompt({ question, audience, channel, entries }))
+            ? await draftReplyWithData(buildPrompt({ question, audience, channel, entries }), undefined, () => { usedLiveData = true; })
             : offlineDraft({ question, audience, channel, entries });
 
           // Resolve the cited ids into source cards (only ids we actually retrieved).
@@ -210,14 +236,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
             .filter((e): e is NonNullable<typeof e> => Boolean(e))
             .map((e) => ({ id: e.id, kind: e.kind, title: e.title, source: e.source }));
 
-          if (anthropicConfigured()) await cacheStore('draft', cacheKey, question, { result, sources });
+          // Answers built from live plant data go stale in minutes — never cache them for 24h.
+          if (anthropicConfigured() && !usedLiveData) await cacheStore('draft', cacheKey, question, { result, sources });
         }
 
         const draft = await storage.drafts.insert({ question, audience, channel, result, sources, recipient });
         return draft;
       } catch (err) {
         req.log.error({ err }, 'draft failed');
-        return reply.code(502).send({ error: 'draft_failed', message: (err as Error).message });
+        return reply.code(502).send({ error: 'draft_failed', message: publicMessage(err, 'Couldn’t write a draft right now. Try again in a moment.') });
       }
     },
   );
@@ -225,7 +252,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // ── Voice agent: a natural multi-turn conversation (not a formal draft) ──────
   app.post<{ Body: { messages?: unknown; audience?: string; attachments?: unknown; mode?: string } }>(
     '/api/voice/chat',
-    { preHandler: requirePermission('ask') },
+    // 32MB: base64-inflated image/PDF attachments (each capped below).
+    { preHandler: requirePermission('ask'), bodyLimit: 32_000_000 },
     async (req, reply) => {
       // 'text' mode is the live support chat (typed); default 'voice' keeps the
       // voice agent unchanged.
@@ -355,12 +383,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         const system = solarOn
           ? { stable: baseSystem.stable + SOLAR_SYSTEM_NOTE, volatile: baseSystem.volatile }
           : baseSystem;
+        let usedLiveData = false;
         const text = anthropicConfigured()
           ? await chatReply(
               system,
               modelTurns,
               undefined,
-              solarOn ? { tools: SOLAR_TOOLS, runTool: executeSolarTool } : undefined,
+              solarOn ? { tools: SOLAR_TOOLS, runTool: liveTool(() => { usedLiveData = true; }) } : undefined,
             )
           : offlineChat({ question: lastUser.content, audience, entries });
 
@@ -385,11 +414,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           : [];
 
         const payload = { reply, sources, suggestions };
-        if (cacheable) await cacheStore('voice', audience, lastUser.content, payload);
+        if (cacheable && !usedLiveData) await cacheStore('voice', audience, lastUser.content, payload);
         return { ...payload, audience, channel };
       } catch (err) {
         req.log.error({ err }, 'voice chat failed');
-        return reply.code(502).send({ error: 'chat_failed', message: (err as Error).message });
+        return reply.code(502).send({ error: 'chat_failed', message: publicMessage(err, 'The assistant couldn’t answer right now. Try again in a moment.') });
       }
     },
   );
@@ -449,9 +478,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  app.get('/api/drafts', { preHandler: requirePermission('view') }, async () => {
+  app.get('/api/drafts', { preHandler: requirePermission('view') }, async (req) => {
     const storage = await getStorage();
-    return storage.drafts.list();
+    const drafts = await storage.drafts.list();
+    // Viewers may read drafts, but not the customer's address/number they go to.
+    return canSeePii(req.authUser) ? drafts : drafts.map((d) => ({ ...d, recipient: d.recipient ? maskText(d.recipient) ?? null : d.recipient }));
   });
 
   app.patch<{ Params: { id: string }; Body: { action?: string; text?: string } }>(
@@ -468,7 +499,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(400).send({ error: 'text_required' });
       }
       const storage = await getStorage();
-      let updated = await storage.drafts.update(id, action, req.body?.text);
+      let updated;
+      try {
+        updated = await storage.drafts.update(id, action, req.body?.text);
+      } catch (err) {
+        if (err instanceof DraftAlreadyDecidedError) {
+          return reply.code(409).send({ error: 'already_decided', message: 'This draft was already approved or rejected.' });
+        }
+        throw err;
+      }
       if (!updated) return reply.code(404).send({ error: 'not_found' });
 
       // When a reply is approved for sending (not a team handover), dispatch it on
@@ -686,7 +725,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // List a folder's children ('root' by default). Folders first.
   app.get<{ Querystring: { folderId?: string; pageToken?: string } }>(
     '/api/drive/files',
-    { preHandler: requirePermission('view') },
+    { preHandler: requirePermission('run_ingest') },
     async (req, reply) => {
       const folderId = (req.query.folderId || 'root').trim();
       try {
@@ -694,7 +733,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       } catch (err) {
         if (err instanceof DriveAuthError) return reply.code(409).send({ error: 'drive_not_connected' });
         req.log.error({ err }, 'drive list failed');
-        return reply.code(502).send({ error: 'drive_list_failed', message: (err as Error).message });
+        return reply.code(502).send({ error: 'drive_list_failed', message: publicMessage(err, 'Couldn’t open this Google Drive folder. Try again, or reconnect Drive in Connections.') });
       }
     },
   );
@@ -702,7 +741,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // Search the whole Drive by name (folders + files).
   app.get<{ Querystring: { q?: string } }>(
     '/api/drive/search',
-    { preHandler: requirePermission('view') },
+    { preHandler: requirePermission('run_ingest') },
     async (req, reply) => {
       const q = (req.query.q || '').trim();
       if (!q) return { files: [] };
@@ -711,7 +750,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       } catch (err) {
         if (err instanceof DriveAuthError) return reply.code(409).send({ error: 'drive_not_connected' });
         req.log.error({ err }, 'drive search failed');
-        return reply.code(502).send({ error: 'drive_search_failed', message: (err as Error).message });
+        return reply.code(502).send({ error: 'drive_search_failed', message: publicMessage(err, 'Google Drive search failed. Try again, or reconnect Drive in Connections.') });
       }
     },
   );
@@ -731,7 +770,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       } catch (err) {
         if (err instanceof DriveAuthError) return reply.code(409).send({ error: 'drive_not_connected' });
         req.log.error({ err }, 'drive ingest failed');
-        return reply.code(502).send({ error: 'drive_ingest_failed', message: (err as Error).message });
+        return reply.code(502).send({ error: 'drive_ingest_failed', message: publicMessage(err, 'Couldn’t add this file to the knowledge base. Try again.') });
       }
     },
   );
@@ -745,21 +784,38 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // Clean reset: delete every Drive-sourced document and its knowledge chunks,
   // then re-sync all folders from scratch through the current (Claude + OCR)
   // pipeline. Drops stale/orphan records and re-extracts every file cleanly.
+  let resyncRunning = false;
   app.post('/api/drive/resync-all', { preHandler: requirePermission('run_ingest') }, async (req, reply) => {
-    const storage = await getStorage();
-    const docs = await storage.documents.list();
-    for (const d of docs) {
-      if (d.source !== 'google-drive') continue;
-      await storage.knowledge.removeByPrefix(docChunkPrefix(d.id));
-      await storage.documents.remove(d.id);
-    }
+    if (resyncRunning) return reply.code(409).send({ error: 'resync_in_progress', message: 'A full re-sync is already running.' });
+    resyncRunning = true;
     try {
+      const storage = await getStorage();
+      // Prove every source folder is reachable BEFORE deleting anything — an
+      // expired Drive token used to empty the knowledge base and re-ingest nothing.
+      const sources = await storage.folders.list();
+      if (!sources.length) return reply.code(409).send({ error: 'no_folders', message: 'No Drive folders are selected as sources.' });
+      for (const f of sources) {
+        try {
+          await listFolder(f.id);
+        } catch (err) {
+          if (err instanceof DriveAuthError) return reply.code(409).send({ error: 'drive_not_connected' });
+          return reply.code(502).send({ error: 'resync_failed', message: `Couldn't open the folder “${f.name}”. Nothing was deleted.` });
+        }
+      }
+      const docs = await storage.documents.list();
+      for (const d of docs) {
+        if (d.source !== 'google-drive') continue;
+        await storage.knowledge.removeByPrefix(docChunkPrefix(d.id));
+        await storage.documents.remove(d.id);
+      }
       const folders = await syncAllFolders();
       return { folders };
     } catch (err) {
       if (err instanceof DriveAuthError) return reply.code(409).send({ error: 'drive_not_connected' });
       req.log.error({ err }, 'resync-all failed');
-      return reply.code(502).send({ error: 'resync_failed', message: (err as Error).message });
+      return reply.code(502).send({ error: 'resync_failed', message: 'The re-sync failed. Check the server log.' });
+    } finally {
+      resyncRunning = false;
     }
   });
 
@@ -804,7 +860,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     } catch (err) {
       if (err instanceof DriveAuthError) return reply.code(409).send({ error: 'drive_not_connected' });
       req.log.error({ err }, 'reingest flagged failed');
-      return reply.code(502).send({ error: 'reingest_failed', message: (err as Error).message });
+      return reply.code(502).send({ error: 'reingest_failed', message: publicMessage(err, 'Couldn’t re-ingest this document. Try again.') });
     }
   });
 
@@ -839,7 +895,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       } catch (err) {
         if (err instanceof DriveAuthError) return reply.code(409).send({ error: 'drive_not_connected' });
         req.log.error({ err }, 'add folder source failed');
-        return reply.code(502).send({ error: 'folder_add_failed', message: (err as Error).message });
+        return reply.code(502).send({ error: 'folder_add_failed', message: publicMessage(err, 'Couldn’t add the folder. Check Drive access and try again.') });
       }
     },
   );
@@ -860,7 +916,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       } catch (err) {
         if (err instanceof DriveAuthError) return reply.code(409).send({ error: 'drive_not_connected' });
         req.log.error({ err }, 'bulk add folders failed');
-        return reply.code(502).send({ error: 'folders_add_failed', message: (err as Error).message });
+        return reply.code(502).send({ error: 'folders_add_failed', message: publicMessage(err, 'Couldn’t add the folders. Check Drive access and try again.') });
       }
     },
   );
@@ -872,7 +928,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     } catch (err) {
       if (err instanceof DriveAuthError) return reply.code(409).send({ error: 'drive_not_connected' });
       req.log.error({ err }, 'sync all folders failed');
-      return reply.code(502).send({ error: 'folders_sync_failed', message: (err as Error).message });
+      return reply.code(502).send({ error: 'folders_sync_failed', message: publicMessage(err, 'Couldn’t sync from Google Drive. Check Drive access and try again.') });
     }
   });
 
@@ -888,7 +944,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       } catch (err) {
         if (err instanceof DriveAuthError) return reply.code(409).send({ error: 'drive_not_connected' });
         req.log.error({ err }, 'folder sync failed');
-        return reply.code(502).send({ error: 'folder_sync_failed', message: (err as Error).message });
+        return reply.code(502).send({ error: 'folder_sync_failed', message: publicMessage(err, 'Couldn’t sync this folder. Check Drive access and try again.') });
       }
     },
   );
@@ -907,13 +963,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   // ── Gmail: scan a label into the knowledge base ─────────────────────────────
   // The labels the user can pick as a scan source.
-  app.get('/api/gmail/labels', { preHandler: requirePermission('view') }, async (req, reply) => {
+  app.get('/api/gmail/labels', { preHandler: requirePermission('run_ingest') }, async (req, reply) => {
     try {
       return { labels: await listLabels() };
     } catch (err) {
       if (err instanceof GmailAuthError) return reply.code(409).send({ error: 'gmail_not_connected' });
       req.log.error({ err }, 'gmail labels failed');
-      return reply.code(502).send({ error: 'gmail_labels_failed', message: (err as Error).message });
+      return reply.code(502).send({ error: 'gmail_labels_failed', message: publicMessage(err, 'Couldn’t load Gmail labels. Try again, or reconnect Gmail in Connections.') });
     }
   });
 
@@ -930,7 +986,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       } catch (err) {
         if (err instanceof GmailAuthError) return reply.code(409).send({ error: 'gmail_not_connected' });
         req.log.error({ err }, 'gmail scan failed');
-        return reply.code(502).send({ error: 'gmail_scan_failed', message: (err as Error).message });
+        return reply.code(502).send({ error: 'gmail_scan_failed', message: publicMessage(err, 'Couldn’t scan that Gmail label. Try again.') });
       }
     },
   );
@@ -948,7 +1004,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       } catch (err) {
         if (err instanceof GmailAuthError) return reply.code(409).send({ error: 'gmail_not_connected' });
         req.log.error({ err }, 'gmail queries failed');
-        return reply.code(502).send({ error: 'gmail_queries_failed', message: (err as Error).message });
+        return reply.code(502).send({ error: 'gmail_queries_failed', message: publicMessage(err, 'Couldn’t load Gmail messages. Try again.') });
       }
     },
   );
@@ -988,7 +1044,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       } catch (err) {
         if (err instanceof GmailAuthError) return reply.code(409).send({ error: 'gmail_not_connected' });
         req.log.error({ err }, 'gmail draft failed');
-        return reply.code(502).send({ error: 'gmail_draft_failed', message: (err as Error).message });
+        return reply.code(502).send({ error: 'gmail_draft_failed', message: publicMessage(err, 'Couldn’t write a reply draft for this email. Try again.') });
       }
     },
   );
@@ -1013,7 +1069,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       } catch (err) {
         if (err instanceof GmailAuthError) return reply.code(409).send({ error: 'gmail_not_connected' });
         req.log.error({ err }, 'gmail reply failed');
-        return reply.code(502).send({ error: 'gmail_reply_failed', message: (err as Error).message });
+        return reply.code(502).send({ error: 'gmail_reply_failed', message: publicMessage(err, 'Couldn’t send the reply through Gmail. Try again.') });
       }
     },
   );
@@ -1024,7 +1080,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   const solarFail = (reply: FastifyReply, err: unknown) => {
     if (err instanceof ProviderNotConfiguredError) return reply.code(503).send({ error: 'provider_not_configured' });
     const code = err instanceof ProviderError ? err.code : undefined;
-    return reply.code(502).send({ error: 'provider_request_failed', code, message: (err as Error).message });
+    return reply.code(502).send({ error: 'provider_request_failed', code, message: publicMessage(err, 'The monitoring platform didn’t respond. Try again in a minute.') });
   };
 
   // The list of providers and whether each is connected (no secrets returned).
@@ -1035,9 +1091,16 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // Aggregated overview: every station across every configured provider, queried
   // in parallel and resiliently (one retry + last-good fallback per provider), so
   // a transient blip on one platform neither blanks it nor flashes an error.
-  app.get('/api/solar/overview', { preHandler: requirePermission('view') }, async () => {
+  app.get('/api/solar/overview', { preHandler: requirePermission('view') }, async (req) => {
     const { stations, errors, stale, unavailable } = await aggregateStationsCached();
-    return { stations, errors, stale, unavailable, providerCount: configuredProviders().length, geocodePending: geocodeBacklog() };
+    return { stations: redactStations(stations, req.authUser), errors, stale, unavailable, providerCount: configuredProviders().length, geocodePending: geocodeBacklog(), updatedAt: fleetUpdatedAt() };
+  });
+
+  // "Refresh now": bypass the per-platform caches and pull fresh data from every
+  // platform (waits for portal re-scrapes, ~10–40s). Same shape as /overview.
+  app.post('/api/solar/refresh', { preHandler: requirePermission('view') }, async (req) => {
+    const { stations, errors, stale, unavailable } = await refreshStationsNow();
+    return { stations: redactStations(stations, req.authUser), errors, stale, unavailable, providerCount: configuredProviders().length, geocodePending: geocodeBacklog(), updatedAt: fleetUpdatedAt() };
   });
 
   // Fleet health alerts for the header notification panel: offline/partial
@@ -1050,7 +1113,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     } catch (err) {
       req.log.error({ err }, 'solar alerts scan failed');
       console.error('[solar/alerts] scan failed:', (err as Error).stack || err);
-      return reply.code(500).send({ error: 'solar_alerts_failed', detail: (err as Error).message });
+      return reply.code(500).send({ error: 'solar_alerts_failed', detail: publicMessage(err, 'The alert scan failed. Try again in a minute.') });
     }
   });
 
@@ -1066,22 +1129,61 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       try {
         let detail;
         try {
-          detail = await provider.stationDetail(req.params.id);
-        } catch {
-          // One retry — covers a transient upstream blip or a just-expired token.
-          await new Promise((r) => setTimeout(r, 400));
-          detail = await provider.stationDetail(req.params.id);
+          try {
+            detail = await provider.stationDetail(req.params.id);
+          } catch {
+            // One retry — covers a transient upstream blip or a just-expired token.
+            await new Promise((r) => setTimeout(r, 400));
+            detail = await provider.stationDetail(req.params.id);
+          }
+        } catch (err) {
+          // Platform down or slow: serve the last saved detail (≤24 h) if there is one.
+          if (env.storage !== 'postgres') throw err;
+          const { storedDetail } = await import('../plant-history-repo.js');
+          const saved = await storedDetail(provider.id, req.params.id).catch(() => null);
+          if (!saved) throw err;
+          req.log.warn({ err, provider: provider.id }, 'station detail served from saved copy');
+          return { provider: provider.id, stationId: req.params.id, ...saved.detail, info: redactInfo(saved.detail.info, req.authUser) ?? saved.detail.info, stale: true, capturedAt: saved.capturedAt };
+        }
+        // Keep the saved copy current (best-effort, not awaited by the user).
+        if (env.storage === 'postgres') {
+          const fresh = detail;
+          void import('../plant-history-repo.js').then(({ saveDetails }) => saveDetails([{ provider: provider.id, stationId: req.params.id, detail: fresh }])).catch(() => {});
         }
         // No intraday curve from the platform (e.g. Sungrow's curve endpoints are
         // outside our API scope): build today's from our own 15-min snapshots.
         if (!detail.power.length) {
           detail = { ...detail, power: await todayCurveFromSnapshots(provider.id, req.params.id).catch(() => []) };
         }
-        return { provider: provider.id, stationId: req.params.id, ...detail };
+        return { provider: provider.id, stationId: req.params.id, ...detail, info: redactInfo(detail.info, req.authUser) ?? detail.info };
       } catch (err) {
         req.log.error({ err, provider: provider.id }, 'solar station detail failed');
         return solarFail(reply, err);
       }
+    },
+  );
+
+  // Saved history for one plant (from the fleet scan): a past day's power curve
+  // and every alarm with when it was first/last seen.
+  app.get<{ Params: { provider: string; id: string }; Querystring: { day?: string } }>(
+    '/api/solar/:provider/stations/:id/curve',
+    { preHandler: requirePermission('view') },
+    async (req, reply) => {
+      if (env.storage !== 'postgres') return reply.code(501).send({ error: 'history_unavailable' });
+      const day = req.query.day ?? '';
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return reply.code(400).send({ error: 'invalid_day', message: 'Use day=YYYY-MM-DD.' });
+      const { curveForDay } = await import('../plant-history-repo.js');
+      return { provider: req.params.provider, stationId: req.params.id, day, power: await curveForDay(req.params.provider, req.params.id, day) };
+    },
+  );
+
+  app.get<{ Params: { provider: string; id: string }; Querystring: { limit?: string } }>(
+    '/api/solar/:provider/stations/:id/alarms',
+    { preHandler: requirePermission('view') },
+    async (req, reply) => {
+      if (env.storage !== 'postgres') return reply.code(501).send({ error: 'history_unavailable' });
+      const { alarmHistory } = await import('../plant-history-repo.js');
+      return { provider: req.params.provider, stationId: req.params.id, alarms: await alarmHistory(req.params.provider, req.params.id, Number(req.query.limit) || 100) };
     },
   );
 
@@ -1145,9 +1247,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // ── Alert settings (admin-editable, stored in the DB) ──────────────────────
 
   // Current alert configuration (recipients, interval, delays, quiet hours, …).
-  app.get('/api/solar/alerts/settings', { preHandler: requirePermission('view') }, async () => {
+  app.get('/api/solar/alerts/settings', { preHandler: requirePermission('view') }, async (req) => {
     const { getAlertSettings } = await import('../solar-alert-settings.js');
-    return { settings: await getAlertSettings() };
+    const settings = await getAlertSettings();
+    // Recipient addresses are staff/customer emails — not for viewers.
+    if (!canSeePii(req.authUser)) return { settings: { ...settings, admin: { ...settings.admin, recipients: settings.admin.recipients.map((r) => maskText(r) ?? '') } } };
+    return { settings };
   });
 
   // Update the alert configuration. Validated + merged server-side; the monitor
@@ -1160,16 +1265,20 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       try {
         return { settings: await saveAlertSettings(req.body ?? {}) };
       } catch (err) {
-        return reply.code(400).send({ error: 'invalid_settings', detail: (err as Error).message });
+        return reply.code(400).send({ error: 'invalid_settings', detail: publicMessage(err, 'Couldn’t save the alert settings. Try again.') });
       }
     },
   );
 
   // ── Per-plant owner/contact store (admin-maintained) ──────────────────────
 
-  app.get('/api/solar/plant-contacts', { preHandler: requirePermission('view') }, async () => {
+  app.get('/api/solar/plant-contacts', { preHandler: requirePermission('view') }, async (req) => {
     const { getPlantContacts } = await import('../plant-contacts.js');
-    return { contacts: await getPlantContacts() };
+    const contacts = await getPlantContacts();
+    if (canSeePii(req.authUser)) return { contacts };
+    // Viewers: same shape, personal fields masked.
+    const masked = Object.fromEntries(Object.entries(contacts).map(([k, c]) => [k, { ...c, name: maskText(c.name), email: maskText(c.email), phone: maskText(c.phone), notes: c.notes ? '•••' : c.notes }]));
+    return { contacts: masked };
   });
 
   app.put<{ Body: { contacts?: import('@tsba/shared').PlantContacts } }>(
@@ -1180,7 +1289,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       try {
         return { contacts: await savePlantContacts(req.body?.contacts ?? {}) };
       } catch (err) {
-        return reply.code(400).send({ error: 'invalid_contacts', detail: (err as Error).message });
+        return reply.code(400).send({ error: 'invalid_contacts', detail: publicMessage(err, 'Couldn’t save the contacts. Try again.') });
       }
     },
   );
@@ -1200,7 +1309,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           who);
         return { ok: true };
       } catch (err) {
-        return reply.code(400).send({ error: 'invalid_location', detail: (err as Error).message });
+        return reply.code(400).send({ error: 'invalid_location', detail: publicMessage(err, 'Couldn’t save the position. Try again.') });
       }
     },
   );
@@ -1224,7 +1333,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           const isSmtp = err instanceof MailSendError;
           return reply
             .code(isSmtp ? 503 : 502)
-            .send({ sent: false, error: isSmtp ? 'smtp_not_configured' : 'send_failed', detail: (err as Error).message });
+            .send({ sent: false, error: isSmtp ? 'smtp_not_configured' : 'send_failed', detail: publicMessage(err, 'The email couldn’t be sent. Check the email (SMTP) settings; details are in the server log.') });
         }
       }
       if (req.query.test === 'real') {
@@ -1236,7 +1345,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           const isSmtp = err instanceof MailSendError;
           return reply
             .code(isSmtp ? 503 : 502)
-            .send({ sent: false, error: isSmtp ? 'smtp_not_configured' : 'send_failed', detail: (err as Error).message });
+            .send({ sent: false, error: isSmtp ? 'smtp_not_configured' : 'send_failed', detail: publicMessage(err, 'The email couldn’t be sent. Check the email (SMTP) settings; details are in the server log.') });
         }
       }
       if (req.query.test === '1' || req.query.test === 'true') {
@@ -1244,7 +1353,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         // override lets ops send a one-off test to any address.
         let recipients: string[];
         if (req.query.to && req.query.to.trim()) {
-          recipients = req.query.to.split(',').map((s) => s.trim()).filter(Boolean);
+          // Arbitrary addresses only for people who manage connections/alerts —
+          // otherwise anyone with `ask` could mail any address from our sender.
+          if (!req.authUser?.permissions.includes('manage_connections')) {
+            return reply.code(403).send({ error: 'forbidden', detail: 'Only admins can send a test to other addresses.' });
+          }
+          recipients = req.query.to.split(',').map((s) => s.trim()).filter((s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s)).slice(0, 10);
         } else {
           const { getAlertSettings } = await import('../solar-alert-settings.js');
           recipients = (await getAlertSettings()).admin.recipients;
@@ -1264,11 +1378,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           const isSmtp = err instanceof MailSendError;
           return reply
             .code(isSmtp ? 503 : 502)
-            .send({ test: true, sent: false, error: isSmtp ? 'smtp_not_configured' : 'send_failed', detail: (err as Error).message });
+            .send({ test: true, sent: false, error: isSmtp ? 'smtp_not_configured' : 'send_failed', detail: publicMessage(err, 'The email couldn’t be sent. Check the email (SMTP) settings; details are in the server log.') });
         }
       }
-      const { runAlertMonitorOnce } = await import('../solar-alert-monitor.js');
-      return runAlertMonitorOnce();
+      const { runAlertMonitorNow } = await import('../solar-alert-monitor.js');
+      return runAlertMonitorNow();
     },
   );
 }
