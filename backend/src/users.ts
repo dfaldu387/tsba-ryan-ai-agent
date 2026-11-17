@@ -33,6 +33,11 @@ export async function seedAdmin(): Promise<void> {
   const storage = await getStorage();
   const count = await storage.users.count();
   if (count > 0) return;
+  // Never seed a publicly known login on a production box.
+  if (env.isProd && env.adminPassword === 'changeme-admin') {
+    console.error('[users] NOT seeding the first admin: set ADMIN_PASSWORD (the default is public). No users exist yet, so nobody can sign in.');
+    return;
+  }
 
   const password_hash = await hashPassword(env.adminPassword);
   await storage.users.create({
@@ -44,11 +49,19 @@ export async function seedAdmin(): Promise<void> {
   console.log(`[users] seeded first admin: ${env.adminEmail}`);
 }
 
+// A valid-format hash nobody's password matches (16-byte salt : 64-byte key).
+const DUMMY_HASH = `${'0'.repeat(32)}:${'0'.repeat(128)}`;
+
 /** Verify email + password; records last_login_at. Returns null on any failure. */
 export async function authenticate(email: string, password: string): Promise<StoredUser | null> {
   const storage = await getStorage();
   const user = await storage.users.getByEmail(email.trim());
-  if (!user || user.disabled) return null;
+  if (!user || user.disabled) {
+    // Spend the same scrypt time as a real check, so response timing doesn't
+    // reveal which emails have accounts.
+    await verifyPassword(password, DUMMY_HASH);
+    return null;
+  }
   const ok = await verifyPassword(password, user.password_hash);
   if (!ok) return null;
   await storage.users.update(user.id, { last_login_at: new Date().toISOString() });

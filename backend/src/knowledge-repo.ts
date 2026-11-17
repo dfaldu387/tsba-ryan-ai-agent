@@ -1,5 +1,6 @@
 import type { KnowledgeEntry } from '@tsba/shared';
-import { query } from './db.js';
+import { query, withTransaction } from './db.js';
+import { likePrefix } from './sql-like.js';
 import { embeddingProvider, entryEmbeddingText } from './embeddings.js';
 
 // Runtime writes to knowledge_entries (used by Drive ingestion). Mirrors the
@@ -29,14 +30,49 @@ export async function addEntries(entries: KnowledgeEntry[]): Promise<void> {
   }
 }
 
+
+/**
+ * Replace a document's chunks atomically. Embeddings are computed BEFORE the
+ * transaction (a slow/failed embedding call must not hold locks or leave the
+ * document half-replaced); the delete and the insert then commit together, so
+ * retrieval sees either the old chunks or the new ones, never a gap.
+ */
+export async function replaceEntriesByPrefix(idPrefix: string, entries: KnowledgeEntry[]): Promise<void> {
+  if (!idPrefix) throw new Error('replaceEntriesByPrefix: empty prefix');
+  const vectors = entries.length ? await embeddingProvider.embed(entries.map((e) => entryEmbeddingText(e))) : [];
+  await withTransaction(async (q) => {
+    await q(String.raw`DELETE FROM knowledge_entries WHERE id LIKE $1 ESCAPE '\'`, [likePrefix(idPrefix)]);
+    if (!entries.length) return;
+    const COLS = 10;
+    const values: unknown[] = [];
+    const tuples = entries.map((e, i) => {
+      values.push(e.id, e.kind, e.brand || 'All', e.model || '', e.topic || '', e.title, e.text, e.source, e.confidence ?? null, vectors[i]);
+      const b = i * COLS;
+      return `($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8},$${b + 9},$${b + 10}::real[], now())`;
+    });
+    await q(
+      `INSERT INTO knowledge_entries (id, kind, brand, model, topic, title, body, source, confidence, embedding, embedded_at)
+       VALUES ${tuples.join(',')}
+       ON CONFLICT (id) DO UPDATE SET
+         kind=EXCLUDED.kind, brand=EXCLUDED.brand, model=EXCLUDED.model, topic=EXCLUDED.topic,
+         title=EXCLUDED.title, body=EXCLUDED.body, source=EXCLUDED.source, confidence=EXCLUDED.confidence,
+         embedding=EXCLUDED.embedding, embedded_at=EXCLUDED.embedded_at`,
+      values,
+    );
+  });
+}
+
 export async function removeEntriesByPrefix(idPrefix: string): Promise<void> {
-  await query('DELETE FROM knowledge_entries WHERE id LIKE $1', [`${idPrefix}%`]);
+  if (!idPrefix) return; // an empty prefix would match every entry
+  await query(String.raw`DELETE FROM knowledge_entries WHERE id LIKE $1 ESCAPE '\'`, [likePrefix(idPrefix)]);
 }
 
 export async function getEntryTextByPrefix(idPrefix: string): Promise<string> {
+  // Chunk ids end in ":<n>" — order numerically so chunk 10 follows 9, not 1.
   const res = await query<{ body: string }>(
-    `SELECT body FROM knowledge_entries WHERE id LIKE $1 ORDER BY id`,
-    [`${idPrefix}%`],
+    String.raw`SELECT body FROM knowledge_entries WHERE id LIKE $1 ESCAPE '\'
+      ORDER BY NULLIF(substring(id from ':(\d+)$'), '')::int NULLS LAST, id`,
+    [likePrefix(idPrefix)],
   );
   return res.rows.map((r) => r.body).join('\n');
 }

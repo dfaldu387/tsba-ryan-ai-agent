@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { env } from './env.js';
 import { queryUsage } from './usage.js';
@@ -11,7 +12,9 @@ import { queryUsage } from './usage.js';
 function tokenOk(key: unknown): boolean {
   const expected = env.usageToken;
   if (!expected) return false; // disabled when no token configured
-  return typeof key === 'string' && key.length === expected.length && key === expected;
+  if (typeof key !== 'string') return false;
+  const a = Buffer.from(key), b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 function esc(s: string): string {

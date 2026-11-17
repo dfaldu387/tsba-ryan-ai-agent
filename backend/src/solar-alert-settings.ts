@@ -1,3 +1,4 @@
+import { UserError } from './errors.js';
 import type { SolarAlertSettings } from '@tsba/shared';
 import { env } from './env.js';
 import { getSetting, setSetting } from './settings-repo.js';
@@ -116,13 +117,13 @@ export async function saveAlertSettings(patch: Partial<SolarAlertSettings>): Pro
     updatedAt: new Date().toISOString(),
   };
 
-  if (!Number.isFinite(next.lat) || next.lat < -90 || next.lat > 90) throw new Error('Latitude must be between -90 and 90.');
-  if (!Number.isFinite(next.lng) || next.lng < -180 || next.lng > 180) throw new Error('Longitude must be between -180 and 180.');
+  if (!Number.isFinite(next.lat) || next.lat < -90 || next.lat > 90) throw new UserError('Latitude must be between -90 and 90.');
+  if (!Number.isFinite(next.lng) || next.lng < -180 || next.lng > 180) throw new UserError('Longitude must be between -180 and 180.');
   if (next.enabled && next.admin.recipients.length === 0) {
-    throw new Error('Add at least one admin recipient email, or turn alerts off.');
+    throw new UserError('Add at least one admin recipient email, or turn alerts off.');
   }
   if (next.schedule.enabled && next.schedule.times.length === 0) {
-    throw new Error('Add at least one send time, or turn scheduled digests off.');
+    throw new UserError('Add at least one send time, or turn scheduled digests off.');
   }
 
   if (env.storage === 'postgres') await setSetting(KEY, next);
@@ -132,14 +133,14 @@ export async function saveAlertSettings(patch: Partial<SolarAlertSettings>): Pro
 
 /** Validate + clean resolution rules; drops rows without a document. */
 function normaliseRules(list: unknown): import('@tsba/shared').AlertResolutionRule[] {
-  if (!Array.isArray(list)) throw new Error('Resolution rules must be a list.');
+  if (!Array.isArray(list)) throw new UserError('Resolution rules must be a list.');
   const out: import('@tsba/shared').AlertResolutionRule[] = [];
   for (const raw of list) {
     const r = raw as Partial<import('@tsba/shared').AlertResolutionRule>;
     const documentId = String(r?.documentId ?? '').trim();
     if (!documentId) continue; // a rule with no document does nothing
     const keywords = String(r?.keywords ?? '').trim();
-    if (!keywords) throw new Error('Each resolution rule needs at least one keyword.');
+    if (!keywords) throw new UserError('Each resolution rule needs at least one keyword.');
     out.push({ keywords, documentId, documentTitle: String(r?.documentTitle ?? '').trim() });
   }
   return out;
@@ -156,14 +157,14 @@ function normaliseSchedule(
 
   let times = current.times;
   if (patch.times != null) {
-    if (!Array.isArray(patch.times)) throw new Error('Send times must be a list of "HH:MM" values.');
+    if (!Array.isArray(patch.times)) throw new UserError('Send times must be a list of "HH:MM" values.');
     const seen = new Set<string>();
     times = [];
     for (const raw of patch.times) {
       const t = String(raw).trim();
       if (!t) continue;
       const m = TIME_RE.exec(t);
-      if (!m) throw new Error(`"${raw}" is not a valid 24-hour time (use HH:MM, e.g. 09:00 or 17:30).`);
+      if (!m) throw new UserError(`"${raw}" is not a valid 24-hour time (use HH:MM, e.g. 09:00 or 17:30).`);
       const norm = `${m[1].padStart(2, '0')}:${m[2]}`; // zero-pad the hour
       if (!seen.has(norm)) {
         seen.add(norm);
@@ -181,7 +182,7 @@ function normaliseSchedule(
       new Intl.DateTimeFormat('en-US', { timeZone: tz });
       timezone = tz;
     } catch {
-      throw new Error(`"${patch.timezone}" is not a valid IANA timezone (e.g. Australia/Sydney).`);
+      throw new UserError(`"${patch.timezone}" is not a valid IANA timezone (e.g. Australia/Sydney).`);
     }
   }
 
@@ -191,12 +192,12 @@ function normaliseSchedule(
 
 /** Trim, de-dupe and validate a recipients list; throws on a malformed address. */
 function normaliseRecipients(list: unknown): string[] {
-  if (!Array.isArray(list)) throw new Error('Recipients must be a list of email addresses.');
+  if (!Array.isArray(list)) throw new UserError('Recipients must be a list of email addresses.');
   const out: string[] = [];
   for (const raw of list) {
     const email = String(raw).trim().toLowerCase();
     if (!email) continue;
-    if (!EMAIL_RE.test(email)) throw new Error(`"${raw}" is not a valid email address.`);
+    if (!EMAIL_RE.test(email)) throw new UserError(`"${raw}" is not a valid email address.`);
     if (!out.includes(email)) out.push(email);
   }
   return out;

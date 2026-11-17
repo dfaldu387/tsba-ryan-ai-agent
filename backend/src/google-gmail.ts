@@ -113,7 +113,7 @@ export async function listInbox(labelId: string, max: number): Promise<GmailSumm
           threadId?: string;
           snippet?: string;
           payload?: { headers?: { name: string; value: string }[] };
-        }>(`/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`);
+        }>(`/messages/${encodeURIComponent(id)}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`);
         const headers = data.payload?.headers ?? [];
         return {
           id,
@@ -177,7 +177,7 @@ function extractBody(payload: Part | undefined): string {
 export async function getMessage(id: string): Promise<GmailMessage> {
   const data = await api<{
     payload?: Part & { headers?: { name: string; value: string }[] };
-  }>(`/messages/${id}?format=full`);
+  }>(`/messages/${encodeURIComponent(id)}?format=full`);
   const headers = data.payload?.headers ?? [];
   const h = (name: string) =>
     headers.find((x) => x.name.toLowerCase() === name.toLowerCase())?.value ?? '';

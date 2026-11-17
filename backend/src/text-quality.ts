@@ -14,6 +14,7 @@ export function isJunkLine(s: string): boolean {
   if (t.length < 12) return true;
   const letters = t.replace(/[^a-z]/gi, '').length;
   if (letters < t.length * 0.3) return true;
+  // eslint-disable-next-line no-control-regex -- deliberately counts every non-ASCII char (the range starts at NUL)
   const nonAscii = (t.match(/[^\x00-\x7F]/g) || []).length;
   if (nonAscii > t.length * 0.12) return true;
   if (/\.{3,}\s*\d+\s*$/.test(t)) return true;

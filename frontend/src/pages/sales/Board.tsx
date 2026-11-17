@@ -6,6 +6,7 @@ import { KW_OPEN_STAGES, KW_STAGES } from '@tsba/shared';
 import { AuthError, kw } from '../../api';
 import { useConsole } from '../../lib/console';
 import type { KwAgentTask, KwClient, KwStage } from '../../lib/kw-types';
+import { PLANT_TZ } from '../../lib/format';
 import { Icon, Menu } from '../../ui';
 import { Ring, errText } from './parts';
 import './pipeline.css';
@@ -19,15 +20,20 @@ const stale = (c: KwClient) => {
   return s.staleDays > 0 && c.daysInStage >= s.staleDays;
 };
 
+/** "YYYY-MM" of a moment, in Australia/Sydney. */
+const sydneyMonth = (d: Date) => d.toLocaleDateString('en-CA', { timeZone: PLANT_TZ }).slice(0, 7);
+
 export function stageTotals(clients: KwClient[]) {
   const live = clients.filter((c) => !c.optedOut || c.dealStage === 'won' || c.dealStage === 'lost');
   const open = live.filter((c) => KW_OPEN_STAGES.includes(c.dealStage));
-  const month = new Date().toISOString().slice(0, 7);
+  // Calendar month in Sydney time, for "now" and for each deal: comparing UTC
+  // months put a deal won on 1 Dec 9am AEDT into November.
+  const month = sydneyMonth(new Date());
   return {
     openCount: open.length,
     openValue: open.reduce((s, c) => s + (c.dealValue ?? 0), 0),
     weighted: open.reduce((s, c) => s + (c.dealValue ?? 0) * prob(c.dealStage), 0),
-    wonMonth: live.filter((c) => c.dealStage === 'won' && c.stageChangedAt.slice(0, 7) === month).reduce((s, c) => s + (c.dealValue ?? 0), 0),
+    wonMonth: live.filter((c) => c.dealStage === 'won' && sydneyMonth(new Date(c.stageChangedAt)) === month).reduce((s, c) => s + (c.dealValue ?? 0), 0),
     noValue: open.filter((c) => c.dealValue == null && (c.dealStage === 'quoted' || c.dealStage === 'negotiating')).length,
   };
 }

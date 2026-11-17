@@ -17,6 +17,7 @@ import {
   AuthError,
   getSolarAlerts,
   getSolarOverview,
+  refreshSolarOverview,
   getSolarProviders,
   listDrafts,
   type SolarAlertsResult,
@@ -54,10 +55,13 @@ interface ConsoleValue {
   /** Groups that are not acknowledged and not snoozed. */
   openGroups: AlertGroup[];
   fleetLoading: boolean;
+  /** Set when the fleet couldn't be loaded (API down, network) — pages show an error, not "no plants". */
+  fleetError: string | null;
   alertsLoading: boolean;
   lastUpdated: number | null;
   refreshing: boolean;
-  refreshFleet: () => Promise<void>;
+  /** Re-read the fleet. `force` bypasses the server caches and pulls fresh data from every platform (slow). */
+  refreshFleet: (force?: boolean) => Promise<void>;
   providerName: (id: string) => string;
   findStation: (provider: string, id: string) => SolarStation | undefined;
   openPlant: (s: { provider: string; id: string }, opts?: { tab?: string }) => void;
@@ -80,7 +84,7 @@ export function useConsole(): ConsoleValue {
   return v;
 }
 
-const FLEET_POLL_MS = 60_000;
+const FLEET_POLL_MS = 30_000;
 const DRAFT_POLL_MS = 30_000;
 const EMPTY: SolarStation[] = [];
 
@@ -99,6 +103,7 @@ export function ConsoleProvider({
   const [overview, setOverview] = useState<SolarOverview | null>(null);
   const [alerts, setAlerts] = useState<SolarAlertsResult | null>(null);
   const [fleetLoading, setFleetLoading] = useState(true);
+  const [fleetError, setFleetError] = useState<string | null>(null);
   const [alertsLoading, setAlertsLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -120,19 +125,76 @@ export function ConsoleProvider({
       .finally(() => setAlertsLoading(false));
   }, [handle]);
 
-  const refreshFleet = useCallback(async () => {
-    if (!canPoll.current) return;
-    setRefreshing(true);
+  const forcing = useRef(false);
+  // Every fleet fetch takes a ticket; only the newest one may write state, so a
+  // slow background poll can't land after a forced refresh and overwrite it.
+  const fleetSeq = useRef(0);
+  const followUps = useRef<number[]>([]);
+  const booted = useRef(false);
+  const unmounted = useRef(false);
+
+  // First load: which platforms are connected, then the fleet. Retried by the
+  // poll (and the Refresh buttons) until it succeeds, so a deploy/blip at page
+  // load doesn't leave the console showing "no plants" until a manual reload.
+  const bootFleet = useCallback(async () => {
+    const id = ++fleetSeq.current;
     try {
-      setOverview(await getSolarOverview());
-      setLastUpdated(Date.now());
+      const { providers } = await getSolarProviders();
+      if (unmounted.current || id !== fleetSeq.current) return;
+      setProviders(providers);
+      if (providers.some((p) => p.configured)) {
+        canPoll.current = true;
+        const ov = await getSolarOverview();
+        if (unmounted.current || id !== fleetSeq.current) return;
+        setOverview(ov);
+        setLastUpdated(ov.updatedAt ?? Date.now());
+        loadAlerts();
+      } else {
+        setAlertsLoading(false);
+      }
+      booted.current = true;
+      setFleetError(null);
     } catch (err) {
       handle(err);
+      if (!(err instanceof AuthError) && !unmounted.current) setFleetError('The monitoring data couldn’t be loaded. It will retry automatically.');
+      setAlertsLoading(false);
     } finally {
-      setRefreshing(false);
+      if (!unmounted.current) setFleetLoading(false);
     }
-    loadAlerts();
   }, [handle, loadAlerts]);
+
+  const refreshFleet = useCallback(async (force = false) => {
+    if (!booted.current) return bootFleet();
+    if (!canPoll.current) return;
+    // A forced pull takes 10–40s; don't let a background poll start mid-way.
+    if (forcing.current && !force) return;
+    if (force) forcing.current = true;
+    const id = ++fleetSeq.current;
+    setRefreshing(true);
+    try {
+      const ov = await (force ? refreshSolarOverview() : getSolarOverview());
+      if (unmounted.current || id !== fleetSeq.current) return; // a newer fetch owns the state
+      setOverview(ov);
+      setFleetError(null);
+      // The server's snapshot time, not when the browser fetched it — so
+      // "updated 2 min ago" tells the truth about how fresh the numbers are.
+      setLastUpdated(ov.updatedAt ?? Date.now());
+      // Slow platforms (portal scrapes, GoodWe) finish after the forced pull
+      // returns; the server re-sweeps when they land — fetch that promptly.
+      if (force && ov.stale?.length) {
+        for (const ms of [15_000, 45_000, 75_000]) followUps.current.push(window.setTimeout(() => void refreshFleet(), ms));
+      }
+    } catch (err) {
+      handle(err);
+      if (id === fleetSeq.current && !(err instanceof AuthError) && !unmounted.current) {
+        setFleetError('The latest monitoring data couldn’t be loaded. Showing the last copy; it will retry automatically.');
+      }
+    } finally {
+      if (force) forcing.current = false;
+      if (id === fleetSeq.current && !unmounted.current) setRefreshing(false);
+    }
+    if (!unmounted.current) loadAlerts();
+  }, [handle, loadAlerts, bootFleet]);
 
   const refreshDrafts = useCallback(async () => {
     try {
@@ -152,37 +214,18 @@ export function ConsoleProvider({
       setDrafts([]);
       return;
     }
-    let cancelled = false;
-    (async () => {
-      try {
-        const { providers } = await getSolarProviders();
-        if (cancelled) return;
-        setProviders(providers);
-        if (providers.some((p) => p.configured)) {
-          canPoll.current = true;
-          const ov = await getSolarOverview();
-          if (cancelled) return;
-          setOverview(ov);
-          setLastUpdated(Date.now());
-          loadAlerts();
-        } else {
-          setAlertsLoading(false);
-        }
-      } catch (err) {
-        handle(err);
-        setAlertsLoading(false);
-      } finally {
-        if (!cancelled) setFleetLoading(false);
-      }
-    })();
+    unmounted.current = false;
+    void bootFleet();
     void refreshDrafts();
     const visible = () => typeof document === 'undefined' || document.visibilityState === 'visible';
     const f = window.setInterval(() => visible() && void refreshFleet(), FLEET_POLL_MS);
     const d = window.setInterval(() => visible() && void refreshDrafts(), DRAFT_POLL_MS);
     return () => {
-      cancelled = true;
+      unmounted.current = true;
       window.clearInterval(f);
       window.clearInterval(d);
+      followUps.current.forEach((t) => window.clearTimeout(t));
+      followUps.current = [];
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -250,6 +293,7 @@ export function ConsoleProvider({
     groups,
     openGroups,
     fleetLoading,
+    fleetError,
     alertsLoading,
     lastUpdated,
     refreshing,

@@ -146,6 +146,9 @@ async function getBrowser(): Promise<Browser> {
 function armIdleClose() {
   if (idleTimer) clearTimeout(idleTimer);
   idleTimer = setTimeout(() => {
+    // Only close a browser nobody is using: a scrape that started after this
+    // timer was armed (or is queued) would otherwise die with "Target closed".
+    if (active > 0 || waiters.length > 0) return armIdleClose();
     void browser?.close().catch(() => {});
     browser = null;
     browserPromise = null;

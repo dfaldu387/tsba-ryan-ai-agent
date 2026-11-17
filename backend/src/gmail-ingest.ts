@@ -66,8 +66,8 @@ async function ingestMessage(messageId: string): Promise<IngestResult> {
       return { fileId: docId(messageId), name, status: 'skipped', chunks: 0, reason: 'no extractable text' };
     }
 
-    await storage.knowledge.removeByPrefix(chunkPrefix(messageId));
-    await storage.knowledge.add(buildEntries(msg, chunks));
+    // Swap this message's chunks in one step (old set stays if embedding/writing fails).
+    await storage.knowledge.replaceByPrefix(chunkPrefix(messageId), buildEntries(msg, chunks));
     await recordDoc('ingested', chunks.length);
     return { fileId: docId(messageId), name, status: 'ingested', chunks: chunks.length };
   } catch (err) {

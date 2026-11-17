@@ -1,3 +1,4 @@
+import { UserError } from './errors.js';
 import type { PlantContact, PlantContacts } from '@tsba/shared';
 import { env } from './env.js';
 import { getSetting, setSetting } from './settings-repo.js';
@@ -33,7 +34,7 @@ const str = (v: unknown): string => String(v ?? '').trim();
 function cleanContact(raw: unknown): PlantContact | null {
   const r = (raw ?? {}) as Partial<PlantContact>;
   const email = str(r.email).toLowerCase();
-  if (email && !EMAIL_RE.test(email)) throw new Error(`"${r.email}" is not a valid email address.`);
+  if (email && !EMAIL_RE.test(email)) throw new UserError(`"${r.email}" is not a valid email address.`);
   const c: PlantContact = {
     name: str(r.name) || undefined,
     email: email || undefined,
@@ -48,7 +49,7 @@ function cleanContact(raw: unknown): PlantContact | null {
 
 /** Validate + persist the full contacts map (empty entries are dropped). */
 export async function savePlantContacts(next: PlantContacts): Promise<PlantContacts> {
-  if (next == null || typeof next !== 'object') throw new Error('Contacts must be an object.');
+  if (next == null || typeof next !== 'object') throw new UserError('Contacts must be an object.');
   const clean: PlantContacts = {};
   for (const [k, v] of Object.entries(next)) {
     const c = cleanContact(v);

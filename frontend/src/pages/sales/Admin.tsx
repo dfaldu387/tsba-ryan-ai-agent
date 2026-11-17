@@ -1,6 +1,7 @@
 // Sales admin: the manager's side of the sales pipeline. Overview, every rep's
 // pipeline, the text log, opt-outs, reps and team settings.
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import { KW_METRICS, KW_STAGES, hasPermission, kwStageLabel, type KwAdminClient, type KwStage, type KwAdminMessage, type KwMetric, type KwOptOut, type KwSettings, type User } from '@tsba/shared';
 import { AuthError, createUser, kw, kwAdmin, listUsers, updateUser } from '../../api';
 import { useConsole } from '../../lib/console';
@@ -16,9 +17,15 @@ function useLoad<T>(fn: () => Promise<T>, deps: unknown[] = []) {
   const { onAuthError } = useConsole();
   const [data, setData] = useState<T | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // Only the latest request may land: a slow response for an older search or
+  // filter must not overwrite the results of the newer one.
+  const seq = useRef(0);
   const load = useCallback(() => {
+    const id = ++seq.current;
     setErr(null);
-    fn().then(setData).catch((e) => (e instanceof AuthError ? onAuthError() : setErr(errText(e))));
+    fn()
+      .then((d) => { if (id === seq.current) setData(d); })
+      .catch((e) => { if (id !== seq.current) return; if (e instanceof AuthError) onAuthError(); else setErr(errText(e)); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
   useEffect(load, [load]);
@@ -258,9 +265,12 @@ function ClientPeek({ client, onClose }: { client: KwAdminClient; onClose: () =>
     window.addEventListener('keydown', k);
     return () => window.removeEventListener('keydown', k);
   }, [onClose]);
-  return (
+  // Portal to <body>: the page wrapper's enter animation (.kw-enter animates
+  // `transform`) makes it the containing block for position:fixed children, which
+  // squashed this full-screen drawer into the page box.
+  return createPortal(
     <div className="kw-peek-scrim" onClick={onClose}>
-      <aside className="kw-peek" role="dialog" aria-label={client.name} onClick={(e) => e.stopPropagation()}>
+      <aside className="kw-peek" role="dialog" aria-modal="true" aria-label={client.name} onClick={(e) => e.stopPropagation()}>
         <div className="kw-rowline">
           <Ring client={client} size={48} />
           <div className="kw-grow"><h3 className="kw-h2">{client.name}</h3><div className="kw-small">{client.repName}’s client · {kwStageLabel(client.dealStage)}{client.dealValue != null ? ` · ${money(client.dealValue)}` : ''}</div></div>
@@ -280,7 +290,8 @@ function ClientPeek({ client, onClose }: { client: KwAdminClient; onClose: () =>
           </div>
         )}
       </aside>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

@@ -5,6 +5,16 @@ interface Entry<T> {
 }
 
 const store = new Map<string, Entry<unknown>>();
+
+// Expired entries were only replaced when the same key was requested again, so
+// one-off keys (per-plant details, attachments) accumulated forever. Sweep them
+// periodically; SWR keys keep a grace period so they can still be served stale.
+const SWEEP_EVERY_MS = 10 * 60_000;
+const STALE_GRACE_MS = 60 * 60_000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, e] of store) if (e.expiresAt + STALE_GRACE_MS < now && !inflight.has(k)) store.delete(k);
+}, SWEEP_EVERY_MS).unref();
 // In-flight computations, keyed the same as `store`. Lets concurrent callers
 // that miss the cache share ONE compute() instead of each firing their own
 // (a thundering herd of duplicate scrapes/API calls).

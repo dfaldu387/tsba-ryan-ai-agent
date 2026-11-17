@@ -17,7 +17,7 @@ type Filter = 'all' | 'issues' | 'online';
 const STATUS_RANK: Record<StationStatus, number> = { offline: 0, partial: 1, waiting: 2, unknown: 3, online: 4 };
 
 export function DevicesPage() {
-  const { stations, alerts, alertsLoading, providers, providerName, openGroups, openPlant, canSeePii, fleetLoading } = useConsole();
+  const { stations, alerts, alertsLoading, providers, providerName, openGroups, openPlant, canSeePii, fleetLoading, onAuthError } = useConsole();
   const [q, setQ] = useState('');
   const [filter, setFilter] = useState<Filter>('all');
   const [provider, setProvider] = useState('all');
@@ -93,7 +93,10 @@ export function DevicesPage() {
     getSolarStationDetail(s.provider, s.id)
       .then((d) => setCache((p) => ({ ...p, [k]: { loading: false, devices: d.devices ?? [] } })))
       .catch((err) => {
-        if (err instanceof AuthError) return;
+        if (err instanceof AuthError) {
+          setCache((p) => { const n = { ...p }; delete n[k]; return n; }); // not stuck "loading"
+          return onAuthError();
+        }
         setCache((p) => ({ ...p, [k]: { loading: false, error: 'Couldn’t load devices from the provider.' } }));
       });
   };
@@ -121,6 +124,7 @@ export function DevicesPage() {
           value={offline != null ? fmtInt(offline) : '—'}
           sub={total ? `${fmtPct((offline ?? 0) / total * 100)} of devices` : undefined} />
         <KpiTile icon="plant" label="Plants needing a look" tone={issueCount ? 'warning' : 'neutral'}
+          loading={fleetLoading && stations.length === 0}
           value={fmtInt(issueCount)} sub={`of ${fmtInt(stations.length)} plants`}
           onClick={() => setFilter('issues')} />
       </div>

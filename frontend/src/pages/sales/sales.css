@@ -38,7 +38,10 @@
 
 /* ── the phone column ──────────────────────────────────────────────────── */
 .kw-phone { max-width: 560px; margin: 0 auto; display: flex; flex-direction: column; gap: var(--sp-3); }
-.kw-enter { animation: kw-in .22s ease-out both; }
+/* fill-mode `backwards`, not `both`: a transform animation that stays "in
+   effect" (forwards fill) turns the wrapper into the containing block for
+   position:fixed descendants, trapping drawers/overlays inside the page box. */
+.kw-enter { animation: kw-in .22s ease-out backwards; }
 @keyframes kw-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) { .kw-enter { animation: none; } }
 
@@ -363,6 +366,7 @@ button.kw-card:disabled { opacity: .6; cursor: default; }
 }
 @keyframes kw-slide { from { transform: translateX(24px); opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .kw-peek { animation: none; } }
+.kw-peek > .kw-tag { align-self: flex-start; } /* don't stretch across the column */
 .kw-peek-notes { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; color: var(--ink); }
 
 .kw-form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--sp-3); }

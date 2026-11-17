@@ -165,11 +165,6 @@ export const env = {
   dynessAppSecret: process.env.DYNESS_APP_SECRET ?? '',
   dynessBaseUrl: optional('DYNESS_BASE_URL', 'https://apacopen-api.dyness.com').replace(/\/+$/, ''),
 
-  // ─── Elekeeper / SAJ eSolar (App ID/Secret, token) — endpoints unverified ─
-  elekeeperAppId: process.env.ELEKEEPER_APP_ID ?? '',
-  elekeeperAppSecret: process.env.ELEKEEPER_APP_SECRET ?? '',
-  elekeeperBaseUrl: optional('ELEKEEPER_BASE_URL', 'https://intl-developer.saj-electric.com').replace(/\/+$/, ''),
-
   // ─── WHES / ECOS Hub — no public API mapped yet ───────────────────────────
   whesBaseUrl: (process.env.WHES_BASE_URL ?? '').replace(/\/+$/, ''),
 
@@ -215,9 +210,6 @@ export function dynessConfigured(): boolean {
 /** True once Sigenergy OpenAPI credentials are configured — gates the Sigen provider. */
 export function sigenConfigured(): boolean {
   return Boolean(env.sigenEmail && env.sigenPassword);
-}
-export function elekeeperConfigured(): boolean {
-  return Boolean(env.elekeeperAppId && env.elekeeperAppSecret);
 }
 export function whesConfigured(): boolean {
   return Boolean(env.whesBaseUrl);

@@ -26,3 +26,6 @@ solar-monitoring-platform-login-details.txt
 backend/.portal-sessions/
 .portal-chrome-profile/
 backend/.portal-chrome-profile/
+
+# TypeScript incremental build caches
+*.tsbuildinfo

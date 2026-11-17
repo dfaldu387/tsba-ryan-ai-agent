@@ -16,7 +16,7 @@ import { CATEGORY_LABEL, type AlertGroup } from '../lib/alerts';
 import { fmtInt, fmtKwh, fmtKwp, fmtPowerBig, fmtRel, installedCapacityKw, plural, toMs } from '../lib/format';
 import { DayCurve, hourOfDay, localDay, type CurvePoint } from '../ui/charts';
 import {
-  EmptyState, Icon, KpiTile, Pill, ProviderChip, RelTime, Section, SeverityPill, SkeletonRows, STATION_TONE,
+  EmptyState, ErrorState, Icon, KpiTile, Pill, ProviderChip, RelTime, Section, SeverityPill, SkeletonRows, STATION_TONE,
 } from '../ui';
 import './pages.css';
 
@@ -28,7 +28,7 @@ const STALE_DOC_DAYS = 90;
 
 export function DashboardPage() {
   const {
-    user, drafts, openGroups, stations, overview, fleetLoading, alertsLoading, navigate, openPlant,
+    user, drafts, openGroups, stations, overview, fleetLoading, fleetError, refreshFleet, alertsLoading, navigate, openPlant,
     providerName, setTriage, upsertDraft, toast, onAuthError,
   } = useConsole();
   const canApprove = hasPermission(user.role, 'approve_drafts');
@@ -285,7 +285,9 @@ export function DashboardPage() {
         <Section title="Fleet health" sub={stations.length ? `${fmtInt(stations.length)} plants` : undefined}
           actions={<button type="button" className="c-btn sm ghost" onClick={() => navigate('map')}><Icon name="map" size={16} /> Map</button>}>
           <div className="c-pad">
-            {fleetLoading ? <span className="c-skel" /> : stations.length === 0 ? (
+            {fleetLoading ? <span className="c-skel" /> : stations.length === 0 && fleetError ? (
+              <ErrorState title="Monitoring data unavailable" detail={fleetError} onRetry={() => void refreshFleet()} />
+            ) : stations.length === 0 ? (
               <EmptyState icon="plant" title="No plants connected" hint="Connect a monitoring platform to start." action={<button type="button" className="c-btn primary sm" onClick={() => navigate('connections')}>Open connections</button>} />
             ) : (
               <>

@@ -59,7 +59,7 @@ export function SolarTab({ search }: { search: string }) {
     alertsLoading: c.alertsLoading,
     lastUpdated: c.lastUpdated,
     refreshing: c.refreshing,
-    refresh: () => void c.refreshFleet(),
+    refresh: () => void c.refreshFleet(true),
     providerName: c.providerName,
     openStation: (s) => c.openPlant(s),
     goTo,
@@ -69,9 +69,9 @@ export function SolarTab({ search }: { search: string }) {
     <div className="pg-fleet">
       <div className="pg-fleet-bar">
         <span className="c-muted">
-          {c.refreshing ? 'Updating…' : c.lastUpdated ? <>Live data · updated <RelTime t={c.lastUpdated} /> · refreshes every minute</> : null}
+          {c.refreshing ? 'Fetching the latest from every platform…' : c.lastUpdated ? <>Live data · updated <RelTime t={c.lastUpdated} /> · auto-refreshes</> : null}
         </span>
-        <button type="button" className="c-btn sm ghost" onClick={() => void c.refreshFleet()} disabled={c.refreshing}>
+        <button type="button" className="c-btn sm ghost" onClick={() => void c.refreshFleet(true)} disabled={c.refreshing} title="Pull fresh data from every monitoring platform now">
           <Icon name="refresh" size={14} /> Refresh
         </button>
       </div>

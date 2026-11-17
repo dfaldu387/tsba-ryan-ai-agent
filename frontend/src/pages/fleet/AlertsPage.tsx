@@ -144,9 +144,16 @@ export function AlertsPage({ search }: { search: string }) {
   };
 
   async function aiDraft(g: AlertGroup, kind: 'fix' | 'email') {
+    if (aiBusy) return; // one AI draft at a time — no duplicates from double-picks
     setAiBusy(`${kind}:${g.key}`);
     try {
-      const contact = contacts?.[`${g.provider}:${g.plantId}`];
+      // Contacts are lazy-loaded on expand; from the row menu they may not be yet.
+      let book = contacts;
+      if (book == null && kind === 'email') {
+        book = await getPlantContacts().then((r) => r.contacts).catch(() => ({}));
+        setContacts(book);
+      }
+      const contact = book?.[`${g.provider}:${g.plantId}`];
       const draft = await createDraft(
         kind === 'fix'
           ? { question: fixQuestion(g, providerName(g.provider)), audience: 'installer', channel: 'chat' }
@@ -232,7 +239,7 @@ export function AlertsPage({ search }: { search: string }) {
               <span className="c-muted"> · scanned {fmtInt(alerts.scannedPlants)} plants <RelTime t={alerts.generatedAt} /></span>
             </>
           ) : alertsLoading ? 'Scanning the fleet…' : null}
-          <button type="button" className="c-iconbtn" onClick={() => void refreshFleet()} aria-label="Refresh alerts" title="Refresh"><Icon name="refresh" size={16} /></button>
+          <button type="button" className="c-iconbtn" onClick={() => void refreshFleet(true)} aria-label="Refresh alerts" title="Refresh"><Icon name="refresh" size={16} /></button>
         </div>
       </div>
 
@@ -319,7 +326,12 @@ export function AlertsPage({ search }: { search: string }) {
                     <Fragment key={g.key}>
                       <tr aria-selected={selected.has(g.key)} aria-expanded={open} className={st !== 'open' ? 'pg-row-muted' : undefined}
                         tabIndex={0} onClick={() => setExpanded(open ? null : g.key)}
-                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(open ? null : g.key); } }}>
+                        onKeyDown={(e) => {
+                          // Only when the row itself has focus: keys on the checkbox, Ack or the ⋯ menu
+                          // (whose popup is portalled but still bubbles here in React) must reach them.
+                          if (e.target !== e.currentTarget) return;
+                          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(open ? null : g.key); }
+                        }}>
                         <td className="c-check" onClick={(e) => e.stopPropagation()}>
                           <input type="checkbox" aria-label={`Select ${g.fault} at ${g.plant}`} checked={selected.has(g.key)} onChange={() => toggle(g.key)} />
                         </td>

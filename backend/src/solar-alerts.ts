@@ -1,6 +1,8 @@
 import { aggregateStationsCached, getProvider } from './providers/index.js';
 import { cached } from './providers/cache.js';
 import type { SolarMonitorAlert } from './providers/types.js';
+import { env } from './env.js';
+import type { DetailCapture } from './plant-history-repo.js';
 
 /**
  * Health scan across the whole fleet for the header notification panel: plants
@@ -11,6 +13,14 @@ import type { SolarMonitorAlert } from './providers/types.js';
  */
 export interface SolarAlertsResult {
   alerts: SolarMonitorAlert[];
+  /**
+   * Which plants this scan could actually see, as "provider:plantId" keys:
+   * `listed` = present in the fleet overview, `detailed` = per-plant detail
+   * (devices + faults) fetched successfully. The alert monitor only treats an
+   * issue as cleared when its plant was really checked — a timed-out detail
+   * call or a missing provider must not read as "recovered".
+   */
+  coverage?: { listed: string[]; detailed: string[] };
   generatedAt: number;
   scannedPlants: number;
   /**
@@ -114,6 +124,8 @@ async function collectSolarAlerts(): Promise<SolarAlertsResult> {
   // covers, so scanning them would just add noise. Fan out in parallel; a single
   // plant's failure is swallowed so it can't sink the whole scan.
   const toScan = stations.filter((s) => s.status !== 'offline');
+  const detailed: string[] = [];
+  const captures: DetailCapture[] = []; // saved to the DB after the scan (devices, alarms, curves)
   let totalDevices = 0;
   let onlineDevices = 0;
   await mapLimit(toScan, DETAIL_SCAN_CONCURRENCY, async (s) => {
@@ -121,6 +133,8 @@ async function collectSolarAlerts(): Promise<SolarAlertsResult> {
       if (!provider) return;
       try {
         const detail = await withTimeout(provider.stationDetail(s.id), DETAIL_CALL_TIMEOUT_MS);
+        detailed.push(`${s.provider}:${s.id}`);
+        captures.push({ provider: s.provider, stationId: s.id, detail });
         // Fleet device tally (JS is single-threaded, so these increments are safe
         // across the concurrent workers).
         totalDevices += detail.devices.length;
@@ -174,5 +188,17 @@ async function collectSolarAlerts(): Promise<SolarAlertsResult> {
   const rank: Record<string, number> = { offline: 0, partial: 1, fault: 1, alert: 2, device: 3 };
   alerts.sort((a, b) => rank[a.severity] - rank[b.severity] || a.plant.localeCompare(b.plant));
 
-  return { alerts, generatedAt: Date.now(), scannedPlants: toScan.length, totalDevices, onlineDevices, errors };
+  // Persist what this scan fetched: latest detail per plant, today's curve and
+  // alarm history. Best-effort — a DB hiccup must not fail the alert scan.
+  if (env.storage === 'postgres' && captures.length) {
+    try {
+      const { saveDetails } = await import('./plant-history-repo.js');
+      await saveDetails(captures);
+    } catch (err) {
+      console.warn('[solar-alerts] could not save plant detail history:', (err as Error).message);
+    }
+  }
+
+  const listed = stations.map((s) => `${s.provider}:${s.id}`);
+  return { alerts, coverage: { listed, detailed }, generatedAt: Date.now(), scannedPlants: toScan.length, totalDevices, onlineDevices, errors };
 }

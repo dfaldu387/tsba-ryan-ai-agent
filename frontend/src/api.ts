@@ -45,9 +45,19 @@ export function clearToken(): void {
   try {
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
+    // Chat transcripts used to be stored per browser, not per user; drop those
+    // legacy copies so the next person to sign in on a shared PC can't read them.
+    for (const k of LEGACY_TRANSCRIPT_KEYS) localStorage.removeItem(k);
   } catch {
     /* ignore */
   }
+}
+
+const LEGACY_TRANSCRIPT_KEYS = ['tsba.voice.turns', 'tsba.voice.history', 'tsba.voice.feedback', 'tsba.support.sessions'];
+
+/** A localStorage key private to the signed-in user (chat transcripts may hold customer details). */
+export function userScopedKey(base: string): string {
+  return `${base}:${getStoredUser()?.id ?? 'anon'}`;
 }
 
 export function getStoredUser(): AuthenticatedUser | null {
@@ -90,7 +100,8 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (token) headers.Authorization = `Bearer ${token}`;
 
   const res = await fetch(path, { ...init, headers });
-  if (res.status === 401) {
+  // A 401 from /api/login is "wrong password", not an expired session.
+  if (res.status === 401 && path !== '/api/login') {
     clearToken();
     throw new AuthError('unauthorized');
   }
@@ -406,6 +417,10 @@ export interface SolarOverview {
   providerCount: number;
   /** Addresses still queued for background geocoding (map coverage grows as it drains). */
   geocodePending?: number;
+  /** Platforms served from their last-good copy (still loading or briefly unreachable). */
+  stale?: string[];
+  /** When the server took this fleet snapshot (ms epoch). */
+  updatedAt?: number | null;
 }
 
 export type DeviceState = 'normal' | 'standby' | 'alarm' | 'offline' | 'unknown';
@@ -600,6 +615,11 @@ export function getSolarMonthlyProduction(months = 6): Promise<{ months: Monthly
 
 export function getSolarOverview(): Promise<SolarOverview> {
   return request<SolarOverview>('/api/solar/overview');
+}
+
+/** Bypass the server's per-platform caches and pull fresh data now (slow: ~10–40s). */
+export function refreshSolarOverview(): Promise<SolarOverview> {
+  return request<SolarOverview>('/api/solar/refresh', { method: 'POST' });
 }
 
 export function getSolarStationDetail(provider: string, id: string): Promise<SolarStationDetail> {

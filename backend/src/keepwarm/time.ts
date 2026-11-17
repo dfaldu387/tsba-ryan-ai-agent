@@ -100,8 +100,9 @@ export function zonedInstant(date: string, minutes: number, tz: string): Date {
 /** The earliest instant ≥ `at` that is outside quiet hours. */
 export function nextAllowed(at: Date, tz: string): Date {
   if (!isQuiet(at, tz)) return at;
-  let { date, minutes } = localParts(at, tz);
-  if (minutes >= hm(QUIET.end)) date = addDays(date, 1);
+  const local = localParts(at, tz);
+  let date = local.date;
+  if (local.minutes >= hm(QUIET.end)) date = addDays(date, 1);
   date = skipSunday(date);
   return zonedInstant(date, hm(QUIET.start), tz);
 }

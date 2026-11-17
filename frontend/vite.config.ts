@@ -17,6 +17,8 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    sourcemap: true,
+    // 'hidden': maps are generated for debugging but not referenced from the
+    // shipped JS, so browsers/devtools don't fetch the full source in production.
+    sourcemap: false,
   },
 });

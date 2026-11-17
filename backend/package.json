@@ -14,16 +14,17 @@
     "portal-chrome": "tsx src/scripts/portal-chrome.ts",
     "portal-capture": "tsx src/scripts/portal-capture.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "check-provider": "tsx src/scripts/check-provider.ts"
+    "check-provider": "tsx src/scripts/check-provider.ts",
+    "test": "vitest run"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.68.0",
     "@fastify/cors": "^10.0.1",
-    "@fastify/static": "^8.0.3",
+    "@fastify/static": "^10.1.11",
     "@tsba/shared": "*",
     "dotenv": "^16.4.7",
     "fastify": "^5.1.0",
-    "mammoth": "^1.8.0",
+    "mammoth": "^1.13.0",
     "nodemailer": "^10.5.0",
     "pdf-parse": "^1.1.1",
     "pg": "^8.13.1",
@@ -35,6 +36,7 @@
     "@types/nodemailer": "^8.0.2",
     "@types/pg": "^8.11.10",
     "tsx": "^4.19.2",
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "vitest": "^5.1.0"
   }
 }

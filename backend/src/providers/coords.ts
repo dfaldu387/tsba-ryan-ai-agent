@@ -34,3 +34,12 @@ export function pickCoords(raw: unknown): { lat?: number; lng?: number } {
   if (Math.abs(lat) > 90 && Math.abs(lng) <= 90) [lat, lng] = [lng, lat];
   return { lat, lng };
 }
+
+/**
+ * Today's date (YYYY-MM-DD) where the fleet is — Queensland, no DST. Provider
+ * "today" curves must use this, not the UTC date: before ~10:00 local time the
+ * UTC date is still yesterday.
+ */
+export function fleetToday(at: Date = new Date()): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Australia/Brisbane', year: 'numeric', month: '2-digit', day: '2-digit' }).format(at);
+}

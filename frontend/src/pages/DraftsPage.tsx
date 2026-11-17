@@ -61,12 +61,15 @@ export function DraftsPage({ search }: { search: string }) {
   const [reasons, setReasons] = usePref<Record<number, string>>('drafts.rejectReasons', {});
   const listRef = useRef<HTMLUListElement>(null);
 
-  // Deep link (?draft=id) → select it and switch to its bucket.
+  // Deep link (?draft=id) → select it and switch to its bucket. Applied once
+  // per link: the 30s drafts poll must not keep snapping the selection back.
+  const appliedLink = useRef<string | null>(null);
   useEffect(() => {
-    const id = Number(params.get('draft'));
-    if (!id || !drafts) return;
+    const raw = params.get('draft');
+    const id = Number(raw);
+    if (!id || !drafts || appliedLink.current === raw) return;
     const d = drafts.find((x) => x.id === id);
-    if (d) { setSelId(id); setBucket(bucketOf(d)); }
+    if (d) { appliedLink.current = raw; setSelId(id); setBucket(bucketOf(d)); }
   }, [params, drafts]);
 
   const counts = useMemo(() => {

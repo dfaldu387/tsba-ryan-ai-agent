@@ -167,6 +167,22 @@ export async function latestStationReading(provider: string, stationId: string):
   return res.rows[0] ? toStation(res.rows[0]) : null;
 }
 
+/**
+ * Each station's most recent snapshot for one provider, within `maxAgeHours`
+ * (index-backed: provider, station_id, captured_at). Used as a fallback right
+ * after a restart, before a slow provider's first live answer has arrived.
+ */
+export async function latestReadingsForProvider(provider: string, maxAgeHours = 24): Promise<SolarStationReading[]> {
+  const res = await query<StationRow>(
+    `SELECT DISTINCT ON (station_id) ${STATION_COLS}
+       FROM solar_station_readings
+      WHERE provider = $1 AND captured_at > now() - make_interval(hours => $2)
+      ORDER BY station_id, captured_at DESC`,
+    [provider, maxAgeHours],
+  );
+  return res.rows.map(toStation);
+}
+
 /** One station's snapshots at/after `sinceMs`, oldest first (index-backed). */
 export async function stationReadingsSince(provider: string, stationId: string, sinceMs: number): Promise<SolarStationReading[]> {
   const res = await query<StationRow>(
@@ -198,24 +214,40 @@ export async function fleetReadingsSince(sinceMs: number): Promise<SolarFleetRea
  * one extra month as the delta baseline and drops it.
  */
 export async function monthlyProduction(months: number): Promise<{ month: string; kwh: number }[]> {
+  // Per plant: lifetime total at the end of each month, minus the same plant's
+  // total at the end of the previous month; then summed across plants. (Using
+  // the fleet-wide sum instead counted a newly connected plant's entire
+  // lifetime output — or a provider missing from one snapshot — as that
+  // month's production.) Months are Brisbane months, not UTC.
   const res = await query<{ month: string; kwh: string | null }>(
-    `WITH monthly AS (
-       SELECT date_trunc('month', captured_at) AS m,
-              (array_agg(total_energy_kwh ORDER BY captured_at DESC))[1] AS end_total
-         FROM solar_fleet_readings
-        WHERE captured_at >= date_trunc('month', now()) - (($1::int) || ' months')::interval
-          AND total_energy_kwh IS NOT NULL
-        GROUP BY 1
+    `WITH r AS (
+       SELECT provider, station_id, total_kwh, captured_at,
+              date_trunc('month', captured_at AT TIME ZONE 'Australia/Brisbane') AS m
+         FROM solar_station_readings
+        WHERE captured_at >= (date_trunc('month', now() AT TIME ZONE 'Australia/Brisbane') - (($1::int + 1) || ' months')::interval) AT TIME ZONE 'Australia/Brisbane'
+          AND total_kwh IS NOT NULL
+     ), months AS (
+       SELECT provider, station_id, m,
+              (array_agg(total_kwh ORDER BY captured_at DESC))[1] AS end_total,
+              (array_agg(total_kwh ORDER BY captured_at ASC))[1]  AS first_total
+         FROM r GROUP BY provider, station_id, m
+     ), deltas AS (
+       -- Baseline: the plant's previous month-end when it is the month just
+       -- before; otherwise its first reading this month (a partial month).
+       SELECT m, end_total - CASE
+                WHEN lag(m) OVER w = m - interval '1 month' THEN lag(end_total) OVER w
+                ELSE first_total END AS d
+         FROM months
+       WINDOW w AS (PARTITION BY provider, station_id ORDER BY m)
      )
-     SELECT to_char(m, 'YYYY-MM') AS month,
-            (end_total - lag(end_total) OVER (ORDER BY m)) AS kwh
-       FROM monthly
+     SELECT to_char(m, 'YYYY-MM') AS month, sum(d) AS kwh
+       FROM deltas
+      WHERE d >= 0 AND m >= date_trunc('month', now() AT TIME ZONE 'Australia/Brisbane') - (($1::int - 1) || ' months')::interval
+      GROUP BY m
       ORDER BY m`,
     [months],
   );
-  return res.rows
-    .filter((r) => r.kwh != null && Number(r.kwh) >= 0)
-    .map((r) => ({ month: r.month, kwh: Number(r.kwh) }));
+  return res.rows.filter((r) => r.kwh != null).map((r) => ({ month: r.month, kwh: Number(r.kwh) }));
 }
 
 /** Delete station + fleet readings older than `days` (retention). */

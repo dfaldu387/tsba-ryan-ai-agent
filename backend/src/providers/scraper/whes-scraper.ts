@@ -1,6 +1,6 @@
 import type { Page } from 'playwright';
 import { pickCoords } from '../coords.js';
-import type { NormalizedDetail, NormalizedStation, StationInfoItem, StationStatus } from '../types.js';
+import type { NormalizedDetail, NormalizedDevice, NormalizedStation, StationInfoItem, StationStatus } from '../types.js';
 import { SessionExpiredError } from './browser.js';
 import { createScraperProvider } from './scraper-provider.js';
 
@@ -94,10 +94,21 @@ function detailFromList(stationId: string): NormalizedDetail | null {
   push('Installer', d.installerName);
   push('Last update', d.updateTime);
 
+  // Each ECOS "plant" is one hybrid system; its list record names the inverter,
+  // battery (BMS) and WiFi logger serials, so the device list comes for free.
+  const online = d.state === 1 ? true : d.state === -1 || d.state === 0 ? false : undefined;
+  const state = online === true ? 'normal' : online === false ? 'offline' : 'unknown';
+  const stateLabel = online === true ? 'Online' : online === false ? 'Offline' : undefined;
+  const devices: NormalizedDevice[] = [
+    { sn: d.deviceSn, type: d.deviceModel ? `Inverter · ${d.deviceModel}` : 'Inverter', online, state, stateLabel },
+  ];
+  if (d.bmsSn?.trim()) devices.push({ sn: d.bmsSn.trim(), type: 'Battery', online, state, stateLabel });
+  if (d.wifiSn?.trim()) devices.push({ sn: d.wifiSn.trim(), type: 'Logger', online, state, stateLabel });
+
   return {
     info,
     latest: { batterySoc: d.batSoc ?? undefined },
-    devices: [],
+    devices,
     alerts: [],
     power: [],
   };

@@ -15,7 +15,7 @@ import { hasSession } from './session.js';
  * Turns a per-portal scrape routine into a standard SolarProvider, so a scraped
  * platform behaves exactly like an API-backed one (same overview tiles, agent
  * tools and notifications). Scraping is slow and portals rate-limit, so the
- * station list is cached hard (default 10 min); detail falls back to the cached
+ * station list is cached (default 3 min, stale-while-revalidate); detail falls back to the cached
  * list unless the portal module provides a richer per-plant scrape.
  */
 export interface ScraperConfig {
@@ -44,12 +44,14 @@ export interface ScraperConfig {
    * per-plant work. Cached briefly per plant.
    */
   overview?: (stationId: string) => Promise<StationOverview>;
-  /** Station-list cache TTL (ms). Default 10 min. */
+  /** Station-list cache TTL (ms). Default 3 min (served stale-while-revalidate). */
   ttlMs?: number;
 }
 
 export function createScraperProvider(cfg: ScraperConfig): SolarProvider {
-  const ttl = cfg.ttlMs ?? 600_000;
+  // 3 min: portals themselves update every ~5 min, so this keeps us within one
+  // portal update without re-scraping on every page poll.
+  const ttl = cfg.ttlMs ?? 180_000;
 
   const fetchStations = (): Promise<NormalizedStation[]> =>
     cached(

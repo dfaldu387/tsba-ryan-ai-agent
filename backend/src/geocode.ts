@@ -1,3 +1,4 @@
+import { UserError } from './errors.js';
 /**
  * Address → coordinates for plants whose monitoring platform doesn't report a
  * location (SAJ, Solarman, Solis, Sigenergy… or 0,0 when the installer never
@@ -140,7 +141,7 @@ export async function setManualLocation(provider: string, id: string, loc: { lat
   const m = await loadManual();
   const k = `${provider}:${id}`;
   if (loc) {
-    if (!Number.isFinite(loc.lat) || !Number.isFinite(loc.lng) || !inAu(loc.lat, loc.lng)) throw new Error('Location must be inside Australia.');
+    if (!Number.isFinite(loc.lat) || !Number.isFinite(loc.lng) || !inAu(loc.lat, loc.lng)) throw new UserError('Location must be inside Australia.');
     m[k] = { lat: Math.round(loc.lat * 1e6) / 1e6, lng: Math.round(loc.lng * 1e6) / 1e6, by, at: Date.now() };
   } else delete m[k];
   if (env.storage === 'postgres') await setSetting(LOC_KEY, m);

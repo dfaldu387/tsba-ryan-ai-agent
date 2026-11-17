@@ -152,6 +152,8 @@ button.pg-kb-row:focus-visible { outline: 2px solid var(--brand); }
 .pg-plants { display: flex; flex-direction: column; gap: var(--sp-3); }
 .pg-subbar { padding-top: 0; border-bottom: 1px solid var(--line); }
 .pg-plant-table td.name { min-width: 200px; }
+.pg-plant-table .pg-act-col { width: 1%; white-space: nowrap; text-align: right; }
+.pg-plant-table td.pg-act-col { padding-block: 0; }
 .pg-drawer-kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-2); }
 .pg-drawer-kpis div { padding: var(--sp-3); border-radius: var(--r-md); background: var(--sunk); display: flex; flex-direction: column; }
 .pg-drawer-kpis span { font-size: 12.5px; color: var(--muted); }
@@ -206,7 +208,7 @@ button.pg-kb-row:focus-visible { outline: 2px solid var(--brand); }
 .leaflet-bar { border: 1px solid var(--line) !important; box-shadow: var(--sh-1) !important; border-radius: var(--r-md) !important; overflow: hidden; }
 .leaflet-control-attribution { font-size: 10.5px; background: color-mix(in srgb, var(--surface) 85%, transparent) !important; color: var(--muted); }
 .leaflet-control-attribution a { color: var(--brand); }
-.pg-map-issues { list-style: none; margin: 0; padding: 6px; max-height: 70dvh; overflow-y: auto; }
+.pg-map-issues { list-style: none; margin: 0; padding: 6px; max-height: 70dvh; overflow-y: auto; position: relative; } /* relative: keeps the rows' sr-only labels inside the scroller instead of stretching the page */
 .pg-map-issues button { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 8px; width: 100%; min-height: 40px; padding: 0 8px; border-radius: 8px; cursor: pointer; font-size: 13.5px; }
 .pg-map-issues button:hover, .pg-map-issues button:focus-visible { background: var(--sunk); }
 
@@ -349,6 +351,7 @@ button.pg-kb-row:focus-visible { outline: 2px solid var(--brand); }
   .pg-plant-table tbody tr { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
   .pg-plant-table td { min-width: 0; overflow-wrap: anywhere; }
   .pg-plant-table td.name { grid-column: 1 / -1; order: -1; min-width: 0; }
+  .pg-plant-table td.pg-act-col { grid-column: 1 / -1; text-align: right; }
   .pg-plant-table td[data-label]::before { content: attr(data-label); display: block; margin-bottom: 2px; font-size: 11px; font-weight: 600; color: var(--muted); }
   .pg-expand { display: block; }
   .c-tablewrap.virtual { max-height: none; }

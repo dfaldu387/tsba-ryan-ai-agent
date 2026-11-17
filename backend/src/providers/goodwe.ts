@@ -1,3 +1,4 @@
+import { fleetToday } from './coords.js';
 import { env, goodweConfigured } from '../env.js';
 import { latestStationReading } from '../solar-repo.js';
 import {
@@ -289,7 +290,7 @@ export const goodweProvider: SolarProvider = {
   // with the per-inverter warnings query (which also yields the inverter roster)
   // and the intraday power curve.
   async stationDetail(stationId: string): Promise<NormalizedDetail> {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = fleetToday();
     const [data, warnings, pac] = await Promise.all([
       semsPost<{ list?: SemsStation[] }>('PowerStationMonitor/QueryPowerStationMonitor', {
         page_index: 1,

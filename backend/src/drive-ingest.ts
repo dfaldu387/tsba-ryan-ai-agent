@@ -142,9 +142,8 @@ export async function ingestFile(fileId: string): Promise<IngestResult> {
       return { fileId, name, status: 'skipped', chunks: 0, reason: 'no extractable text (even after Claude + OCR)' };
     }
 
-    // Replace any prior chunks for this file, then add the fresh set.
-    await storage.knowledge.removeByPrefix(docChunkPrefix(fileId));
-    await storage.knowledge.add(buildEntries(fileId, meta.name, meta.webViewLink, chunks));
+    // Swap this file's chunks in one step (old set stays if embedding/writing fails).
+    await storage.knowledge.replaceByPrefix(docChunkPrefix(fileId), buildEntries(fileId, meta.name, meta.webViewLink, chunks));
 
     // Record how usable the stored text is, so the admin can see (and re-ingest)
     // documents whose text is corrupted or too thin to answer from.

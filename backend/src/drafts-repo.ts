@@ -1,5 +1,6 @@
 import type { Draft, DraftDelivery, DraftResult, SourceCard, Audience, Channel } from '@tsba/shared';
 import { query } from './db.js';
+import { DraftAlreadyDecidedError } from './draft-errors.js';
 
 interface DraftRow {
   id: string;
@@ -115,17 +116,21 @@ export async function updateDraft(
     const status: Draft['status'] = existing.outcome === 'handover' ? 'team' : 'sent';
     const newText = text !== undefined ? text.trim() : existing.reply;
     const edited = existing.edited || newText !== existing.reply_original.trim();
+    // Only a pending draft can be decided — the condition is in the UPDATE so a
+    // double-click / retried request can't approve (and deliver) it twice.
     const res = await query<DraftRow>(
-      `UPDATE drafts SET status = $1, reply = $2, edited = $3, decided_at = now() WHERE id = $4 RETURNING ${SELECT}`,
+      `UPDATE drafts SET status = $1, reply = $2, edited = $3, decided_at = now() WHERE id = $4 AND status = 'pending' RETURNING ${SELECT}`,
       [status, newText, edited, id],
     );
+    if (!res.rows[0]) throw new DraftAlreadyDecidedError();
     return toDraft(res.rows[0]);
   }
 
   // reject
   const res = await query<DraftRow>(
-    `UPDATE drafts SET status = 'rejected', decided_at = now() WHERE id = $1 RETURNING ${SELECT}`,
+    `UPDATE drafts SET status = 'rejected', decided_at = now() WHERE id = $1 AND status = 'pending' RETURNING ${SELECT}`,
     [id],
   );
+  if (!res.rows[0]) throw new DraftAlreadyDecidedError();
   return toDraft(res.rows[0]);
 }

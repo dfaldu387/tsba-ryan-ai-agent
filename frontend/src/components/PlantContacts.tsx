@@ -50,7 +50,6 @@ export function PlantContacts({ user, onAuthError }: { user: AuthenticatedUser; 
     if (q) return stations.filter((s) => s.name.toLowerCase().includes(q) || s.provider.toLowerCase().includes(q));
     // No search: show plants that already have a contact.
     return stations.filter((s) => contacts[keyOf(s)]);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search, stations, contacts]);
 
   const withContacts = useMemo(() => Object.values(contacts).filter((c) => c.name || c.email || c.phone).length, [contacts]);

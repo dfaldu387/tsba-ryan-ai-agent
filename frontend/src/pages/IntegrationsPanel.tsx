@@ -70,7 +70,7 @@ export function IntegrationsPanel() {
     <Section
       title="Monitoring platforms"
       sub={providers ? `${connected} of ${rows.length} connected${checking ? ' · checking each platform…' : problems ? ` · ${plural(problems, 'needs', 'need')} attention` : ''}` : undefined}
-      actions={<button type="button" className="c-btn sm" onClick={() => void refreshFleet()} disabled={refreshing}><Icon name="refresh" size={14} /> {refreshing ? 'Checking…' : 'Check all now'}</button>}
+      actions={<button type="button" className="c-btn sm" onClick={() => void refreshFleet(true)} disabled={refreshing}><Icon name="refresh" size={14} /> {refreshing ? 'Checking…' : 'Check all now'}</button>}
     >
       {fleetLoading && !providers ? <SkeletonRows rows={3} cols={4} /> : rows.length === 0 ? (
         <EmptyState icon="link" title="No monitoring platforms available" />
@@ -97,7 +97,7 @@ export function IntegrationsPanel() {
               )}
               <footer>
                 {h === 'auth' && <button type="button" className="c-btn sm primary" onClick={() => setConfigure(p)}>Re-authenticate</button>}
-                {h === 'error' && <button type="button" className="c-btn sm primary" onClick={() => void refreshFleet()} disabled={refreshing}>Retry now</button>}
+                {h === 'error' && <button type="button" className="c-btn sm primary" onClick={() => void refreshFleet(true)} disabled={refreshing}>Retry now</button>}
                 {h === 'off' && <button type="button" className="c-btn sm" onClick={() => setConfigure(p)}>Configure</button>}
                 {plants > 0 && <button type="button" className="c-btn sm ghost" onClick={() => navigate('solar', `?view=plants&provider=${p.id}`)}>View plants</button>}
               </footer>
@@ -109,7 +109,7 @@ export function IntegrationsPanel() {
       <Drawer open={configure != null} onClose={() => setConfigure(null)} title={configure ? `${configure.name} connection` : ''}
         sub={configure ? <Pill tone={configure.configured ? 'danger' : 'neutral'}>{configure.configured ? 'Sign-in needs renewing' : 'Not configured'}</Pill> : undefined}
         footer={<>
-          <button type="button" className="c-btn primary" onClick={() => { void refreshFleet(); setConfigure(null); }}>Test connection</button>
+          <button type="button" className="c-btn primary" onClick={() => { void refreshFleet(true); setConfigure(null); }}>Test connection</button>
           <button type="button" className="c-btn ghost" onClick={() => setConfigure(null)}>Close</button>
         </>}>
         {configure && (

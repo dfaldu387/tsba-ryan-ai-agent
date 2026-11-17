@@ -68,7 +68,10 @@ export function Plant360({ station, tab: initialTab, onBack }: { station: SolarS
     const battery = pick(/battery.*(model|type|brand)/i);
     const devices = detail?.devices ?? [];
     const models = [...new Set([...inverter, ...battery, ...devices.map((d) => d.type ?? '').filter(Boolean)])];
-    return { inverter, battery, devices, models, serials: devices.map((d) => d.sn).filter(Boolean) };
+    // Equipment maker, when the provider is a monitoring platform rather than the
+    // hardware brand (e.g. Solarman monitoring a SofarSolar inverter).
+    const makers = pick(/^(manufacturer|brand|inverter (maker|brand|manufacturer))$/i);
+    return { inverter, battery, devices, models, makers, serials: devices.map((d) => d.sn).filter(Boolean) };
   }, [detail]);
 
   const plantGroups = useMemo(
@@ -85,8 +88,15 @@ export function Plant360({ station, tab: initialTab, onBack }: { station: SolarS
   }, [drafts, station.name, equipment.serials]);
 
   const related = useMemo(
-    () => (docs ? matchDocs(docs, { brand: brandTokens(station.provider, pname), models: equipment.models }, 12) : null),
-    [docs, station.provider, pname, equipment.models],
+    () => {
+      if (!docs) return null;
+      const brand = [...new Set([
+        ...brandTokens(station.provider, pname),
+        ...equipment.makers.flatMap((m) => m.split(/,\s*/)).flatMap((m) => brandTokens(m, m)),
+      ])];
+      return matchDocs(docs, { brand, models: equipment.models }, 12);
+    },
+    [docs, station.provider, pname, equipment.models, equipment.makers],
   );
 
   const latest = detail?.latest;
@@ -373,7 +383,10 @@ function PlantNotes({ station, canEdit }: { station: SolarStation; canEdit: bool
   const save = async () => {
     setSaving(true);
     try {
-      const r = await updatePlantContacts({ ...all, [key]: { ...form, plantName: station.name } });
+      // The API replaces the whole contacts map, so merge into a fresh copy:
+      // saving this plant must not undo someone else's edit to another plant.
+      const latest = await getPlantContacts().then((x) => x.contacts);
+      const r = await updatePlantContacts({ ...latest, [key]: { ...form, plantName: station.name } });
       setAll(r.contacts);
       toast({ tone: 'success', text: 'Notes saved' });
     } catch (e) {
