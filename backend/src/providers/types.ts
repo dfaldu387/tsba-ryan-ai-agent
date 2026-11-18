@@ -73,6 +73,12 @@ export interface NormalizedAlert {
   solution?: string;
   /** Provider-reported handling state, when exposed (e.g. SAJ "Pending"/"Recovered"). */
   status?: string;
+  /** Epoch seconds the fault ended, when the provider reports it. */
+  end?: number;
+  /** False when the provider says the fault has already cleared. Platforms like
+   *  Deye return a history window (cleared alarms included) — only alarms that
+   *  are not explicitly inactive raise monitor alerts. Undefined = unknown → active. */
+  active?: boolean;
 }
 
 export interface NormalizedPowerPoint {
@@ -234,6 +240,8 @@ export interface SolarMonitorAlert {
   solution?: string;
   /** Provider-reported handling state, when exposed (e.g. SAJ "Pending"). */
   status?: string;
+  /** When the alert monitor first saw this issue (ms) — set by /api/solar/alerts. */
+  since?: number;
   /** Plant coordinates (decimal degrees), when known — for per-plant quiet hours. */
   lat?: number;
   lng?: number;
@@ -271,6 +279,14 @@ export class ProviderError extends Error {
   constructor(message: string, public code?: string) {
     super(message);
     this.name = 'ProviderError';
+  }
+}
+
+/** The active backend has no rich Overview — not a failure; the UI uses basic detail. */
+export class OverviewUnsupportedError extends ProviderError {
+  constructor(providerId: string) {
+    super(`${providerId}_overview_unsupported`, 'overview_unsupported');
+    this.name = 'OverviewUnsupportedError';
   }
 }
 

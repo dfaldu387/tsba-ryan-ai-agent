@@ -5,7 +5,8 @@ import {
   type AuthenticatedUser,
   type Permission,
 } from '@tsba/shared';
-import { AuthError, clearToken, getMe, getStoredUser, getToken } from './api';
+import { AuthError, clearToken, getMe, getStoredUser, hasSession, logout, USER_UPDATED_EVENT } from './api';
+import { ProfilePage } from './pages/ProfilePage';
 import { LoginForm } from './components/LoginForm';
 import { ConsoleProvider, useConsole, type Navigate, type Section } from './lib/console';
 import { CommandPalette } from './ui/CommandPalette';
@@ -52,13 +53,15 @@ const VoiceAgent = lazy(() => import('./components/VoiceAgent').then((m) => ({ d
 const MapPage = lazy(() => import('./pages/MapPage').then((m) => ({ default: m.MapPage })));
 
 const SECTIONS: Section[] = [
-  'dashboard', 'solar', 'map', 'energy', 'connections', 'knowledge', 'ask', 'drafts', 'voice', 'users', 'progress', 'settings', 'sales',
+  'dashboard', 'solar', 'map', 'energy', 'connections', 'knowledge', 'ask', 'drafts', 'voice', 'users', 'progress', 'settings', 'sales', 'profile',
 ];
 const isSection = (v: unknown): v is Section => SECTIONS.includes(v as Section);
 
 const PERM: Record<Section, Permission> = {
   dashboard: 'view', solar: 'view', map: 'view', energy: 'view', connections: 'view', knowledge: 'view',
   ask: 'ask', drafts: 'view', voice: 'ask', users: 'manage_users', progress: 'view', settings: 'view', sales: 'sales',
+  // Every signed-in user can open their own profile (see `can` below).
+  profile: 'view',
 };
 
 const TITLES: Record<Section, string> = {
@@ -75,6 +78,7 @@ const TITLES: Record<Section, string> = {
   progress: 'Build progress',
   settings: 'Settings',
   sales: 'Sales pipeline',
+  profile: 'Your profile',
 };
 
 const FLEET_VIEWS: { view: string; label: string }[] = [
@@ -142,8 +146,8 @@ function writePref(key: string, v: string) {
 }
 
 export function App() {
-  const [user, setUser] = useState<AuthenticatedUser | null>(() => (getToken() ? getStoredUser() : null));
-  const [restoring, setRestoring] = useState<boolean>(() => Boolean(getToken()));
+  const [user, setUser] = useState<AuthenticatedUser | null>(() => (hasSession() ? getStoredUser() : null));
+  const [restoring, setRestoring] = useState<boolean>(() => hasSession());
   const [loc, setLoc] = useState<Loc>(initialLoc);
   const [theme, setTheme] = useState<Theme>(() => {
     const saved = readPref(THEME_KEY);
@@ -156,8 +160,15 @@ export function App() {
     writePref(THEME_KEY, theme);
   }, [theme]);
 
+  // Self-service profile edits (name, password) publish the fresh user.
   useEffect(() => {
-    if (!getToken()) return;
+    const onUser = (e: Event) => setUser((e as CustomEvent<AuthenticatedUser>).detail);
+    window.addEventListener(USER_UPDATED_EVENT, onUser);
+    return () => window.removeEventListener(USER_UPDATED_EVENT, onUser);
+  }, []);
+
+  useEffect(() => {
+    if (!hasSession()) return;
     getMe()
       .then(setUser)
       .catch((err) => {
@@ -202,7 +213,7 @@ export function App() {
   // Stable identity: effects across the app depend on it, so a fresh closure
   // per render used to refetch/re-arm their intervals on every navigation.
   const onAuthError = useCallback(() => {
-    clearToken();
+    void logout();
     setUser(null);
   }, []);
 
@@ -230,8 +241,17 @@ function Shell({ loc, theme, onToggleTheme, onSignOut }: {
   const [collapsed, setCollapsed] = useState(() => readPref(COLLAPSE_KEY) === '1');
   const [navOpen, setNavOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // The header theme button is hidden on phones (≤520px); only there does the
+  // account menu carry the theme toggle, so it's never shown twice.
+  const [phone, setPhone] = useState(() => window.matchMedia('(max-width: 520px)').matches);
+  useEffect(() => {
+    const m = window.matchMedia('(max-width: 520px)');
+    const on = () => setPhone(m.matches);
+    m.addEventListener('change', on);
+    return () => m.removeEventListener('change', on);
+  }, []);
 
-  const can = (s: Section) => hasPermission(user.role, PERM[s]);
+  const can = (s: Section) => s === 'profile' || hasPermission(user.role, PERM[s]);
   // A sales rep can't see the dashboard, so their home is the follow-up agent.
   const home: Section = can('dashboard') ? 'dashboard' : 'sales';
   const active: Section = can(loc.section) ? loc.section : home;
@@ -341,6 +361,7 @@ function Shell({ loc, theme, onToggleTheme, onSignOut }: {
     case 'voice': body = <Suspense fallback={<SkeletonRows rows={4} cols={1} />}><VoiceAgent onAuthError={onAuthError} /></Suspense>; break;
     case 'users': body = <div className="col"><UsersPanel me={user} onAuthError={onAuthError} /></div>; break;
     case 'settings': body = <SettingsTab user={user} onAuthError={onAuthError} />; break;
+    case 'profile': body = <ProfilePage user={user} onAuthError={onAuthError} />; break;
     case 'progress': body = <ProgressTab onAuthError={onAuthError} />; break;
     case 'sales': body = <Suspense fallback={<SkeletonRows rows={5} cols={3} />}><SalesPage search={loc.search} /></Suspense>; break;
   }
@@ -508,7 +529,7 @@ function Shell({ loc, theme, onToggleTheme, onSignOut }: {
               <Icon name={theme === 'dark' ? 'sun' : 'moon'} />
             </button>
             {hasPermission(user.role, 'view') && (
-              <NotificationBell onNavigate={(s) => navigate(s)} onAuthError={onAuthError} />
+              <NotificationBell />
             )}
             <Menu
               label="Account"
@@ -524,7 +545,8 @@ function Shell({ loc, theme, onToggleTheme, onSignOut }: {
               }
               items={[
                 // On phones the theme button is hidden from the top bar to give the title room; it lives here instead.
-                { label: theme === 'dark' ? 'Light mode' : 'Dark mode', icon: theme === 'dark' ? 'sun' : 'moon', onSelect: onToggleTheme },
+                ...(phone ? [{ label: theme === 'dark' ? 'Light mode' : 'Dark mode', icon: (theme === 'dark' ? 'sun' : 'moon') as IconName, onSelect: onToggleTheme }] : []),
+                { label: 'Your profile', icon: 'user', onSelect: () => navigate('profile') },
                 { label: 'Sign out', icon: 'logout', onSelect: onSignOut },
               ]}
             />

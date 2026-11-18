@@ -15,6 +15,9 @@ import {
 import { hasPermission, type AuthenticatedUser, type Draft } from '@tsba/shared';
 import {
   AuthError,
+  getAlertTriage,
+  patchAlertTriage,
+  type TriagePatch,
   getSolarAlerts,
   getSolarOverview,
   refreshSolarOverview,
@@ -25,11 +28,11 @@ import {
   type SolarProviderInfo,
   type SolarStation,
 } from '../api';
-import { groupAlerts, isSnoozed, loadTriage, saveTriage, type AlertGroup, type TriageState } from './alerts';
+import { groupAlerts, isSnoozed, loadTriage, TRIAGE_KEY, type AlertGroup, type TriageState } from './alerts';
 
 export type Section =
   | 'dashboard' | 'solar' | 'map' | 'energy' | 'connections' | 'knowledge'
-  | 'ask' | 'drafts' | 'voice' | 'users' | 'progress' | 'settings' | 'sales';
+  | 'ask' | 'drafts' | 'voice' | 'users' | 'progress' | 'settings' | 'sales' | 'profile';
 
 export type Navigate = (section: Section, search?: string) => void;
 
@@ -108,6 +111,8 @@ export function ConsoleProvider({
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [drafts, setDrafts] = useState<Draft[] | null>(null);
+  // Shared team-wide triage (server). Starts from the legacy per-browser copy so
+  // the UI isn't blank for a moment; replaced by the server map once loaded.
   const [triage, setTriageState] = useState<Record<string, TriageState>>(loadTriage);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const canPoll = useRef(false);
@@ -118,12 +123,40 @@ export function ConsoleProvider({
     if (err instanceof AuthError) authRef.current();
   }, []);
 
+  // Patches not yet confirmed by the server — kept on top of each server reload
+  // so a poll landing mid-save doesn't flicker an acknowledged item back.
+  const pendingTriage = useRef(0);
+  const migrated = useRef(false);
+  const loadTriageFromServer = useCallback(async () => {
+    if (pendingTriage.current > 0) return;
+    try {
+      const { triage: server } = await getAlertTriage();
+      // One-time upload of the old per-browser triage so nothing is lost.
+      if (!migrated.current) {
+        migrated.current = true;
+        const legacy = loadTriage();
+        const now = Date.now();
+        const up = Object.entries(legacy).filter(([k, t]) => !server[k] && (t.ack || (t.snoozeUntil ?? 0) > now || t.assignee));
+        for (const [k, t] of up) {
+          await patchAlertTriage([k], { ack: t.ack ?? null, snoozeUntil: (t.snoozeUntil ?? 0) > now ? t.snoozeUntil! : null, assignee: t.assignee ?? null })
+            .then((r) => Object.assign(server, r.triage))
+            .catch(() => {});
+        }
+        try { localStorage.removeItem(TRIAGE_KEY); } catch { /* ignore */ }
+      }
+      if (pendingTriage.current === 0) setTriageState(server);
+    } catch (err) {
+      handle(err);
+    }
+  }, [handle]);
+
   const loadAlerts = useCallback(() => {
     getSolarAlerts()
       .then(setAlerts)
       .catch(handle)
       .finally(() => setAlertsLoading(false));
-  }, [handle]);
+    void loadTriageFromServer();
+  }, [handle, loadTriageFromServer]);
 
   const forcing = useRef(false);
   // Every fleet fetch takes a ticket; only the newest one may write state, so a
@@ -257,15 +290,52 @@ export function ConsoleProvider({
     [navigate],
   );
 
+  // Optimistic local update, then saved to the shared server store. Callers
+  // often loop over many keys with the same patch (bulk acknowledge), so
+  // identical patches made in the same tick are sent as ONE request.
+  const batch = useRef(new Map<string, { patch: TriagePatch | null; keys: string[] }>());
+  const flushTriage = useCallback(() => {
+    const jobs = [...batch.current.values()];
+    batch.current.clear();
+    for (const { patch, keys } of jobs) {
+      pendingTriage.current++;
+      patchAlertTriage(keys, patch)
+        .then((r) => {
+          pendingTriage.current--;
+          if (pendingTriage.current === 0) setTriageState(r.triage);
+        })
+        .catch((err) => {
+          pendingTriage.current--;
+          handle(err);
+          void loadTriageFromServer(); // roll back to what the server has
+        });
+    }
+  }, [handle, loadTriageFromServer]);
+
   const setTriage = useCallback((key: string, patch: Partial<TriageState> | null) => {
     setTriageState((prev) => {
       const next = { ...prev };
       if (patch === null) delete next[key];
-      else next[key] = { ...prev[key], ...patch };
-      saveTriage(next);
+      else {
+        const merged: TriageState = { ...prev[key], ...patch };
+        for (const k of Object.keys(merged) as (keyof TriageState)[]) if (merged[k] == null) delete merged[k];
+        next[key] = merged;
+      }
       return next;
     });
-  }, []);
+    // `undefined` means "clear" — send it as null so it survives JSON.
+    const wire: TriagePatch | null = patch === null ? null : {};
+    if (patch && wire) {
+      if ('ack' in patch) wire.ack = patch.ack ?? null;
+      if ('snoozeUntil' in patch) wire.snoozeUntil = patch.snoozeUntil ?? null;
+      if ('assignee' in patch) wire.assignee = patch.assignee ?? null;
+    }
+    const sig = JSON.stringify(wire);
+    const job = batch.current.get(sig) ?? { patch: wire, keys: [] };
+    job.keys.push(key);
+    batch.current.set(sig, job);
+    queueMicrotask(flushTriage);
+  }, [flushTriage]);
 
   const upsertDraft = useCallback((d: Draft) => {
     setDrafts((prev) => {

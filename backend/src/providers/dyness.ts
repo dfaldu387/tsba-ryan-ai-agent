@@ -62,6 +62,7 @@ async function post<T>(path: string, body: Record<string, unknown> = {}): Promis
   const signature = hmacSha1Base64(env.dynessAppSecret, stringToSign);
 
   const res = await fetch(`${env.dynessBaseUrl}${PREFIX}${path}`, {
+    signal: AbortSignal.timeout(30_000), // a hung connection fails instead of stalling
     method: 'POST',
     headers: {
       'Content-Type': 'application/json;charset=UTF-8',

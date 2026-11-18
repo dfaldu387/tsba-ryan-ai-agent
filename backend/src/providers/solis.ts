@@ -42,6 +42,7 @@ async function post<T>(path: string, payload: Record<string, unknown>): Promise<
   const sign = hmacSha1B64(env.solisKeySecret, toSign);
 
   const res = await fetch(`${env.solisBaseUrl}${path}`, {
+    signal: AbortSignal.timeout(30_000), // a hung connection fails instead of stalling
     method: 'POST',
     headers: {
       'Content-Type': 'application/json;charset=UTF-8',

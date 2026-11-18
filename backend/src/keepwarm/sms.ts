@@ -33,7 +33,8 @@ export interface SendOutcome {
 
 export async function sendSms(to: string, body: string, from?: string): Promise<SendOutcome> {
   if (smsMode() === 'outbox') {
-    console.log(`[keepwarm:outbox] → ${to}: ${body}`);
+    // Never log the customer's number or the message text.
+    console.log(`[keepwarm:outbox] SMS held (dry-run) → …${to.replace(/\D/g, '').slice(-3)}, ${body.length} chars`);
     return { ok: true, providerId: `outbox-${Date.now()}` };
   }
   const sender = from || DEFAULT_FROM;

@@ -2,7 +2,7 @@ import type { SolarAlertSettings, AlertResolutionRule } from '@tsba/shared';
 import { getStorage } from './storage.js';
 import { fetchFileBytes } from './google-drive.js';
 import { cached } from './providers/cache.js';
-import { getProvider, aggregateStations } from './providers/index.js';
+import { getProvider, aggregateStationsCached } from './providers/index.js';
 import { faultSolution, anthropicConfigured } from './anthropic.js';
 import type { MailAttachment } from './google-gmail.js';
 import type { SolarMonitorAlert } from './providers/types.js';
@@ -62,7 +62,9 @@ async function plantEquipment(
   let capacityKw: number | undefined;
   // Capacity from the reliable fleet overview (used to pick the right-sized guide).
   try {
-    const { stations } = await aggregateStations();
+    // Cached overview: this runs per alerted plant, and an uncached call was a
+    // full multi-provider sweep each time.
+    const { stations } = await aggregateStationsCached();
     capacityKw = stations.find((x) => x.provider === a.provider && x.id === a.plantId)?.capacityKw;
   } catch {
     /* overview unavailable */
@@ -182,12 +184,34 @@ async function fetchAttachment(documentId: string, titleHint?: string): Promise<
   }
 }
 
+/**
+ * Plant-independent signature of an issue, for caching its solution: a fault is
+ * its code/name (from the id `provider:plant:fault:<code>:<sn>`), an offline
+ * device its type, an outage its severity. Titles embed the plant name and SN,
+ * so keying on them meant the same fault on 10 plants generated 10 times.
+ */
+function issueSignature(i: SolarMonitorAlert): string {
+  if (i.severity === 'alert') {
+    const m = /:fault:([^:]*)/.exec(i.id);
+    return `fault:${m?.[1] || i.title.toLowerCase()}`;
+  }
+  if (i.severity === 'device') return `device:${i.title.split(' offline at ')[0].toLowerCase()}`;
+  return i.severity;
+}
+
 /** A human description of the plant's issue, for the solution prompt. */
 function issueDescription(issues: SolarMonitorAlert[]): string {
   const worst = issues[0];
-  const parts = issues.map((i) => `${i.title}${i.detail ? ` (${i.detail})` : ''}`);
-  const device = worst.deviceSn ? `, device ${worst.deviceSn}` : '';
-  return `${parts.join('; ')} — plant "${worst.plant}"${device} on ${worst.provider}`;
+  const generic = (i: SolarMonitorAlert): string =>
+    i.title
+      .replace(` — ${i.plant}`, '')
+      .replace(` at ${i.plant}`, '')
+      .replace(i.plant, 'The plant')
+      .replace(i.deviceSn ? ` (${i.deviceSn})` : '\u0000', '');
+  const parts = issues.map((i) => `${generic(i)}${i.detail ? ` (${i.detail})` : ''}`);
+  // No plant name / serial: the result is cached and reused across plants with
+  // the same fault, so it must not mention one specific site.
+  return `${parts.join('; ')} — reported by the ${worst.provider} monitoring platform`;
 }
 
 /**
@@ -212,7 +236,7 @@ export async function resolveSolution(
   if (provided.length) return provided.join('\n\n');
 
   if (!anthropicConfigured()) return null;
-  const sigKey = issues.map((i) => i.title.toLowerCase()).join('|');
+  const sigKey = issues.map(issueSignature).sort().join('|');
   try {
     const { brand, model } = await plantEquipment(issues);
     // Equipment is part of the cache key so the same fault on different hardware

@@ -114,7 +114,7 @@ function EmailChips({
 
 /** Signature for dirty-tracking. */
 const sig = (s: SolarAlertSettings, recipients: string[]): string =>
-  JSON.stringify([s.enabled, s.intervalMin, s.recovery, s.quietNight, s.lat, s.lng, s.admin.delayMin, s.customer.enabled, s.customer.delayMin, s.includeSolution, s.attachResolution, s.resolutionRules, recipients.join(','), s.schedule.enabled, s.schedule.times.join(','), s.schedule.timezone, s.schedule.maxPerDay]);
+  JSON.stringify([s.enabled, s.intervalMin, s.recovery, s.quietNight, s.lat, s.lng, s.admin.delayMin, s.customer.enabled, s.customer.delayMin, s.includeSolution, s.attachResolution, s.resolutionRules, recipients.join(','), s.schedule.enabled, s.schedule.times.join(','), s.schedule.timezone, s.schedule.maxPerDay, s.schedule.instant]);
 
 export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; onAuthError: () => void }) {
   const canEdit = user.permissions.includes('manage_connections');
@@ -236,7 +236,7 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
         </div>
         <div className="set-list">
           <div className="set-row"><span className="set-label">Admin recipients</span><span className="set-value">{recipients.join(', ') || '—'}</span></div>
-          <div className="set-row"><span className="set-label">Delivery schedule</span><span className="set-value">{s.schedule.enabled ? `Digest at ${s.schedule.times.join(', ')} (${s.schedule.timezone}) · max ${s.schedule.maxPerDay}/day` : 'One email per plant'}</span></div>
+          <div className="set-row"><span className="set-label">Delivery schedule</span><span className="set-value">{s.schedule.enabled ? `${s.schedule.instant ? 'Instant alerts + ' : ''}Digest at ${s.schedule.times.join(', ')} (${s.schedule.timezone}) · max ${s.schedule.maxPerDay}/day` : 'One email per plant'}</span></div>
           <div className="set-row"><span className="set-label">Sunset quiet hours</span><span className="set-value">{s.quietNight ? 'On' : 'Off'}</span></div>
           <div className="set-row"><span className="set-label">Recovery emails</span><span className="set-value">{s.recovery ? 'On' : 'Off'}</span></div>
           <div className="set-row"><span className="set-label">Customer alerts</span><span className="set-value">{s.customer.enabled ? `On · after ${s.customer.delayMin} min` : 'Off'}</span></div>
@@ -265,7 +265,7 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
             <div className="al-banner-title">{s.enabled ? 'Alerts active' : 'Alerts disabled'}</div>
             <div className="al-banner-sub">
               {s.enabled
-                ? `Scanning every ${s.intervalMin} min · ${recipients.length} recipient${recipients.length === 1 ? '' : 's'} · ${s.schedule.enabled ? `digest at ${s.schedule.times.join(', ') || '—'}` : 'per-plant emails'} · ${s.quietNight ? 'quiet hours on' : 'always on'}`
+                ? `Scanning every ${s.intervalMin} min · ${recipients.length} recipient${recipients.length === 1 ? '' : 's'} · ${s.schedule.enabled ? `${s.schedule.instant ? 'instant alerts · ' : ''}digest at ${s.schedule.times.join(', ') || '—'}` : 'per-plant emails'} · ${s.quietNight ? 'quiet hours on' : 'always on'}`
                 : 'No emails will be sent while disabled'}
             </div>
           </div>
@@ -317,9 +317,18 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
         />
         {s.schedule.enabled && (
           <div className="al-indent">
-            <p className="al-hint" style={{ marginBottom: 10 }}>
-              At each send time, every plant with an open issue goes into a single email. The number of times
-              you list is how many digests you’ll get per day (capped below). Times are read in the timezone shown.
+            <ToggleRow
+              checked={s.schedule.instant}
+              onChange={(v) => patchSchedule({ instant: v })}
+              title="Send outages & faults instantly"
+              desc="A plant going offline, an inverter dropping out or a fault code is emailed on the scan that detects it, with the suggested fix — not held for the next digest"
+            />
+            <p className="al-hint" style={{ margin: '10px 0' }}>
+              {s.schedule.instant
+                ? 'At each send time you also get a roll-up: anything not yet emailed, everything still open, and what has recovered.'
+                : 'At each send time, every plant with an open issue goes into a single email.'}{' '}
+              The number of times you list is how many digests you’ll get per day (capped below). Times are read in
+              the timezone shown.
             </p>
             <div className="field" style={{ marginBottom: 12 }}>
               <label htmlFor="al-times">Send times <span className="al-hint">· 24-hour, comma-separated (e.g. 09:00, 17:00)</span></label>

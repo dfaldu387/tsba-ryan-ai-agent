@@ -365,6 +365,17 @@
 .c-skip:focus { left: 8px; }
 .c-main > main:focus { outline: none; }
 .c-acct { display: inline-flex; align-items: center; gap: 8px; }
+/* Account menu trigger: same 36px height, border and hover as the theme/bell
+   buttons beside it (it used .c-btn.sm, which grew to ~42px with the two-line
+   name, carried a heavier border and turned the name link-blue on hover). */
+.c-top-right .c-menu > .c-btn:has(> .c-acct) {
+  height: 36px; min-height: 36px; padding: 0 8px 0 4px; gap: 6px;
+  border-color: var(--line); background: var(--surface); color: var(--ink); font-weight: 500;
+}
+.c-top-right .c-menu > .c-btn:has(> .c-acct):hover,
+.c-top-right .c-menu > .c-btn:has(> .c-acct)[aria-expanded="true"] { background: var(--sunk); border-color: var(--line-strong); color: var(--ink); }
+.c-top-right .c-menu > .c-btn:has(> .c-acct) .c-avatar { width: 26px; height: 26px; border-radius: 7px; }
+.c-top-right .c-menu > .c-btn:has(> .c-acct) svg { color: var(--subtle); }
 .c-avatar { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; background: var(--brand); color: var(--brand-ink); font-size: 11.5px; font-weight: 700; flex: none; }
 .c-acct-id { display: flex; flex-direction: column; line-height: 1.15; text-align: left; }
 .c-acct-id strong { font-size: 13px; font-weight: 600; max-width: 160px; overflow: hidden; text-overflow: ellipsis; }

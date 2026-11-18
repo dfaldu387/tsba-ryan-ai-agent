@@ -101,6 +101,7 @@ function headers(): Record<string, string> {
 
 async function rawPost<T>(path: string, body: Record<string, unknown>): Promise<Envelope<T>> {
   const res = await fetch(`${env.sungrowBaseUrl}${path}`, {
+    signal: AbortSignal.timeout(30_000), // a hung connection fails instead of stalling
     method: 'POST',
     headers: headers(),
     body: JSON.stringify({ appkey: env.sungrowAppKey, ...body }),

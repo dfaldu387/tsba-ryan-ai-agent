@@ -50,6 +50,7 @@ async function authenticate(): Promise<string> {
   if (env.solarmanOrgId) body.orgId = Number(env.solarmanOrgId) || env.solarmanOrgId;
 
   const res = await fetch(url, {
+    signal: AbortSignal.timeout(30_000), // a hung connection fails instead of stalling
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -73,6 +74,7 @@ async function post<T extends Envelope>(path: string, body: Record<string, unkno
   if (!solarmanConfigured()) throw new ProviderNotConfiguredError('solarman');
   const run = async (t: string) => {
     const res = await fetch(`${env.solarmanBaseUrl}${path}?language=en`, {
+      signal: AbortSignal.timeout(30_000), // a hung connection fails instead of stalling
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${t}` },
       body: JSON.stringify(body),

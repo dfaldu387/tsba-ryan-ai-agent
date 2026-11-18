@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { env, deyeConfigured } from './env.js';
+import { isBackground } from './providers/priority.js';
 
 /**
  * Minimal Deye Cloud (developer.deyecloud.com) client.
@@ -47,54 +48,105 @@ interface Envelope {
 // So every Deye HTTP call goes through one serial lane, with interactive calls
 // (plant detail) jumping ahead of background ones (energy totals), and
 // rate-limit rejections retried with backoff.
+//
+// Deye ALSO enforces a rolling request quota (measured 2026-11-18: ~40 calls in
+// ~20s, then every call rejected). Retrying each rejected call while the rest of
+// the queue kept firing meant the account never recovered — every plant page
+// then took 10–15s and came back empty. So a rate-limit rejection now PAUSES THE
+// WHOLE LANE (2s, doubling to 60s, reset on the next success), and background
+// calls are paced more slowly to leave headroom for interactive ones.
 type Job = () => void;
 const lane: { hi: Job[]; lo: Job[] } = { hi: [], lo: [] };
 let laneBusy = false;
-const MIN_GAP_MS = 120;
+const MIN_GAP_MS = 120; // after an interactive (plant page) call
+const LO_GAP_MS = 450; // after a background call (~2/s max)
+const COOLDOWN_START_MS = 2_000;
+const COOLDOWN_MAX_MS = 60_000;
+const DEYE_CALL_TIMEOUT_MS = 20_000;
+let cooldownUntil = 0;
+let cooldownMs = 0;
+let cooldownTimer: NodeJS.Timeout | null = null;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function pump(): void {
   if (laneBusy) return;
+  const wait = cooldownUntil - Date.now();
+  if (wait > 0) {
+    // Account is rate-limited: hold every queued call until the pause ends.
+    if (!cooldownTimer) {
+      cooldownTimer = setTimeout(() => {
+        cooldownTimer = null;
+        pump();
+      }, wait);
+      cooldownTimer.unref?.();
+    }
+    return;
+  }
   const job = lane.hi.shift() ?? lane.lo.shift();
   if (!job) return;
   laneBusy = true;
   job();
 }
 
-/** Run `fn` alone on the Deye lane. */
-function enqueue<T>(fn: () => Promise<T>, low = false): Promise<T> {
+/** Run `fn` alone on the Deye lane. `front` puts a retry ahead of its queue. */
+function enqueue<T>(fn: () => Promise<T>, low = false, front = false): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    (low ? lane.lo : lane.hi).push(() => {
+    const q = low ? lane.lo : lane.hi;
+    const job: Job = () => {
       fn().then(resolve, reject).finally(async () => {
-        await sleep(MIN_GAP_MS);
+        await sleep(low ? LO_GAP_MS : MIN_GAP_MS);
         laneBusy = false;
         pump();
       });
-    });
+    };
+    if (front) q.unshift(job);
+    else q.push(job);
     pump();
   });
 }
 
 const isRateLimited = (status: number, msg?: string) => status === 429 || /too many/i.test(msg ?? '');
 
-/** fetch + JSON on the lane, retrying rate-limit rejections (1s, 2s, 4s). */
-async function deyeFetch<T>(url: string, init: RequestInit, low = false): Promise<{ res: Response; data: T }> {
+/** Rate-limited: pause the whole lane, doubling the pause on repeated hits. */
+function startCooldown(): void {
+  cooldownMs = cooldownMs ? Math.min(cooldownMs * 2, COOLDOWN_MAX_MS) : COOLDOWN_START_MS;
+  cooldownUntil = Date.now() + cooldownMs;
+  console.warn(`[deye] rate-limited — pausing all Deye calls for ${Math.round(cooldownMs / 1000)}s`);
+}
+
+/**
+ * fetch + JSON on the lane. A rate-limit rejection pauses the lane and the call
+ * is retried at the front of its queue once the pause ends (up to 3 times).
+ * Calls made inside `inBackground()` (fleet scans) run at low priority.
+ */
+async function deyeFetch<T>(url: string, init: RequestInit, lowHint = false): Promise<{ res: Response; data: T }> {
+  const low = lowHint || isBackground();
   for (let attempt = 0; ; attempt++) {
     const out = await enqueue(async () => {
+      // Hard per-call timeout (headers AND body): the lane runs one call at a
+      // time, so a single connection Deye holds open without answering would
+      // otherwise freeze every Deye call behind it — plant list, plant pages
+      // and the alert scan — until the server restarts.
+      const signal = AbortSignal.timeout(DEYE_CALL_TIMEOUT_MS);
       let res: Response;
       try {
-        res = await fetch(url, init);
+        res = await fetch(url, { ...init, signal });
       } catch (err) {
-        throw new DeyeError(`deye_network_error: ${(err as Error).message}`);
+        throw new DeyeError(`deye_network_error: ${signal.aborted ? `no answer within ${DEYE_CALL_TIMEOUT_MS / 1000}s` : (err as Error).message}`);
       }
       const data = (await res.json().catch(() => ({}))) as T;
       return { res, data };
-    }, low);
+    }, low, attempt > 0);
     const msg = (out.data as Envelope).msg;
-    if (attempt < 3 && isRateLimited(out.res.status, typeof msg === 'string' ? msg : undefined)) {
-      await sleep(1000 * 2 ** attempt);
-      continue;
+    if (isRateLimited(out.res.status, typeof msg === 'string' ? msg : undefined)) {
+      // Starts before the lane's post-call gap ends, so no other call slips out.
+      startCooldown();
+      // Background scans can afford to wait out the quota (they keep the alert
+      // scan's view of Deye faults current); interactive calls give up sooner.
+      if (attempt < (low ? 8 : 3)) continue;
+      return out;
     }
+    cooldownMs = 0; // the account is accepting calls again
     return out;
   }
 }

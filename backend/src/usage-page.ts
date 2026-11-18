@@ -1,4 +1,4 @@
-import { timingSafeEqual } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { env } from './env.js';
 import { queryUsage } from './usage.js';
@@ -36,7 +36,14 @@ export async function registerUsageRoutes(app: FastifyInstance): Promise<void> {
   app.get('/usage', async (req, reply) => {
     const q = req.query as Record<string, string | undefined>;
     if (!tokenOk(q.key)) return reply.code(404).type('text/html').send('<!doctype html><title>Not found</title>Not found');
-    return reply.type('text/html').send(PAGE_HTML.replace('__KEY__', esc(q.key as string)));
+    // Its own CSP: the one inline <script> runs by per-response nonce; nothing else may.
+    const nonce = randomBytes(16).toString('base64');
+    reply.header(
+      'Content-Security-Policy',
+      `default-src 'self'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
+    );
+    reply.header('Cache-Control', 'no-store');
+    return reply.type('text/html').send(PAGE_HTML.replace('__KEY__', esc(q.key as string)).replace('<script>', `<script nonce="${nonce}">`));
   });
 }
 

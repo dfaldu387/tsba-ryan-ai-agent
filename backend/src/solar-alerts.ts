@@ -1,5 +1,6 @@
 import { aggregateStationsCached, getProvider } from './providers/index.js';
 import { cached } from './providers/cache.js';
+import { inBackground } from './providers/priority.js';
 import type { SolarMonitorAlert } from './providers/types.js';
 import { env } from './env.js';
 import type { DetailCapture } from './plant-history-repo.js';
@@ -66,6 +67,10 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 // spawn dozens of concurrent Chromium contexts and exhaust the server's memory.
 const DETAIL_SCAN_CONCURRENCY = 4;
 
+// Offline plants: when each last had its detail saved (see collectSolarAlerts).
+const OFFLINE_CAPTURE_EVERY_MS = 6 * 3_600_000;
+const offlineCapturedAt = new Map<string, number>();
+
 /** Run `worker` over `items` with at most `limit` in flight at any time. */
 async function mapLimit<T>(items: T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
   let next = 0;
@@ -78,16 +83,33 @@ async function mapLimit<T>(items: T[], limit: number, worker: (item: T) => Promi
   await Promise.all(runners);
 }
 
-export function getSolarAlerts(): Promise<SolarAlertsResult> {
+/**
+ * @param opts.fresh  Wait for a current scan instead of serving an expired one.
+ *   UI pollers use the default (instant, stale-while-revalidate); the alert
+ *   monitor passes `fresh` so it reacts to an outage on the scan it happens —
+ *   with SWR it would only see the previous scan's (≈1 interval old) result.
+ */
+export function getSolarAlerts(opts?: { fresh?: boolean }): Promise<SolarAlertsResult> {
   // Stale-while-revalidate: once primed, an expired scan is served instantly and
   // refreshed in the background, so this endpoint never blocks a request on the
   // multi-second (cold: multi-minute) fleet detail scan. The very first call
   // still computes; it's primed at boot (see index.ts) so users never hit it.
-  return cached('solar:alerts', SCAN_TTL_MS, collectSolarAlerts, { swr: true });
+  if (opts?.fresh) return cached('solar:alerts', SCAN_TTL_MS, () => collectSolarAlerts(true));
+  return cached('solar:alerts', SCAN_TTL_MS, () => collectSolarAlerts(false), { swr: true });
 }
 
-async function collectSolarAlerts(): Promise<SolarAlertsResult> {
-  const { stations, errors } = await aggregateStationsCached();
+/** Lower-cased, trimmed key part. */
+const norm = (s: string | undefined): string => (s ?? '').trim().toLowerCase();
+
+/** Is a provider alarm still live? Explicit `active:false` or a cleared status means no. */
+function alarmActive(a: { active?: boolean; status?: string }): boolean {
+  if (a.active === false) return false;
+  if (a.status && /recover|clear|resolv|closed|restor|turned off|^off$|^ended$|^done$/i.test(a.status)) return false;
+  return true;
+}
+
+async function collectSolarAlerts(fresh: boolean): Promise<SolarAlertsResult> {
+  const { stations, errors } = await aggregateStationsCached(fresh ? { maxAgeMs: 2 * 60_000 } : undefined);
   const alerts: SolarMonitorAlert[] = [];
 
   // Plant-level issues straight from the overview (cheap, no extra calls).
@@ -128,11 +150,36 @@ async function collectSolarAlerts(): Promise<SolarAlertsResult> {
   const captures: DetailCapture[] = []; // saved to the DB after the scan (devices, alarms, curves)
   let totalDevices = 0;
   let onlineDevices = 0;
+
+  // Offline plants raise no device/fault alerts (the plant alert covers them),
+  // but their plant page still needs a saved copy to fall back on when the
+  // platform is slow or rate-limiting — otherwise it shows "Couldn't load this"
+  // with no devices at all. Refresh that copy at most every 6 h per plant, low
+  // priority, so it costs little of the platform's quota.
+  if (env.storage === 'postgres') {
+    const now = Date.now();
+    const offline = stations.filter(
+      (s) => s.status === 'offline' && now - (offlineCapturedAt.get(`${s.provider}:${s.id}`) ?? 0) > OFFLINE_CAPTURE_EVERY_MS,
+    );
+    await mapLimit(offline, DETAIL_SCAN_CONCURRENCY, async (s) => {
+      const provider = getProvider(s.provider);
+      if (!provider) return;
+      try {
+        const detail = await withTimeout(inBackground(() => provider.stationDetail(s.id)), DETAIL_CALL_TIMEOUT_MS);
+        captures.push({ provider: s.provider, stationId: s.id, detail });
+        offlineCapturedAt.set(`${s.provider}:${s.id}`, now);
+      } catch {
+        /* try again next scan */
+      }
+    });
+  }
   await mapLimit(toScan, DETAIL_SCAN_CONCURRENCY, async (s) => {
       const provider = getProvider(s.provider);
       if (!provider) return;
       try {
-        const detail = await withTimeout(provider.stationDetail(s.id), DETAIL_CALL_TIMEOUT_MS);
+        // Background priority: on rate-limited platforms (Deye) a person opening a
+        // plant page goes ahead of this fleet-wide scan.
+        const detail = await withTimeout(inBackground(() => provider.stationDetail(s.id)), DETAIL_CALL_TIMEOUT_MS);
         detailed.push(`${s.provider}:${s.id}`);
         captures.push({ provider: s.provider, stationId: s.id, detail });
         // Fleet device tally (JS is single-threaded, so these increments are safe
@@ -156,14 +203,28 @@ async function collectSolarAlerts(): Promise<SolarAlertsResult> {
             });
           }
         }
+        // Only LIVE faults raise alerts (some platforms return a history window
+        // with cleared alarms in it). Repeats of the same fault on the same device
+        // collapse into ONE issue (the latest occurrence), keyed by fault + device
+        // rather than the platform's per-occurrence id — so a fault that keeps
+        // re-triggering is one open issue, and it "recovers" when it truly clears.
+        const live = new Map<string, (typeof detail.alerts)[number]>();
         for (const a of detail.alerts) {
+          if (!alarmActive(a)) continue;
+          const sig = `${norm(a.code) || norm(a.name)}:${norm(a.deviceSn)}`;
+          const prev = live.get(sig);
+          if (!prev || (a.start ?? 0) > (prev.start ?? 0)) live.set(sig, a);
+        }
+        for (const [sig, a] of live) {
           // Detail line: fault code and provider-reported handling status, when known.
           const detailBits = [
             a.code ? `Fault code ${a.code}` : null,
+            a.level ? `Level ${a.level}` : null,
             a.status ? `Status: ${a.status}` : null,
+            a.reason ? `Cause: ${a.reason}` : null,
           ].filter(Boolean);
           alerts.push({
-            id: `${s.provider}:${s.id}:alert:${a.id}`,
+            id: `${s.provider}:${s.id}:fault:${sig}`,
             severity: 'alert',
             provider: s.provider,
             plant: s.name,

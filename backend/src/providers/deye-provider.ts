@@ -1,5 +1,6 @@
 import { deyeConfigured } from '../env.js';
 import {
+  DeyeError,
   listStationAlerts,
   listStationDevices,
   listStations,
@@ -7,8 +8,9 @@ import {
   stationLatest,
   stationPowerCurve,
 } from '../deye.js';
-import { cached } from './cache.js';
-import type { DeyeStation } from '../deye.js';
+import { cached, peek } from './cache.js';
+import { isBackground } from './priority.js';
+import type { DeyePowerPoint, DeyeStation, DeyeStationLatest } from '../deye.js';
 import type {
   NormalizedStation,
   NormalizedDetail,
@@ -67,6 +69,18 @@ function mapStatus(connectionStatus?: string): StationStatus {
   return 'unknown';
 }
 
+/**
+ * Is a Deye alarm still active? It has ended when Deye reports an end time at or
+ * after its start that is already in the past. No end time (null/0) = ongoing.
+ */
+function deyeAlertActive(a: import('../deye.js').DeyeAlert): boolean {
+  const end = Number(a.alertEndTime);
+  if (!Number.isFinite(end) || end <= 0) return true;
+  const start = Number(a.alertStartTime);
+  if (Number.isFinite(start) && start > 0 && end < start) return true; // nonsense end → treat as open
+  return end * 1000 > Date.now();
+}
+
 const deviceOnline = (state?: number | string): boolean => {
   const s = String(state ?? '').toUpperCase();
   return s === '1' || s === 'ONLINE' || s === 'NORMAL';
@@ -88,7 +102,9 @@ export const deyeProvider: SolarProvider = {
         // fleet), so don't hold the plant list on them: wait briefly, and if the
         // cache is still cold the totals show on the next refresh.
         const energy = await Promise.race([
-          cached(`deye:energy:${s.id}`, 300_000, () => stationEnergy(s.id), { swr: true }),
+          // 15 min: totals move slowly, and this is 3 calls × every plant against
+          // Deye's tight account quota (5 min used most of it on its own).
+          cached(`deye:energy:${s.id}`, 15 * 60_000, () => stationEnergy(s.id), { swr: true }),
           new Promise<import('../deye.js').DeyeEnergy>((r) => setTimeout(() => r({}), 2_000)),
         ]).catch((): import('../deye.js').DeyeEnergy => ({}));
         return {
@@ -122,13 +138,31 @@ export const deyeProvider: SolarProvider = {
     // that gets rate-limited serves the last good data instead of an empty list.
     const part = <T,>(name: string, ttl: number, fn: () => Promise<T>) =>
       cached(`deye:${name}:${id}`, ttl, fn, { swr: true });
+    let failed = 0;
+    const soft = <T,>(p: Promise<T>, fallback: T): Promise<T> =>
+      p.catch(() => {
+        failed++;
+        return fallback;
+      });
+    // The fleet fault scan (background) needs only devices + alarms. Fetching the
+    // live reading and power curve too made it 4 calls × 61 plants per pass —
+    // more than Deye's account quota allows (~40 calls / 20 s, shared with every
+    // server using these credentials), so every plant timed out and NO Deye
+    // faults were detected. In the scan those two parts reuse whatever a plant
+    // page last fetched (no call); plant pages still fetch all four live.
+    const scan = isBackground();
     const [latest, devices, alerts, power, stations] = await Promise.all([
-      part('latest', 60_000, () => stationLatest(id)).catch(() => null),
-      part('devices', 300_000, () => listStationDevices(id)).catch(() => []),
-      part('alerts', 300_000, () => listStationAlerts(id)).catch(() => []),
-      part('power', 300_000, () => stationPowerCurve(id)).catch(() => []),
-      cached('deye:rawlist', 60_000, () => listStations()).catch((): DeyeStation[] => []),
+      scan ? Promise.resolve(peek<DeyeStationLatest>(`deye:latest:${id}`) ?? null) : soft(part('latest', 60_000, () => stationLatest(id)), null),
+      soft(part('devices', 300_000, () => listStationDevices(id)), []),
+      soft(part('alerts', 300_000, () => listStationAlerts(id)), []),
+      scan ? Promise.resolve(peek<DeyePowerPoint[]>(`deye:power:${id}`) ?? []) : soft(part('power', 300_000, () => stationPowerCurve(id)), []),
+      cached('deye:rawlist', 60_000, () => listStations(), { swr: true }).catch((): DeyeStation[] => []),
     ]);
+    // Nothing came back (typically Deye rate-limiting the account): fail loudly
+    // so callers use the last saved copy, instead of an "empty" plant that
+    // shows no devices — and would overwrite the good saved copy, or make the
+    // alert scan think this plant's faults had cleared.
+    if (failed === (scan ? 2 : 4)) throw new DeyeError('deye_unavailable: no data returned for this plant (rate-limited?)');
     const record = stations.find((x) => x.id === id);
 
     return {
@@ -151,12 +185,17 @@ export const deyeProvider: SolarProvider = {
         // (1 = online); `deviceState` is a fallback for other tenants.
         online: deviceOnline(d.connectStatus ?? d.deviceState),
       })),
+      // alertList is a 30-day HISTORY window: cleared alarms come back too, with an
+      // alertEndTime. Keep them all (the plant page shows history) but flag which
+      // are still active so the monitor only alerts on live faults.
       alerts: alerts.map((a, i) => ({
         id: String(a.alertId ?? i),
         name: a.alertName || a.alertCode || 'Alert',
         code: a.alertCode,
         deviceSn: a.deviceSn,
         start: a.alertStartTime,
+        end: a.alertEndTime || undefined,
+        active: deyeAlertActive(a),
         level: a.level != null ? String(a.level) : undefined,
       })),
       power: power

@@ -35,6 +35,8 @@ export interface AlertGroup {
   devices: string[];
   firstSeen: number | null; // ms
   lastSeen: number | null; // ms
+  /** Open since (ms): when the monitor first saw it, else the platform's start time. */
+  since: number | null;
   detail?: string;
   solution?: string;
   providerStatus?: string;
@@ -90,11 +92,13 @@ export function groupAlerts(alerts: RawAlert[]): AlertGroup[] {
     if (!g) {
       g = {
         key, provider: a.provider, plantId: a.plantId, plant: a.plant, fault, code: faultCode(a),
-        severity, category, count: 0, devices: [], firstSeen: at, lastSeen: at,
+        severity, category, count: 0, devices: [], firstSeen: at, lastSeen: at, since: null,
         detail: a.detail, solution: a.solution, providerStatus: a.status, items: [],
       };
       map.set(key, g);
     }
+    const s = a.since ?? at;
+    if (s != null) g.since = g.since == null ? s : Math.min(g.since, s);
     g.count += 1;
     g.items.push(a);
     if (a.deviceSn && !g.devices.includes(a.deviceSn)) g.devices.push(a.deviceSn);
@@ -112,13 +116,16 @@ export function groupAlerts(alerts: RawAlert[]): AlertGroup[] {
 }
 
 // ─── Triage state (acknowledge / assign / snooze) ───────────────────────────
-// Stored per browser until a backend triage store exists. Keyed by group key.
+// Shared team-wide via /api/solar/triage (see console.tsx). The localStorage
+// copy below is only the pre-server legacy store, migrated up once.
 export interface TriageState {
   ack?: number; // ms acknowledged
+  ackBy?: string;
   assignee?: string;
   snoozeUntil?: number; // ms
+  snoozedBy?: string;
 }
-const TRIAGE_KEY = 'tsba.alerts.triage.v1';
+export const TRIAGE_KEY = 'tsba.alerts.triage.v1';
 
 export function loadTriage(): Record<string, TriageState> {
   try {

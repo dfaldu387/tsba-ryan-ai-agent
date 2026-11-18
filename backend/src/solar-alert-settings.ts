@@ -34,6 +34,9 @@ export const DEFAULT_ALERT_SETTINGS: SolarAlertSettings = {
     times: ['09:00', '17:00'],
     timezone: 'Australia/Sydney',
     maxPerDay: 4,
+    // Outages and faults go out the moment they're detected; the digests are the
+    // twice-daily roll-up of what's still open.
+    instant: true,
   },
 };
 
@@ -67,6 +70,7 @@ function withDefaults(stored: Partial<SolarAlertSettings> | null): SolarAlertSet
       times: stored.schedule?.times ?? d.schedule.times,
       timezone: stored.schedule?.timezone ?? d.schedule.timezone,
       maxPerDay: stored.schedule?.maxPerDay ?? d.schedule.maxPerDay,
+      instant: stored.schedule?.instant ?? d.schedule.instant,
     },
     updatedAt: stored.updatedAt,
   };
@@ -187,7 +191,8 @@ function normaliseSchedule(
   }
 
   const maxPerDay = patch.maxPerDay != null ? clampInt(patch.maxPerDay, 1, 48, current.maxPerDay) : current.maxPerDay;
-  return { enabled, times, timezone, maxPerDay };
+  const instant = patch.instant ?? current.instant;
+  return { enabled, times, timezone, maxPerDay, instant: Boolean(instant) };
 }
 
 /** Trim, de-dupe and validate a recipients list; throws on a malformed address. */

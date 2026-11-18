@@ -24,32 +24,65 @@ import type {
 } from '@tsba/shared';
 import type { ProgressBoard } from './types';
 
-const TOKEN_KEY = 'tsba-preview-token';
+// The session itself is an HttpOnly cookie set by the server: page scripts
+// can't read it, so nothing secret is kept in localStorage. Only the cached
+// (non-secret) user profile lives here, to render instantly on reload.
+const LEGACY_TOKEN_KEY = 'tsba-preview-token';
 const USER_KEY = 'tsba-preview-user';
 
-export function getToken(): string | null {
+/** Whether this browser looks signed in (confirmed by /api/me on load). */
+export function hasSession(): boolean {
   try {
-    return localStorage.getItem(TOKEN_KEY);
+    return Boolean(localStorage.getItem(USER_KEY) || localStorage.getItem(LEGACY_TOKEN_KEY));
   } catch {
-    return null;
+    return false;
   }
 }
-function setToken(t: string): void {
-  try {
-    localStorage.setItem(TOKEN_KEY, t);
-  } catch {
-    /* ignore */
-  }
-}
+
+/** Forget the local session (cached profile + legacy token). */
 export function clearToken(): void {
   try {
-    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(LEGACY_TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
     // Chat transcripts used to be stored per browser, not per user; drop those
     // legacy copies so the next person to sign in on a shared PC can't read them.
     for (const k of LEGACY_TRANSCRIPT_KEYS) localStorage.removeItem(k);
   } catch {
     /* ignore */
+  }
+}
+
+/** Sign out: the server clears the session cookie, then the local cache goes. */
+export async function logout(): Promise<void> {
+  await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' }).catch(() => {});
+  clearToken();
+}
+
+/**
+ * Browsers signed in before the cookie switch still hold a token in
+ * localStorage: trade it once for the HttpOnly cookie, then delete it.
+ */
+let upgrading: Promise<void> | null = null;
+function upgradeLegacyToken(): Promise<void> {
+  // Shared by every request, so none goes out before the cookie is in place.
+  return (upgrading ??= doUpgradeLegacyToken());
+}
+async function doUpgradeLegacyToken(): Promise<void> {
+  let legacy: string | null = null;
+  try {
+    legacy = localStorage.getItem(LEGACY_TOKEN_KEY);
+  } catch {
+    return;
+  }
+  if (!legacy) return;
+  try {
+    await fetch('/api/session', { method: 'POST', credentials: 'same-origin', headers: { Authorization: `Bearer ${legacy}` } });
+  } finally {
+    try {
+      localStorage.removeItem(LEGACY_TOKEN_KEY);
+    } catch {
+      /* ignore */
+    }
   }
 }
 
@@ -92,14 +125,12 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const token = getToken();
+  await upgradeLegacyToken();
   const headers: Record<string, string> = { ...(init.headers as Record<string, string>) };
   // Only declare a JSON body when we actually send one — a POST/PATCH with no
   // body + Content-Type: application/json makes Fastify reject it as empty JSON.
   if (init.body != null) headers['Content-Type'] = 'application/json';
-  if (token) headers.Authorization = `Bearer ${token}`;
-
-  const res = await fetch(path, { ...init, headers });
+  const res = await fetch(path, { ...init, headers, credentials: 'same-origin' });
   // A 401 from /api/login is "wrong password", not an expired session.
   if (res.status === 401 && path !== '/api/login') {
     clearToken();
@@ -112,12 +143,35 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return body as T;
 }
 
+/** Fired with the fresh user after a self-service profile change (App listens). */
+export const USER_UPDATED_EVENT = 'tsba:user-updated';
+function publishUser(u: AuthenticatedUser): void {
+  setStoredUser(u);
+  window.dispatchEvent(new CustomEvent<AuthenticatedUser>(USER_UPDATED_EVENT, { detail: u }));
+}
+
+/** Change your own display name. */
+export async function updateMyProfile(patch: { name: string }): Promise<AuthenticatedUser> {
+  const user = await request<AuthenticatedUser>('/api/me', { method: 'PATCH', body: JSON.stringify(patch) });
+  publishUser(user);
+  return user;
+}
+
+/** Change your own password. Older sessions are revoked; this browser gets a fresh session cookie. */
+export async function changeMyPassword(current: string, next: string): Promise<AuthenticatedUser> {
+  const { user } = await request<{ user: AuthenticatedUser }>('/api/me/password', {
+    method: 'POST',
+    body: JSON.stringify({ current, next }),
+  });
+  publishUser(user);
+  return user;
+}
+
 export async function login(email: string, password: string): Promise<AuthenticatedUser> {
-  const { token, user } = await request<{ token: string; user: AuthenticatedUser }>('/api/login', {
+  const { user } = await request<{ user: AuthenticatedUser }>('/api/login', {
     method: 'POST',
     body: JSON.stringify({ email, password }),
   });
-  setToken(token);
   setStoredUser(user);
   return user;
 }
@@ -497,8 +551,35 @@ export interface SolarMonitorAlert {
   /** Provider remediation / handling state, passed through when known. */
   solution?: string;
   status?: string;
+  /** When the alert monitor first saw this issue (ms). */
+  since?: number;
   lat?: number;
   lng?: number;
+}
+
+/** Shared (team-wide) triage state for one alert group. */
+export interface TriageEntry {
+  ack?: number;
+  ackBy?: string;
+  snoozeUntil?: number;
+  snoozedBy?: string;
+  assignee?: string;
+  updatedAt?: number;
+}
+export type TriagePatch = { ack?: number | null; snoozeUntil?: number | null; assignee?: string | null };
+
+export function getAlertTriage(): Promise<{ triage: Record<string, TriageEntry> }> {
+  return request('/api/solar/triage');
+}
+
+/** Apply one patch to several alert groups (`null` clears them). Returns the full shared map. */
+export function patchAlertTriage(keys: string[], patch: TriagePatch | null): Promise<{ triage: Record<string, TriageEntry> }> {
+  return request('/api/solar/triage', { method: 'POST', body: JSON.stringify({ keys, patch }) });
+}
+
+/** Suggested fix for a set of open alert ids on one plant. */
+export function getAlertSolution(ids: string[]): Promise<{ solution: string | null; source: 'provider' | 'ai' | null }> {
+  return request('/api/solar/alerts/solution', { method: 'POST', body: JSON.stringify({ ids }) });
 }
 
 export interface SolarAlertsResult {
@@ -589,7 +670,8 @@ export interface StationOverview {
  *  expose it (HTTP 501) so the UI falls back to the basic detail. */
 export async function getStationOverview(provider: string, id: string): Promise<StationOverview | null> {
   try {
-    return await request<StationOverview>(`/api/solar/${provider}/stations/${encodeURIComponent(id)}/overview`);
+    const ov = await request<StationOverview & { supported?: boolean }>(`/api/solar/${provider}/stations/${encodeURIComponent(id)}/overview`);
+    return ov.supported === false ? null : ov;
   } catch (err) {
     if (err instanceof AuthError) throw err;
     return null; // 501/unsupported or transient — caller shows basic detail

@@ -1,0 +1,90 @@
+/* Settings page (SettingsTab.tsx). Own `st-` namespace; also restyles the
+   alert form (al-*) only when it sits inside this page. */
+
+.st-page { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 24px; align-items: start; max-width: 1180px; }
+
+/* Side menu */
+.st-nav { position: sticky; top: 76px; display: flex; flex-direction: column; gap: 2px; }
+.st-nav-item {
+  display: flex; align-items: flex-start; gap: 11px; width: 100%; padding: 10px 12px; border: 1px solid transparent;
+  border-radius: var(--r-md); background: transparent; color: var(--muted); font: inherit; text-align: left; cursor: pointer;
+  transition: background .12s, color .12s, border-color .12s;
+}
+.st-nav-item svg { flex: none; margin-top: 1px; }
+.st-nav-item:hover { background: var(--sunk); color: var(--ink); }
+.st-nav-item.on { background: var(--surface); border-color: var(--line); color: var(--ink); box-shadow: var(--sh-1); }
+.st-nav-item.on svg { color: var(--brand); }
+.st-nav-item:focus-visible { outline: none; box-shadow: var(--focus); }
+.st-nav-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.st-nav-text strong { font-size: 13.5px; font-weight: 600; }
+.st-nav-text span { font-size: 12px; color: var(--subtle); line-height: 1.35; }
+
+.st-content { min-width: 0; display: flex; flex-direction: column; gap: 20px; }
+
+/* Section card */
+.st-card { padding: 22px 24px; gap: 16px; }
+.st-head h2 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -0.01em; }
+.st-head p { margin: 4px 0 0; font-size: 13.5px; color: var(--muted); line-height: 1.55; max-width: 70ch; }
+.st-sub { margin: 6px 0 -4px; font-size: 11.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--subtle); }
+.st-note { margin: 0; font-size: 12.5px; color: var(--muted); }
+
+/* Status tiles */
+.st-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr)); gap: 12px; }
+.st-tile {
+  --tc: var(--neutral); --ts: var(--neutral-soft);
+  display: flex; align-items: flex-start; gap: 12px; padding: 14px; border-radius: 12px;
+  border: 1px solid var(--line); background: var(--surface); min-width: 0;
+}
+.st-tile.t-ok { --tc: var(--success); --ts: var(--success-soft); }
+.st-tile.t-warn { --tc: var(--warning); --ts: var(--warning-soft); }
+.st-tile-ic { flex: none; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 9px; background: var(--ts); color: var(--tc); }
+.st-tile-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.st-tile-label { font-size: 12px; color: var(--muted); }
+.st-tile-value { font-size: 14px; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+.st-tile-note { font-size: 12px; color: var(--subtle); overflow-wrap: anywhere; }
+.st-tile-state { flex: none; font-size: 11px; font-weight: 700; color: var(--tc); background: var(--ts); border-radius: var(--r-pill); padding: 3px 8px; }
+.st-tile.t-neutral .st-tile-state { display: none; }
+.st-skel { height: 68px; background: var(--sunk); border-color: transparent; }
+
+/* Account */
+.st-profile { display: flex; align-items: center; gap: 14px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; }
+.st-profile > div { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.st-profile strong { font-size: 15px; }
+.st-profile > div span { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.st-avatar { flex: none; display: grid; place-items: center; width: 44px; height: 44px; border-radius: 12px; background: var(--brand); color: var(--brand-ink); font-weight: 700; }
+.st-role { flex: none; font-size: 12px; font-weight: 700; text-transform: capitalize; color: var(--brand-strong); background: var(--brand-soft); border-radius: var(--r-pill); padding: 4px 10px; }
+.st-perms { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.st-perms li { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; padding: 4px 10px; border-radius: var(--r-pill); background: var(--sunk); color: var(--ink); text-transform: capitalize; }
+.st-perms svg { color: var(--success); }
+
+/* ── Alert form inside the settings page ─────────────────────────────────── */
+/* The form's own outer card becomes the page section (no card-in-card). */
+.st-content > section.card:has(.al-banner) { padding: 22px 24px; gap: 16px; }
+.st-content > section.card:has(.al-banner) > .card-h .eyebrow { display: none; }
+.st-content > section.card:has(.al-banner) > .card-h h2 { font-size: 18px; }
+/* Each group is its own sub-card with a real heading. */
+.st-page .al-group { border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; gap: 14px; background: var(--surface); }
+.st-page .al-group-h { font-family: var(--f-body); font-size: 14px; font-weight: 700; letter-spacing: 0; text-transform: none; color: var(--ink); }
+.st-page .al-group-h::after { display: none; }
+.st-page .al-indent { margin-left: 54px; padding-left: 14px; border-left: 2px solid var(--line); }
+/* Save bar stays in reach while scrolling a long form. */
+.st-page .al-actions {
+  position: sticky; bottom: 12px; z-index: 5; margin-top: 4px; padding: 12px 16px;
+  border: 1px solid var(--line); border-radius: 12px; background: color-mix(in srgb, var(--raised) 94%, transparent);
+  backdrop-filter: blur(8px); box-shadow: var(--sh-2);
+}
+.st-page .al-saved:not(.ok):not(:empty) { color: var(--warning); font-weight: 600; }
+
+@media (max-width: 900px) {
+  .st-page { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .st-nav { position: static; flex-direction: row; overflow-x: auto; gap: 6px; scrollbar-width: none; margin: 0 -4px; padding: 0 4px 2px; }
+  .st-nav::-webkit-scrollbar { display: none; }
+  .st-nav-item { flex: none; width: auto; align-items: center; padding: 8px 12px; border-color: var(--line); border-radius: var(--r-pill); }
+  .st-nav-text span { display: none; }
+}
+@media (max-width: 560px) {
+  .st-card, .st-content > section.card:has(.al-banner) { padding: 16px; }
+  .st-page .al-group { padding: 14px; }
+  .st-page .al-indent { margin-left: 0; }
+  .st-page .al-fields { grid-template-columns: 1fr; }
+}
