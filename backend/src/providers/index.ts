@@ -1,4 +1,4 @@
-import { ProviderError, type NormalizedStation, type SolarProvider } from './types.js';
+import { ProviderError, OverviewUnsupportedError, type NormalizedStation, type SolarProvider } from './types.js';
 import { applyGeocodes } from '../geocode.js';
 import { env } from '../env.js';
 import { invalidate } from './cache.js';
@@ -34,7 +34,7 @@ function withFallback(primary: SolarProvider, secondary: SolarProvider): SolarPr
     // Forward the rich Overview to whichever backend is active and supports it.
     overview: (id) => {
       const a = active();
-      if (!a.overview) throw new ProviderError(`${a.id}_overview_unsupported`);
+      if (!a.overview) return Promise.reject(new OverviewUnsupportedError(a.id));
       return a.overview(id);
     },
   };
@@ -196,7 +196,18 @@ export async function aggregateStations(timeoutMs = PROVIDER_TIMEOUT_MS): Promis
           // Known-incomplete/unverified integration — don't raise a fleet error.
           unavailable.push(p.id);
         } else {
-          errors.push({ provider: p.id, name: p.name, error: (err as Error).message });
+          // Full detail (API paths, upstream messages) stays in the server log;
+          // the client only learns which kind of failure it was.
+          const raw = (err as Error).message ?? '';
+          console.warn(`[solar] ${p.id} unavailable:`, raw.slice(0, 300));
+          const error = /auth|login|token|credential|sign/i.test(raw)
+            ? 'Couldn’t sign in to this platform — check its credentials.'
+            : /network|timeout|ECONN|ENOTFOUND|fetch failed/i.test(raw)
+              ? 'The platform couldn’t be reached.'
+              : /rate|too many|limit/i.test(raw)
+                ? 'The platform is rate-limiting requests — retrying shortly.'
+                : 'The platform returned an error.';
+          errors.push({ provider: p.id, name: p.name, error });
         }
       }
     }),
@@ -233,9 +244,19 @@ function sweep(timeoutMs?: number): Promise<AggregateResult> {
   return inflightAgg;
 }
 
-export async function aggregateStationsCached(): Promise<AggregateResult> {
+/**
+ * @param opts.maxAgeMs  When set, a snapshot older than this is NOT served stale:
+ *   the caller waits for a fresh sweep (falling back to the old snapshot only if
+ *   that sweep fails). The alert monitor uses this so an outage is detected on
+ *   the scan it happens, not one scan later.
+ */
+export async function aggregateStationsCached(opts?: { maxAgeMs?: number }): Promise<AggregateResult> {
   const age = cachedAgg ? Date.now() - cachedAgg.at : Infinity;
   if (cachedAgg && age < FRESH_MS) return cachedAgg.value;
+  if (cachedAgg && opts?.maxAgeMs != null && age > opts.maxAgeMs) {
+    const stale = cachedAgg.value;
+    return sweep().catch(() => stale);
+  }
   if (cachedAgg && age < STALE_MS) {
     void sweep().catch(() => {});
     return cachedAgg.value;

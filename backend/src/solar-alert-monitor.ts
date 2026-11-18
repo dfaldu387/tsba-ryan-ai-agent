@@ -46,6 +46,10 @@ const active = new Map<string, Tracked>();
 // Issues that were alerted to admins and have since cleared, owed a recovery
 // email that was deferred (night) — flushed at sunrise.
 const recoveredPending = new Map<string, SolarMonitorAlert>();
+// Issues that cleared recently — if one reappears within FLAP_WINDOW_MS it is
+// the same ongoing issue (keeps its first-seen and notified state), so a
+// flapping plant isn't re-alerted every scan.
+const recentlyCleared = new Map<string, { firstSeen: number; adminNotified: boolean; clearedAt: number }>();
 
 // ─── Scheduled-digest bookkeeping (in-memory) ─────────────────────────────────
 // When schedule.enabled is on, admin alerts are not emailed per-plant; they are
@@ -322,23 +326,39 @@ function buildRecoveryEmail(
 }
 
 /**
- * Build the combined digest email: every open plant-issue (grouped by plant)
- * plus any recoveries, as one message. This replaces the stream of per-plant
- * emails when scheduled digests are enabled.
+ * Build a combined multi-plant email. Used for the scheduled DIGEST (new issues
+ * + a roll-up of what's still open + recoveries) and for an INSTANT burst (many
+ * plants tripping on the same scan — one email instead of dozens).
+ *
+ * `solutions` maps plantKey → suggested fix; shown under that plant's row, so a
+ * fault arrives with its resolution plan rather than just its name.
  */
-function buildDigestEmail(
-  due: Tracked[],
-  recovered: SolarMonitorAlert[],
-  contacts: Map<string, { name?: string; phone?: string; email?: string }>,
-  now: { date: string; minutes: number },
-): { subject: string; text: string; html: string } {
-  // Group the due issues by plant, keeping the most-severe issue first.
-  const groups = new Map<string, Tracked[]>();
-  for (const t of due) {
-    const k = plantKey(t.alert);
-    (groups.get(k) ?? groups.set(k, []).get(k)!).push(t);
-  }
+function buildDigestEmail(p: {
+  due: Tracked[];
+  stillOpen?: Tracked[];
+  recovered: SolarMonitorAlert[];
+  contacts: Map<string, { name?: string; phone?: string; email?: string }>;
+  now: { date: string; minutes: number };
+  solutions?: Map<string, string>;
+  kind?: 'digest' | 'instant';
+}): { subject: string; text: string; html: string } {
+  const { due, recovered, contacts, now } = p;
+  const stillOpen = p.stillOpen ?? [];
+  const solutions = p.solutions ?? new Map<string, string>();
+  const instant = p.kind === 'instant';
+
+  const group = (list: Tracked[]): Map<string, Tracked[]> => {
+    const g = new Map<string, Tracked[]>();
+    for (const t of list) {
+      const k = plantKey(t.alert);
+      (g.get(k) ?? g.set(k, []).get(k)!).push(t);
+    }
+    return g;
+  };
+  const groups = group(due);
+  const openGroups = group(stillOpen);
   const plantCount = groups.size;
+  const openCount = openGroups.size;
   const hhmm = `${String(Math.floor(now.minutes / 60)).padStart(2, '0')}:${String(now.minutes % 60).padStart(2, '0')}`;
   const stamp = `${now.date} ${hhmm}`;
 
@@ -348,57 +368,89 @@ function buildDigestEmail(
     const hrs = mins / 60;
     return hrs < 48 ? `${Math.round(hrs)} hr` : `${Math.round(hrs / 24)} day`;
   };
+  const oldestOf = (items: Tracked[]): Tracked => items.reduce((a, c) => (c.firstSeen < a.firstSeen ? c : a), items[0]);
   const contactStr = (a: SolarMonitorAlert): string => {
     const c = contacts.get(plantKey(a));
     if (!c) return '';
     return [c.name, c.phone, c.email].filter(Boolean).join(' · ');
   };
+  const issueLine = (t: Tracked): string => `${t.alert.title}${t.alert.detail ? ` — ${t.alert.detail}` : ''}`;
 
-  const subject =
-    plantCount > 0
-      ? `[Solar Alert] ${plantCount} plant${plantCount === 1 ? '' : 's'} need attention`
-      : `[Solar Recovered] ${recovered.length} issue${recovered.length === 1 ? '' : 's'} cleared`;
+  const subject = instant
+    ? `[Solar Alert] ${plantCount} plant${plantCount === 1 ? '' : 's'} just went down or reported a fault`
+    : plantCount > 0
+      ? `[Solar Alert] ${plantCount} new plant issue${plantCount === 1 ? '' : 's'}${openCount ? ` · ${openCount} still open` : ''}`
+      : openCount > 0
+        ? `[Solar Digest] ${openCount} plant${openCount === 1 ? '' : 's'} still need attention`
+        : `[Solar Recovered] ${recovered.length} issue${recovered.length === 1 ? '' : 's'} cleared`;
 
   // ─── Plain text ───
   const textRows: string[] = [];
-  for (const [, items] of groups) {
+  for (const [k, items] of groups) {
     const worst = items[0].alert;
-    const oldest = items.reduce((p, c) => (c.firstSeen < p.firstSeen ? c : p), items[0]);
-    const issues = items.map((t) => t.alert.title).join('; ');
     const who = contactStr(worst);
-    textRows.push(
-      `  • ${worst.plant} (${providerName(worst.provider)}) — ${issues} [down ${ageLabel(oldest)}]${who ? `\n      Owner: ${who}` : ''}`,
-    );
+    textRows.push(`  • ${worst.plant} (${providerName(worst.provider)}) [down ${ageLabel(oldestOf(items))}]`);
+    for (const t of items) textRows.push(`      - ${issueLine(t)}`);
+    if (who) textRows.push(`      Owner: ${who}`);
+    const sol = solutions.get(k);
+    if (sol) textRows.push('      Suggested fix:', ...sol.split('\n').map((l) => `        ${l}`));
   }
+  const openRows = [...openGroups.values()].map((items) => {
+    const worst = items[0].alert;
+    return `  • ${worst.plant} (${providerName(worst.provider)}) — ${items.map((t) => t.alert.title).join('; ')} [open ${ageLabel(oldestOf(items))}]`;
+  });
   const recRows = recovered.map((a) => `  • ${a.plant} (${providerName(a.provider)}) — ${a.title}`);
   const text = [
-    `Solar monitoring digest — ${stamp}.`,
-    plantCount ? `\n${plantCount} plant(s) with open issues:` : '',
+    instant ? `Solar monitoring — instant alert, ${stamp}.` : `Solar monitoring digest — ${stamp}.`,
+    plantCount ? `\n${instant ? 'Just detected' : 'New since the last email'} — ${plantCount} plant(s):` : '',
     ...(plantCount ? textRows : []),
+    openCount ? `\nStill open (already reported) — ${openCount} plant(s):` : '',
+    ...(openCount ? openRows : []),
     recovered.length ? `\nRecovered since the last digest:` : '',
     ...(recovered.length ? recRows : []),
     '',
-    'This is an automated digest from the TSBA solar monitoring system.',
+    'This is an automated email from the TSBA solar monitoring system.',
   ]
     .filter((l) => l !== '')
     .join('\n');
 
   // ─── HTML ───
   const td = 'padding:7px 10px;border-bottom:1px solid #eef2f7;font-size:13px;vertical-align:top';
-  const rowsHtml = [...groups.values()]
-    .map((items) => {
+  const th = 'text-align:left;padding:6px 10px;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#94a3b8;border-bottom:2px solid #e2e8f0';
+  const rowsHtml = [...groups.entries()]
+    .map(([k, items]) => {
       const worst = items[0].alert;
-      const oldest = items.reduce((p, c) => (c.firstSeen < p.firstSeen ? c : p), items[0]);
-      const issues = items.map((t) => escapeHtml(t.alert.title)).join('<br>');
+      const issues = items
+        .map((t) => `<strong>${escapeHtml(t.alert.title)}</strong>${t.alert.detail ? `<br><span style="color:#64748b">${escapeHtml(t.alert.detail)}</span>` : ''}`)
+        .join('<br>');
       const who = contactStr(worst);
+      const sol = solutions.get(k);
       return `<tr>
       <td style="${td}"><strong>${escapeHtml(worst.plant)}</strong>${who ? `<br><span style="color:#64748b;font-size:12px">${escapeHtml(who)}</span>` : ''}</td>
       <td style="${td};color:#334155">${escapeHtml(providerName(worst.provider))}</td>
       <td style="${td};color:#b91c1c">${issues}</td>
-      <td style="${td};color:#64748b;white-space:nowrap">${escapeHtml(ageLabel(oldest))}</td>
-    </tr>`;
+      <td style="${td};color:#64748b;white-space:nowrap">${escapeHtml(ageLabel(oldestOf(items)))}</td>
+    </tr>${
+      sol
+        ? `<tr><td colspan="4" style="padding:0 10px 12px;border-bottom:1px solid #eef2f7">
+      <div style="white-space:pre-wrap;background:#f0f9f4;border:1px solid #cdebd9;border-radius:8px;padding:10px 12px;font-size:12.5px;line-height:1.5"><strong style="color:#15803d">Suggested fix</strong>\n${escapeHtml(sol)}</div>
+    </td></tr>`
+        : ''
+    }`;
     })
     .join('\n');
+
+  const openHtml = openCount
+    ? `<h3 style="margin:18px 0 6px;font-size:14px;color:#b45309">Still open — already reported (${openCount})</h3>
+    <ul style="margin:0 0 8px;padding-left:20px;font-size:13px">
+      ${[...openGroups.values()]
+        .map((items) => {
+          const w = items[0].alert;
+          return `<li style="margin-bottom:3px">${escapeHtml(w.plant)} <span style="color:#94a3b8">(${escapeHtml(providerName(w.provider))})</span> — ${escapeHtml(items.map((t) => t.alert.title).join('; '))} <span style="color:#94a3b8">· open ${escapeHtml(ageLabel(oldestOf(items)))}</span></li>`;
+        })
+        .join('\n      ')}
+    </ul>`
+    : '';
 
   const recHtml = recovered.length
     ? `<h3 style="margin:18px 0 6px;font-size:14px;color:#15803d">✓ Recovered since last digest</h3>
@@ -407,30 +459,82 @@ function buildDigestEmail(
     </ul>`
     : '';
 
+  const banner = instant
+    ? `⚠ Instant alert — ${plantCount} plant${plantCount === 1 ? '' : 's'} just went down or reported a fault`
+    : plantCount
+      ? `⚠ Solar monitoring digest — ${plantCount} new issue${plantCount === 1 ? '' : 's'}`
+      : `Solar monitoring digest — ${openCount} still open`;
+  const bannerBg = plantCount ? '#b91c1c' : openCount ? '#b45309' : '#15803d';
+
   const html = `<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:720px;color:#0f172a">
-  <div style="background:#b91c1c;color:#fff;padding:14px 18px;border-radius:8px 8px 0 0;font-size:16px;font-weight:600">
-    ⚠ Solar monitoring digest — ${escapeHtml(String(plantCount))} plant${plantCount === 1 ? '' : 's'} need attention
+  <div style="background:${bannerBg};color:#fff;padding:14px 18px;border-radius:8px 8px 0 0;font-size:16px;font-weight:600">
+    ${escapeHtml(banner)}
   </div>
   <div style="border:1px solid #e2e8f0;border-top:none;border-radius:0 0 8px 8px;padding:18px">
     ${
       plantCount
         ? `<table style="border-collapse:collapse;width:100%">
       <thead><tr>
-        <th style="text-align:left;padding:6px 10px;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#94a3b8;border-bottom:2px solid #e2e8f0">Plant / Owner</th>
-        <th style="text-align:left;padding:6px 10px;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#94a3b8;border-bottom:2px solid #e2e8f0">Platform</th>
-        <th style="text-align:left;padding:6px 10px;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#94a3b8;border-bottom:2px solid #e2e8f0">Issue</th>
-        <th style="text-align:left;padding:6px 10px;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#94a3b8;border-bottom:2px solid #e2e8f0">Down</th>
+        <th style="${th}">Plant / Owner</th>
+        <th style="${th}">Platform</th>
+        <th style="${th}">Issue</th>
+        <th style="${th}">Down</th>
       </tr></thead>
       <tbody>${rowsHtml}</tbody>
     </table>`
-        : '<p style="margin:0 0 8px;color:#15803d">No new open issues.</p>'
+        : '<p style="margin:0 0 8px;color:#15803d">No new issues since the last email.</p>'
     }
+    ${openHtml}
     ${recHtml}
-    <p style="margin:14px 0 0;color:#94a3b8;font-size:12px">Digest generated ${escapeHtml(stamp)} · Automated summary from the TSBA solar monitoring system.</p>
+    <p style="margin:14px 0 0;color:#94a3b8;font-size:12px">Generated ${escapeHtml(stamp)} · Automated email from the TSBA solar monitoring system.</p>
   </div>
 </div>`;
 
   return { subject, text, html };
+}
+
+/**
+ * Suggested fixes for a set of plant issues, keyed by plantKey. Only plants with
+ * a FAULT get one (an offline plant's fix is the same generic connectivity
+ * checklist, which would just repeat down a multi-plant email). Bounded: at most
+ * `limit` plants, 3 at a time; solutions are cached per fault + equipment, so a
+ * fault shared by many plants costs one generation. Best-effort — never throws.
+ */
+async function solutionsFor(due: Tracked[], settings: SolarAlertSettings, limit = 20): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!settings.includeSolution) return out;
+  const byPlant = groupByPlant(due.map((t) => t.alert));
+  const jobs = [...byPlant.entries()].filter(([, issues]) => issues.some((i) => i.severity === 'alert')).slice(0, limit);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(3, jobs.length) }, async () => {
+      while (next < jobs.length) {
+        const [k, issues] = jobs[next++];
+        const faults = issues.filter((i) => i.severity === 'alert');
+        const sol = await resolveSolution(faults, settings).catch(() => null);
+        if (sol) out.set(k, sol);
+      }
+    }),
+  );
+  return out;
+}
+
+/** Owner/contact (local store) for each plant in the given alerts. Best-effort. */
+async function contactsFor(alerts: SolarMonitorAlert[]): Promise<Map<string, { name?: string; phone?: string; email?: string }>> {
+  const contacts = new Map<string, { name?: string; phone?: string; email?: string }>();
+  try {
+    const { getPlantContact } = await import('./plant-contacts.js');
+    const unique = [...new Map(alerts.map((a) => [plantKey(a), a])).values()];
+    await Promise.all(
+      unique.map(async (a) => {
+        const c = await getPlantContact(a.provider, a.plantId);
+        if (c) contacts.set(plantKey(a), { name: c.name, phone: c.phone, email: c.email });
+      }),
+    );
+  } catch {
+    /* contact store unavailable — the email still lists plants without owners */
+  }
+  return contacts;
 }
 
 /** Group alerts by plant (provider:plantId), preserving severity order. */
@@ -455,6 +559,99 @@ export interface MonitorRunResult {
   emailsSent: number;
   recipients: string[];
   reason?: string;
+}
+
+// More plants than this tripping on ONE scan (e.g. a provider or regional grid
+// outage) are sent as one combined instant email rather than one email each.
+const INSTANT_BURST_PLANTS = 5;
+// An issue that clears and comes back within this window is treated as the SAME
+// ongoing issue (no new alert, no recovery note) — stops a flapping logger or a
+// borderline fault from emailing on every scan.
+const FLAP_WINDOW_MS = 60 * 60_000;
+
+/**
+ * Email each plant's due issues as its own alert (full detail, owner info,
+ * suggested fix, optional guide attachment) and mark them notified. Plants in
+ * their own night are held. Stops early on an SMTP failure (retried next scan).
+ */
+async function sendPlantAlerts(
+  due: Tracked[],
+  settings: SolarAlertSettings,
+  to: string,
+  plantNight: (a: SolarMonitorAlert) => boolean,
+): Promise<{ sent: number; deferred: number }> {
+  let sent = 0;
+  let deferred = 0;
+  for (const [, issues] of groupByPlant(due.map((t) => t.alert))) {
+    const plant = issues[0];
+    if (plantNight(plant)) {
+      deferred++;
+      continue; // night at this plant — hold until its sunrise
+    }
+    const info = await plantInfo(plant);
+    // Generate a KB-grounded solution + attach a matching guide (both best-effort).
+    const [solution, attachment] = await Promise.all([
+      resolveSolution(issues, settings),
+      resolveAttachment(issues, settings),
+    ]);
+    const { subject, text, html } = buildAlertEmail(plant, issues, info, solution);
+    try {
+      await sendMail({ to, subject, text, html, attachments: attachment ? [attachment] : undefined });
+      sent++;
+      for (const i of issues) {
+        const t = active.get(i.id);
+        if (t) t.adminNotified = true;
+      }
+    } catch (err) {
+      if (err instanceof MailSendError) {
+        console.warn('[solar-alert] SMTP send failed — alert emails held:', err.message);
+        break;
+      }
+      console.error(`[solar-alert] failed to email alert for ${plant.plant}:`, (err as Error).message);
+    }
+  }
+  return { sent, deferred };
+}
+
+/**
+ * Instant delivery (digest mode + `schedule.instant`): everything that tripped
+ * and isn't yet reported goes out NOW. A handful of plants → one email each; a
+ * burst → one combined email (with fixes) so an outage doesn't flood the inbox.
+ */
+async function sendInstantAlerts(
+  settings: SolarAlertSettings,
+  to: string,
+  plantNight: (a: SolarMonitorAlert) => boolean,
+): Promise<{ sent: number; deferred: number }> {
+  const pending = [...active.values()].filter((t) => !t.adminNotified && ageMin(t) >= settings.admin.delayMin);
+  const deferred = new Set(pending.filter((t) => plantNight(t.alert)).map((t) => plantKey(t.alert))).size;
+  const due = pending.filter((t) => !plantNight(t.alert));
+  if (!due.length) return { sent: 0, deferred };
+
+  const plants = new Set(due.map((t) => plantKey(t.alert))).size;
+  if (plants <= INSTANT_BURST_PLANTS) {
+    const r = await sendPlantAlerts(due, settings, to, plantNight);
+    return { sent: r.sent, deferred: deferred + r.deferred };
+  }
+
+  const [contacts, solutions] = await Promise.all([contactsFor(due.map((t) => t.alert)), solutionsFor(due, settings)]);
+  const { subject, text, html } = buildDigestEmail({
+    due,
+    recovered: [],
+    contacts,
+    now: localNow(settings.schedule.timezone),
+    solutions,
+    kind: 'instant',
+  });
+  try {
+    await sendMail({ to, subject, text, html });
+  } catch (err) {
+    if (err instanceof MailSendError) console.warn('[solar-alert] SMTP send failed — instant alert held:', err.message);
+    else console.error('[solar-alert] failed to send instant alert:', (err as Error).message);
+    return { sent: 0, deferred };
+  }
+  for (const t of due) t.adminNotified = true;
+  return { sent: 1, deferred };
 }
 
 /**
@@ -485,10 +682,16 @@ export async function runAlertMonitorOnce(): Promise<MonitorRunResult> {
    */
   const plantNight = (a: SolarMonitorAlert): boolean => {
     if (!settings.quietNight) return false;
+    // Quiet hours exist because plants and loggers go dark after sunset, which
+    // would read as "offline". A fault code (inverter/battery/BMS error) is a
+    // real problem at any hour, so it is never held for the morning.
+    if (a.severity === 'alert') return false;
     return isNight(a.lat ?? settings.lat, a.lng ?? settings.lng);
   };
 
-  const { alerts, scannedPlants, coverage } = await getSolarAlerts();
+  // Fresh scan: an outage must be acted on in the scan it happens, not served
+  // from the previous (stale-while-revalidate) result one interval later.
+  const { alerts, scannedPlants, coverage } = await getSolarAlerts({ fresh: true });
   base.scanned = scannedPlants;
   const seen = new Set(alerts.map((a) => a.id));
   // An issue may only clear if its plant was actually checked this scan:
@@ -505,16 +708,31 @@ export async function runAlertMonitorOnce(): Promise<MonitorRunResult> {
     return detailed.has(k) || alerts.some((x) => x.severity === 'offline' && plantKey(x) === k);
   };
 
+  // Forget flap-guard entries past their window.
+  const nowMs = Date.now();
+  for (const [id, c] of recentlyCleared) if (nowMs - c.clearedAt > FLAP_WINDOW_MS) recentlyCleared.delete(id);
+
   // Insert/refresh currently-open issues.
   let newIssues = 0;
   for (const a of alerts) {
     const t = active.get(a.id);
-    if (t) t.alert = a;
-    else {
-      const prev = restoredOpen.get(a.id); // still open from before a restart
-      active.set(a.id, { alert: a, firstSeen: prev?.firstSeen ?? Date.now(), adminNotified: prev?.adminNotified ?? false, customerNotified: false });
-      if (!prev) newIssues++;
+    if (t) {
+      t.alert = a;
+      continue;
     }
+    const prev = restoredOpen.get(a.id); // still open from before a restart
+    const flap = recentlyCleared.get(a.id); // cleared moments ago — same ongoing issue
+    if (flap) {
+      recentlyCleared.delete(a.id);
+      recoveredPending.delete(a.id); // it came straight back: no "recovered" note
+    }
+    active.set(a.id, {
+      alert: a,
+      firstSeen: prev?.firstSeen ?? flap?.firstSeen ?? Date.now(),
+      adminNotified: prev?.adminNotified ?? flap?.adminNotified ?? false,
+      customerNotified: false,
+    });
+    if (!prev && !flap) newIssues++;
   }
   restoredOpen.clear(); // only the first scan after boot reconciles
 
@@ -524,6 +742,7 @@ export async function runAlertMonitorOnce(): Promise<MonitorRunResult> {
     if (!seen.has(id) && checked(t.alert)) {
       active.delete(id);
       cleared++;
+      recentlyCleared.set(id, { firstSeen: t.firstSeen, adminNotified: t.adminNotified, clearedAt: nowMs });
       if (t.adminNotified && settings.recovery) recoveredPending.set(id, t.alert);
     }
   }
@@ -548,41 +767,15 @@ export async function runAlertMonitorOnce(): Promise<MonitorRunResult> {
     }
   }
 
-  // Admin alert emails: open issues past the debounce that haven't been sent,
-  // grouped by plant. Each plant's quiet hours are judged at ITS OWN location —
-  // a plant in night is held and retried once it's daytime there.
-  // (Legacy one-email-per-plant flow — used only when scheduled digests are OFF.)
+  const to = recipients.join(', ');
+
+  // Per-plant flow (scheduled digests OFF): every due issue is emailed as soon as
+  // it passes the debounce, one email per plant, with recovery notes the same way.
   if (recipients.length && !settings.schedule.enabled) {
-    const to = recipients.join(', ');
     const due = [...active.values()].filter((t) => !t.adminNotified && ageMin(t) >= settings.admin.delayMin);
-    for (const [, issues] of groupByPlant(due.map((t) => t.alert))) {
-      const plant = issues[0];
-      if (plantNight(plant)) {
-        deferredPlants++;
-        continue; // night at this plant — hold until its sunrise
-      }
-      const info = await plantInfo(plant);
-      // Generate a KB-grounded solution + attach a matching guide (both best-effort).
-      const [solution, attachment] = await Promise.all([
-        resolveSolution(issues, settings),
-        resolveAttachment(issues, settings),
-      ]);
-      const { subject, text, html } = buildAlertEmail(plant, issues, info, solution);
-      try {
-        await sendMail({ to, subject, text, html, attachments: attachment ? [attachment] : undefined });
-        emailsSent++;
-        for (const i of issues) {
-          const t = active.get(i.id);
-          if (t) t.adminNotified = true;
-        }
-      } catch (err) {
-        if (err instanceof MailSendError) {
-          console.warn('[solar-alert] SMTP send failed — alert emails held:', err.message);
-          break;
-        }
-        console.error(`[solar-alert] failed to email alert for ${plant.plant}:`, (err as Error).message);
-      }
-    }
+    const r = await sendPlantAlerts(due, settings, to, plantNight);
+    emailsSent += r.sent;
+    deferredPlants += r.deferred;
 
     // Recovery emails for cleared, previously-notified issues (same per-plant
     // quiet hours — a recovery that clears overnight is sent in the morning).
@@ -609,9 +802,16 @@ export async function runAlertMonitorOnce(): Promise<MonitorRunResult> {
     }
   }
 
-  // Scheduled-digest flow: hold everything and emit ONE combined email at the
-  // configured clock times (capped per day). This is what prevents the inbox
-  // filling with a separate email per plant.
+  // Digest mode with instant alerts: outages/faults go out NOW; the digest below
+  // then carries the roll-up of what's still open plus recoveries.
+  if (recipients.length && settings.schedule.enabled && settings.schedule.instant) {
+    const r = await sendInstantAlerts(settings, to, plantNight);
+    emailsSent += r.sent;
+    deferredPlants += r.deferred;
+  }
+
+  // Scheduled-digest flow: ONE combined email at the configured clock times
+  // (capped per day) — new issues not yet emailed, still-open ones, recoveries.
   if (recipients.length && settings.schedule.enabled) {
     const digest = await runScheduledDigest(settings, recipients, plantNight);
     emailsSent += digest.sent;
@@ -661,34 +861,25 @@ async function runScheduledDigest(
     return { sent: 0, reason: `daily digest cap reached (${maxPerDay}/day)` };
   }
 
-  // Everything owed to admins: open issues past the debounce, not already sent,
-  // and not in their own night; plus any pending recoveries.
+  // New: open issues past the debounce, not yet emailed, not in their own night.
+  // Still open: already emailed (instantly or in an earlier digest), still active.
+  // Plus any pending recoveries.
   const due = [...active.values()].filter(
     (t) => !t.adminNotified && ageMin(t) >= settings.admin.delayMin && !plantNight(t.alert),
   );
+  const dueKeys = new Set(due.map((t) => plantKey(t.alert)));
+  const stillOpen = [...active.values()].filter((t) => t.adminNotified && !dueKeys.has(plantKey(t.alert)));
   const recovered = settings.recovery ? [...recoveredPending.values()] : [];
-  if (!due.length && !recovered.length) {
+  if (!due.length && !stillOpen.length && !recovered.length) {
     return { sent: 0, reason: 'scheduled digest due — nothing open to report' };
   }
 
-  // Best-effort owner/contact lookup (local store) for each affected plant.
-  const contacts = new Map<string, { name?: string; phone?: string; email?: string }>();
-  try {
-    const { getPlantContact } = await import('./plant-contacts.js');
-    const keys = new Set([...due.map((t) => t.alert), ...recovered].map(plantKey));
-    await Promise.all(
-      [...due.map((t) => t.alert), ...recovered].map(async (a) => {
-        const k = plantKey(a);
-        if (contacts.has(k) || !keys.has(k)) return;
-        const c = await getPlantContact(a.provider, a.plantId);
-        if (c) contacts.set(k, { name: c.name, phone: c.phone, email: c.email });
-      }),
-    );
-  } catch {
-    /* contact store unavailable — the digest still lists plants without owners */
-  }
+  const [contacts, solutions] = await Promise.all([
+    contactsFor([...due.map((t) => t.alert), ...stillOpen.map((t) => t.alert), ...recovered]),
+    solutionsFor(due, settings),
+  ]);
 
-  const { subject, text, html } = buildDigestEmail(due, recovered, contacts, now);
+  const { subject, text, html } = buildDigestEmail({ due, stillOpen, recovered, contacts, now, solutions });
   try {
     await sendMail({ to: recipients.join(', '), subject, text, html });
   } catch (err) {
@@ -703,7 +894,7 @@ async function runScheduledDigest(
   for (const t of due) t.adminNotified = true;
   for (const a of recovered) recoveredPending.delete(a.id);
   digestSends++;
-  return { sent: 1, reason: `digest sent — ${due.length} plant-issue(s), ${recovered.length} recovered` };
+  return { sent: 1, reason: `digest sent — ${due.length} new, ${stillOpen.length} still open, ${recovered.length} recovered` };
 }
 
 /**
@@ -824,25 +1015,28 @@ export async function sendSampleDigest(): Promise<{
   }
 
   const due: Tracked[] = pool.map((a) => ({ alert: a, firstSeen: Date.now() - 3 * 3_600_000, adminNotified: false, customerNotified: false }));
-  const contacts = new Map<string, { name?: string; phone?: string; email?: string }>();
-  if (!synthetic) {
-    try {
-      const { getPlantContact } = await import('./plant-contacts.js');
-      await Promise.all(
-        [...new Map(due.map((t) => [plantKey(t.alert), t.alert])).values()].map(async (a) => {
-          const c = await getPlantContact(a.provider, a.plantId);
-          if (c) contacts.set(plantKey(a), { name: c.name, phone: c.phone, email: c.email });
-        }),
-      );
-    } catch {
-      /* best-effort */
-    }
-  }
+  // Real issues get real owner details and suggested fixes (a few, to keep the
+  // preview quick); synthetic rows have neither.
+  const [contacts, solutions] = synthetic
+    ? [new Map<string, { name?: string; phone?: string; email?: string }>(), new Map<string, string>()]
+    : await Promise.all([contactsFor(pool), solutionsFor(due, settings, 5)]);
 
   const now = localNow(settings.schedule.timezone);
-  const { subject, text, html } = buildDigestEmail(due, [], contacts, now);
+  const { subject, text, html } = buildDigestEmail({ due, recovered: [], contacts, now, solutions });
   await sendMail({ to: recipients.join(', '), subject: `[TEST] ${subject}`, text, html });
   return { sent: true, plants: new Set(due.map((t) => plantKey(t.alert))).size, synthetic, recipients };
+}
+
+/**
+ * When the monitor first saw each currently-open issue (ms), by alert id — so
+ * the UI can say "open 3 h" even for issues the platform gives no start time
+ * for (a plant going offline). Includes state restored after a restart.
+ */
+export function openSince(): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const [id, r] of restoredOpen) m.set(id, r.firstSeen);
+  for (const [id, t] of active) m.set(id, t.firstSeen);
+  return m;
 }
 
 /**

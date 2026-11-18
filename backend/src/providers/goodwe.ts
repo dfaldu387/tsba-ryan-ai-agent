@@ -63,6 +63,7 @@ let loginCache: LoginData | null = null;
 async function login(): Promise<LoginData> {
   if (!goodweConfigured()) throw new ProviderNotConfiguredError('goodwe');
   const res = await fetch(`${baseUrl()}/api/v2/Common/CrossLogin`, {
+    signal: AbortSignal.timeout(60_000), // a hung connection fails instead of stalling
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -99,6 +100,7 @@ async function semsPost<T>(path: string, body: Record<string, unknown>): Promise
 
   const run = async (auth: LoginData): Promise<SemsEnvelope<T>> => {
     const res = await fetch(`${baseUrl()}/api/${path}`, {
+      signal: AbortSignal.timeout(60_000), // a hung connection fails instead of stalling
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Token: JSON.stringify(auth) },
       body: JSON.stringify(body),

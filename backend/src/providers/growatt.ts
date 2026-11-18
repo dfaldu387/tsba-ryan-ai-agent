@@ -30,7 +30,7 @@ async function get<T>(path: string, params: Record<string, string | number> = {}
   if (!growattConfigured()) throw new ProviderNotConfiguredError('growatt');
   const qs = new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)])).toString();
   const url = `${env.growattBaseUrl}${path}${qs ? `?${qs}` : ''}`;
-  const res = await fetch(url, { method: 'GET', headers: { token: env.growattToken } }).catch((err) => {
+  const res = await fetch(url, { signal: AbortSignal.timeout(30_000), method: 'GET', headers: { token: env.growattToken } }).catch((err) => {
     throw new ProviderError(`growatt_network_error: ${(err as Error).message}`);
   });
   const data = (await res.json().catch(() => ({}))) as Envelope<T>;

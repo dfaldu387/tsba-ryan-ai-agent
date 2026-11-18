@@ -18,7 +18,27 @@ async function main(): Promise<void> {
   // trustProxy: loopback only — nginx sits in front in production, so req.ip is
   // the real client (needed for login rate limiting) without trusting spoofed
   // X-Forwarded-For from direct connections.
-  const app = Fastify({ logger: { level: env.isProd ? 'info' : 'warn' }, bodyLimit: 2_000_000, trustProxy: '127.0.0.1' });
+  // Request logs never carry secrets: the query string is dropped from logged
+  // URLs (it can hold the usage key, an OAuth code/state, search text) and the
+  // auth/cookie/Twilio-signature headers are redacted if a log ever includes them.
+  const app = Fastify({
+    logger: {
+      level: env.isProd ? 'info' : 'warn',
+      redact: {
+        paths: ['req.headers.authorization', 'req.headers.cookie', 'req.headers["x-twilio-signature"]', 'res.headers["set-cookie"]'],
+        censor: '[redacted]',
+      },
+      serializers: {
+        req: (req: { method: string; url: string; ip?: string }) => ({
+          method: req.method,
+          url: (req.url ?? '').split('?')[0],
+          remoteAddress: req.ip,
+        }),
+      },
+    },
+    bodyLimit: 2_000_000,
+    trustProxy: '127.0.0.1',
+  });
 
   // Unhandled errors: Fastify's default reply includes err.message, which for a
   // 500 can be SQL, a hostname or a stack detail. Log it in full; send clients a
@@ -33,10 +53,44 @@ async function main(): Promise<void> {
     return reply.code(status).send({ error: err.code ?? 'bad_request', message: err.message });
   });
 
-  // Baseline security headers on every response (no CSP here: the SPA loads map
-  // tiles/fonts from several origins; a CSP needs its own tested allow-list).
-  app.addHook('onSend', async (_req, reply, payload) => {
+  // Content-Security-Policy for the SPA: scripts only from our own origin (no
+  // inline or injected <script>, no eval), so even an HTML-injection bug can't
+  // run attacker code. Third parties are limited to exactly what the app uses:
+  // Google Fonts, the Esri/OSM map tiles and the globe texture on unpkg.
+  // Inline styles stay allowed — React style={} and Leaflet set them, and CSS
+  // can't run code. (Routes with their own page, e.g. /usage, set their own.)
+  const SPA_CSP = [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' data: https://fonts.gstatic.com",
+    "img-src 'self' data: blob: https://server.arcgisonline.com https://tile.openstreetmap.org https://unpkg.com",
+    "connect-src 'self' https://unpkg.com",
+    "media-src 'self' blob: data:",
+    "worker-src 'self' blob:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+    ...(env.isProd ? ['upgrade-insecure-requests'] : []),
+  ].join('; ');
+
+  // Baseline security headers on every response.
+  app.addHook('onSend', async (req, reply, payload) => {
     reply.header('X-Content-Type-Options', 'nosniff');
+    if (!reply.hasHeader('Content-Security-Policy')) {
+      const type = String(reply.getHeader('Content-Type') ?? '');
+      // JSON/API responses must never render as a page at all.
+      reply.header('Content-Security-Policy', type.includes('text/html') ? SPA_CSP : "default-src 'none'; frame-ancestors 'none'");
+    }
+    // HTTPS only from here on: browsers refuse a downgrade to plain HTTP.
+    if (env.isProd) reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    // API responses carry customer/fleet data and tokens: never store them in
+    // the browser cache or any proxy in between.
+    if (req.url.startsWith('/api/')) {
+      reply.header('Cache-Control', 'no-store');
+      reply.header('Pragma', 'no-cache');
+    }
     reply.header('X-Frame-Options', 'DENY');
     reply.header('Referrer-Policy', 'strict-origin-when-cross-origin');
     reply.header('Permissions-Policy', 'camera=(), geolocation=(), microphone=(self)');

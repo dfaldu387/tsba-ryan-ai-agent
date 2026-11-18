@@ -56,9 +56,41 @@ export function verifyToken(token: string | undefined): TokenPayload | null {
   }
 }
 
+/**
+ * The browser session lives in an HttpOnly cookie: page JavaScript (and so any
+ * injected script) can never read it, unlike a token in localStorage.
+ * SameSite=Strict keeps other sites from sending it (CSRF), Secure keeps it off
+ * plain HTTP in production, and Path=/api means it only travels with API calls.
+ */
+export const SESSION_COOKIE = 'tsba_session';
+
+function cookieAttrs(maxAgeSec: number): string {
+  return `Path=/api; HttpOnly; SameSite=Strict; Max-Age=${maxAgeSec}${env.isProd ? '; Secure' : ''}`;
+}
+
+/** Start (or refresh) this browser's session cookie for `user`. */
+export function setSessionCookie(reply: FastifyReply, user: { id: string; password_hash: string }): void {
+  reply.header('Set-Cookie', `${SESSION_COOKIE}=${issueToken(user)}; ${cookieAttrs(Math.floor(TOKEN_TTL_MS / 1000))}`);
+}
+
+/** End this browser's session. */
+export function clearSessionCookie(reply: FastifyReply): void {
+  reply.header('Set-Cookie', `${SESSION_COOKIE}=; ${cookieAttrs(0)}`);
+}
+
+function sessionCookie(req: FastifyRequest): string | undefined {
+  for (const part of (req.headers.cookie ?? '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0 && part.slice(0, i).trim() === SESSION_COOKIE) return part.slice(i + 1).trim() || undefined;
+  }
+  return undefined;
+}
+
+/** Session token: the HttpOnly cookie (browsers), or a Bearer header (scripts/API clients). */
 function bearer(req: FastifyRequest): string | undefined {
   const header = req.headers.authorization ?? '';
-  return header.startsWith('Bearer ') ? header.slice(7) : undefined;
+  if (header.startsWith('Bearer ')) return header.slice(7);
+  return sessionCookie(req);
 }
 
 /** Resolve the current user from the token, re-reading the live row each time

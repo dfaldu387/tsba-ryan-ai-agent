@@ -12,13 +12,14 @@ import {
   type SourceCard,
 } from '@tsba/shared';
 import { cacheLookup, cacheStore, isStandaloneQuestion } from '../answer-cache.js';
-import { issueToken, requireAuth, requirePermission } from '../auth.js';
+import { clearSessionCookie, issueToken, requireAuth, requirePermission, setSessionCookie } from '../auth.js';
 import { clearLoginFailures, loginBlockedFor, noteLoginFailure } from '../login-throttle.js';
 import { appWebUrl, env, googleOAuthConfigured } from '../env.js';
 import {
   PROVIDERS,
   ProviderError,
   ProviderNotConfiguredError,
+  OverviewUnsupportedError,
   aggregateStationsCached,
   configuredProviders,
   fleetUpdatedAt,
@@ -103,7 +104,8 @@ import {
   toAuthenticatedUser,
   toPublicUser,
 } from '../users.js';
-import { hashPassword } from '../password.js';
+import { hashPassword, verifyPassword } from '../password.js';
+import { toAuthenticatedUser as currentUserFromStored } from '../users.js';
 import {
   buildAuthUrl,
   consumeState,
@@ -134,12 +136,8 @@ import { scanLabel } from '../gmail-ingest.js';
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // ── Public ────────────────────────────────────────────────────────────────
-  app.get('/api/health', async () => ({
-    ok: true,
-    anthropic: anthropicConfigured(),
-    embeddingProvider: env.embeddingProvider,
-    storage: env.storage,
-  }));
+  // Public liveness probe: says nothing about how the server is configured.
+  app.get('/api/health', async () => ({ ok: true }));
 
   // Email + password login. Returns a signed token and the authenticated user
   // (with the permissions their role grants).
@@ -161,11 +159,60 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(401).send({ error: 'invalid_credentials' });
     }
     clearLoginFailures(req.ip, email);
-    return { token: issueToken(user), user: toAuthenticatedUser(user) };
+    // The session goes into an HttpOnly cookie — never into the response body,
+    // so no page script can read it. Non-browser clients opt in with ?token=1.
+    setSessionCookie(reply, user);
+    const q = req.query as { token?: string } | undefined;
+    return q?.token === '1' ? { token: issueToken(user), user: toAuthenticatedUser(user) } : { user: toAuthenticatedUser(user) };
+  });
+
+  // Sign out: drop this browser's session cookie.
+  app.post('/api/logout', async (_req, reply) => {
+    clearSessionCookie(reply);
+    return { ok: true };
+  });
+
+  // One-time upgrade for browsers still holding a pre-cookie token in
+  // localStorage: it arrives as a Bearer header and is swapped for the cookie.
+  app.post('/api/session', { preHandler: requireAuth }, async (req, reply) => {
+    const storage = await getStorage();
+    const user = await storage.users.getById(req.authUser!.id);
+    if (!user) return reply.code(401).send({ error: 'unauthorized' });
+    setSessionCookie(reply, user);
+    return { user: currentUserFromStored(user) };
   });
 
   // Who am I — used by the SPA to restore the session and gate the UI.
   app.get('/api/me', { preHandler: requireAuth }, async (req) => req.authUser);
+
+  // Self-service profile: any signed-in user may change their own display name.
+  app.patch<{ Body: { name?: unknown } }>('/api/me', { preHandler: requireAuth }, async (req, reply) => {
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim() : null;
+    if (name === null || name.length > 120) return reply.code(400).send({ error: 'invalid_name', message: 'Enter a name up to 120 characters.' });
+    const storage = await getStorage();
+    const updated = await storage.users.update(req.authUser!.id, { name });
+    if (!updated) return reply.code(404).send({ error: 'not_found' });
+    return currentUserFromStored(updated);
+  });
+
+  // Self-service password change. Needs the current password; changing it
+  // revokes every older session token, so a fresh one is returned for this browser.
+  app.post<{ Body: { current?: unknown; next?: unknown } }>('/api/me/password', { preHandler: requireAuth }, async (req, reply) => {
+    const current = typeof req.body?.current === 'string' ? req.body.current : '';
+    const next = typeof req.body?.next === 'string' ? req.body.next : '';
+    if (next.length < 8) return reply.code(400).send({ error: 'weak_password', message: 'The new password must be at least 8 characters.' });
+    if (next === current) return reply.code(400).send({ error: 'same_password', message: 'Choose a password different from the current one.' });
+    const storage = await getStorage();
+    const user = await storage.users.getById(req.authUser!.id);
+    if (!user) return reply.code(404).send({ error: 'not_found' });
+    if (!(await verifyPassword(current, user.password_hash))) {
+      return reply.code(400).send({ error: 'wrong_password', message: 'Your current password is incorrect.' });
+    }
+    const updated = await storage.users.update(user.id, { password_hash: await hashPassword(next) });
+    if (!updated) return reply.code(404).send({ error: 'not_found' });
+    setSessionCookie(reply, updated);
+    return { user: currentUserFromStored(updated) };
+  });
 
   // ── Protected ───────────────────────────────────────────────────────────────
   app.post<{ Body: { question?: string; audience?: string; channel?: string; recipient?: string } }>(
@@ -1083,6 +1130,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(502).send({ error: 'provider_request_failed', code, message: publicMessage(err, 'The monitoring platform didn’t respond. Try again in a minute.') });
   };
 
+  // How long a plant page waits for live detail before answering from the saved
+  // copy (the live fetch keeps running and refreshes the cache + saved copy).
+  const LIVE_DETAIL_WAIT_MS = 6_000;
+  // With no saved copy to fall back on, give up on live after this long (the
+  // fetch continues in the background and saves a copy for the next open).
+  const LIVE_DETAIL_MAX_MS = 30_000;
+
   // The list of providers and whether each is connected (no secrets returned).
   app.get('/api/solar/providers', { preHandler: requirePermission('view') }, async () => ({
     providers: PROVIDERS.map((p) => ({ id: p.id, name: p.name, configured: p.configured() })),
@@ -1109,13 +1163,70 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // even when several admins poll it.
   app.get('/api/solar/alerts', { preHandler: requirePermission('view') }, async (req, reply) => {
     try {
-      return await getSolarAlerts();
+      const result = await getSolarAlerts();
+      // Stamp each issue with when the monitor first saw it ("open 3 h"), which
+      // covers plants going offline — platforms give no start time for those.
+      const { openSince } = await import('../solar-alert-monitor.js');
+      const since = openSince();
+      return { ...result, alerts: result.alerts.map((a) => (since.has(a.id) ? { ...a, since: since.get(a.id) } : a)) };
     } catch (err) {
       req.log.error({ err }, 'solar alerts scan failed');
       console.error('[solar/alerts] scan failed:', (err as Error).stack || err);
       return reply.code(500).send({ error: 'solar_alerts_failed', detail: publicMessage(err, 'The alert scan failed. Try again in a minute.') });
     }
   });
+
+  // Shared alert triage (acknowledge / snooze / assign), so the whole team sees
+  // the same state instead of each browser keeping its own.
+  app.get('/api/solar/triage', { preHandler: requirePermission('view') }, async () => {
+    const { getTriage } = await import('../alert-triage.js');
+    return { triage: await getTriage() };
+  });
+
+  app.post<{ Body: { keys?: unknown; patch?: unknown } }>(
+    '/api/solar/triage',
+    { preHandler: requirePermission('view') },
+    async (req, reply) => {
+      const keys = Array.isArray(req.body?.keys) ? req.body.keys.filter((k): k is string => typeof k === 'string' && k.length > 0 && k.length < 400) : [];
+      if (!keys.length || keys.length > 500) return reply.code(400).send({ error: 'keys_required' });
+      const raw = req.body?.patch;
+      let patch: import('../alert-triage.js').TriagePatch | null = null;
+      if (raw !== null) {
+        if (!raw || typeof raw !== 'object') return reply.code(400).send({ error: 'patch_required' });
+        const p = raw as Record<string, unknown>;
+        patch = {};
+        const num = (v: unknown) => (v == null ? undefined : Number.isFinite(Number(v)) ? Number(v) : undefined);
+        if ('ack' in p) patch.ack = num(p.ack);
+        if ('snoozeUntil' in p) patch.snoozeUntil = num(p.snoozeUntil);
+        if ('assignee' in p) patch.assignee = typeof p.assignee === 'string' ? p.assignee.slice(0, 200) : undefined;
+      }
+      const { patchTriage } = await import('../alert-triage.js');
+      const who = req.authUser?.name || req.authUser?.email || 'someone';
+      return { triage: await patchTriage(keys, patch, who) };
+    },
+  );
+
+  // Suggested fix for one group of open issues on a plant (by alert ids), for
+  // the notification panel's "Suggested fix" button. Provider-supplied steps
+  // win; else a KB-grounded AI answer, cached per fault + equipment.
+  app.post<{ Body: { ids?: unknown } }>(
+    '/api/solar/alerts/solution',
+    { preHandler: requirePermission('view') },
+    async (req, reply) => {
+      const ids = new Set(Array.isArray(req.body?.ids) ? req.body.ids.filter((x): x is string => typeof x === 'string') : []);
+      if (!ids.size) return reply.code(400).send({ error: 'ids_required' });
+      const { alerts } = await getSolarAlerts();
+      const issues = alerts.filter((a) => ids.has(a.id));
+      if (!issues.length) return reply.code(404).send({ error: 'not_open', message: 'This issue is no longer open.' });
+      const [{ resolveSolution }, { getAlertSettings }] = await Promise.all([
+        import('../solar-alert-resolution.js'),
+        import('../solar-alert-settings.js'),
+      ]);
+      const settings = await getAlertSettings();
+      const solution = await resolveSolution(issues, { ...settings, includeSolution: true });
+      return { solution, source: issues.some((i) => i.solution) ? 'provider' : solution ? 'ai' : null };
+    },
+  );
 
   // One station's detail bundle (realtime, devices, alerts, today's power curve)
   // from a specific provider.
@@ -1128,14 +1239,46 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       if (!provider.configured()) return reply.code(503).send({ error: 'provider_not_configured' });
       try {
         let detail;
-        try {
+        const live = (async () => {
           try {
-            detail = await provider.stationDetail(req.params.id);
+            return await provider.stationDetail(req.params.id);
           } catch {
             // One retry — covers a transient upstream blip or a just-expired token.
             await new Promise((r) => setTimeout(r, 400));
-            detail = await provider.stationDetail(req.params.id);
+            return await provider.stationDetail(req.params.id);
           }
+        })();
+        // Keep the saved copy current whenever the live fetch lands — even when
+        // it lands after we've already answered from the saved copy below.
+        if (env.storage === 'postgres') {
+          void live
+            .then((fresh) => import('../plant-history-repo.js').then(({ saveDetails }) => saveDetails([{ provider: provider.id, stationId: req.params.id, detail: fresh }])))
+            .catch(() => {});
+        }
+        try {
+          // Don't hold the page hostage to a slow / rate-limited platform: after a
+          // few seconds, answer from the saved copy (if one exists) and let the
+          // live fetch finish in the background to warm the cache.
+          detail = env.storage === 'postgres'
+            ? await Promise.race([
+                live,
+                new Promise<never>((_, rej) => setTimeout(() => rej(new Error('detail_slow')), LIVE_DETAIL_WAIT_MS)),
+              ]).catch(async (err) => {
+                if ((err as Error).message !== 'detail_slow') throw err;
+                const { storedDetail } = await import('../plant-history-repo.js');
+                const saved = await storedDetail(provider.id, req.params.id).catch(() => null);
+                if (saved) return null;
+                // No saved copy → keep waiting for live, but not forever: a
+                // rate-limited platform can hold its queue for minutes.
+                return Promise.race([
+                  live,
+                  new Promise<never>((_, rej) =>
+                    setTimeout(() => rej(new ProviderError('platform_busy: the monitoring platform is rate-limiting us — try again shortly')), LIVE_DETAIL_MAX_MS),
+                  ),
+                ]);
+              })
+            : await live;
+          if (detail === null) throw new Error('detail_slow');
         } catch (err) {
           // Platform down or slow: serve the last saved detail (≤24 h) if there is one.
           if (env.storage !== 'postgres') throw err;
@@ -1144,11 +1287,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           if (!saved) throw err;
           req.log.warn({ err, provider: provider.id }, 'station detail served from saved copy');
           return { provider: provider.id, stationId: req.params.id, ...saved.detail, info: redactInfo(saved.detail.info, req.authUser) ?? saved.detail.info, stale: true, capturedAt: saved.capturedAt };
-        }
-        // Keep the saved copy current (best-effort, not awaited by the user).
-        if (env.storage === 'postgres') {
-          const fresh = detail;
-          void import('../plant-history-repo.js').then(({ saveDetails }) => saveDetails([{ provider: provider.id, stationId: req.params.id, detail: fresh }])).catch(() => {});
         }
         // No intraday curve from the platform (e.g. Sungrow's curve endpoints are
         // outside our API scope): build today's from our own 15-min snapshots.
@@ -1198,7 +1336,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const provider = getProvider(req.params.provider);
       if (!provider) return reply.code(404).send({ error: 'unknown_provider' });
       if (!provider.configured()) return reply.code(503).send({ error: 'provider_not_configured' });
-      if (!provider.overview) return reply.code(501).send({ error: 'overview_unsupported' });
+      // Not an error — this platform simply has no rich overview; the UI uses the
+      // basic detail. (A 501 here showed up as a red console error on every
+      // Deye/GoodWe/… plant page.)
+      if (!provider.overview) return { provider: provider.id, stationId: req.params.id, supported: false };
       try {
         const overview = await providerCache(
           `solar:overview:${provider.id}:${req.params.id}`,
@@ -1207,6 +1348,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         );
         return { provider: provider.id, stationId: req.params.id, ...overview };
       } catch (err) {
+        // A platform served by an API/portal pair whose ACTIVE backend has no
+        // overview (e.g. WHES via its API) — same as unsupported, not a 502.
+        if (err instanceof OverviewUnsupportedError) return { provider: provider.id, stationId: req.params.id, supported: false };
         req.log.error({ err, provider: provider.id }, 'solar station overview failed');
         return solarFail(reply, err);
       }

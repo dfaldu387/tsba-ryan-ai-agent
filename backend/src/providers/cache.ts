@@ -1,3 +1,5 @@
+import { isBackground } from './priority.js';
+
 /** Tiny in-memory TTL cache, shared by providers to bound upstream API calls. */
 interface Entry<T> {
   value: T;
@@ -31,19 +33,30 @@ interface CacheOpts {
   swr?: boolean;
 }
 
+// Keys whose in-flight compute was started by background work (see priority.ts).
+const bgInflight = new Set<string>();
+
 function refresh<T>(key: string, ttlMs: number, compute: () => Promise<T>): Promise<T> {
-  const promise = (async () => {
+  const background = isBackground();
+  let promise!: Promise<T>;
+  promise = (async () => {
     try {
       const value = await compute();
       store.set(key, { value, expiresAt: Date.now() + ttlMs });
       return value;
     } finally {
       // Clear the in-flight marker whether compute() resolved or threw, so a
-      // failure doesn't wedge the key (and retries aren't cached).
-      inflight.delete(key);
+      // failure doesn't wedge the key (and retries aren't cached). Only if it's
+      // still ours — a foreground compute may have superseded it.
+      if (inflight.get(key) === promise) {
+        inflight.delete(key);
+        bgInflight.delete(key);
+      }
     }
   })();
   inflight.set(key, promise);
+  if (background) bgInflight.add(key);
+  else bgInflight.delete(key);
   return promise;
 }
 
@@ -63,10 +76,18 @@ export async function cached<T>(
     return hit.value;
   }
 
-  // No usable value — must compute. Share one in-flight compute across callers.
+  // No usable value — must compute. Share one in-flight compute across callers,
+  // EXCEPT a person joining a background (fleet-scan) compute: that one sits at
+  // low priority behind the whole scan on rate-limited lanes (Deye), so the
+  // interactive caller runs its own, high-priority compute instead.
   const pending = inflight.get(key) as Promise<T> | undefined;
-  if (pending) return pending;
+  if (pending && !(bgInflight.has(key) && !isBackground())) return pending;
   return refresh(key, ttlMs, compute);
+}
+
+/** The cached value for `key` (even if expired), without computing anything. */
+export function peek<T>(key: string): T | undefined {
+  return (store.get(key) as Entry<T> | undefined)?.value;
 }
 
 export function invalidate(prefix: string): void {

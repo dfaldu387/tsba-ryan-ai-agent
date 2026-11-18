@@ -504,6 +504,13 @@ export interface AlertScheduleConfig {
   timezone: string;
   /** Hard cap on digests per day regardless of `times` — a safety limit. */
   maxPerDay: number;
+  /**
+   * Send new problems (plant offline/partial, device offline, inverter fault)
+   * IMMEDIATELY on the scan that detects them, with the suggested fix — instead
+   * of holding them for the next digest. The digests then act as a roll-up of
+   * what's still open plus recoveries. Quiet hours still apply.
+   */
+  instant: boolean;
 }
 
 /**

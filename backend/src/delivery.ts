@@ -23,7 +23,8 @@ function now(): string {
 /** Default, safe provider: logs the reply, sends nothing off the box. */
 async function viaConsole(msg: OutboundMessage): Promise<DraftDelivery> {
   console.info(
-    `[delivery] DRY-RUN draft #${msg.draftId} → ${msg.recipient ?? '(no recipient)'} via ${msg.channel}\n${msg.body}`,
+    // Recipient and reply text are customer data: log only that it happened.
+    `[delivery] DRY-RUN draft #${msg.draftId} via ${msg.channel} (${msg.recipient ? 'recipient set' : 'no recipient'}, ${msg.body.length} chars)`,
   );
   return {
     status: 'delivered',

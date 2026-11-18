@@ -137,7 +137,7 @@ function creds(): { username: string; password: string } {
 async function login(): Promise<string> {
   const { username, password } = creds();
   const { headers, body } = sign({ username, password: encryptPassword(password), loginType: 1, rememberMe: false });
-  const res = await fetch(`${API}/sys/user/login`, { method: 'POST', headers, body }).catch((err) => {
+  const res = await fetch(`${API}/sys/user/login`, { signal: AbortSignal.timeout(30_000), method: 'POST', headers, body }).catch((err) => {
     throw new ProviderError(`elekeeper_network_error: ${(err as Error).message}`);
   });
   const data = (await res.json().catch(() => ({}))) as Envelope<{ token?: string; access_token?: string }>;
@@ -158,7 +158,7 @@ async function getToken(force = false): Promise<string> {
 async function post<T>(path: string, payload: Record<string, unknown>): Promise<T> {
   const run = async (t: string): Promise<Envelope<T>> => {
     const { headers, body } = sign(payload, t);
-    const res = await fetch(`${API}${path}`, { method: 'POST', headers, body }).catch((err) => {
+    const res = await fetch(`${API}${path}`, { signal: AbortSignal.timeout(30_000), method: 'POST', headers, body }).catch((err) => {
       throw new ProviderError(`elekeeper_network_error: ${(err as Error).message}`);
     });
     return (await res.json().catch(() => ({}))) as Envelope<T>;
@@ -548,6 +548,10 @@ export const esolarProvider: SolarProvider = {
         reason: r.alarmCauses || r.alarmContent || undefined,
         solution: formatSolution(r.solutions),
         status: r.alarmStateName || undefined,
+        // The page returns alarm HISTORY: only state 1 ("Pending") is live;
+        // "Turned off" / "Recovered" are closed. (2026-11-18: 577 of 579 SAJ
+        // "faults" were closed alarms — they would all have been emailed.)
+        active: r.alarmState != null ? Number(r.alarmState) === 1 : !/turned off|recover|clos|resolv/i.test(r.alarmStateName ?? ''),
       }));
     } catch {
       /* alarms unavailable — fall back to the plant's summary alarm line */

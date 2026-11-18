@@ -70,6 +70,7 @@ async function authenticate(): Promise<string> {
   let res: Response;
   try {
     res = await fetch(`${env.sigenBaseUrl}${TOKEN_PATH}`, {
+      signal: AbortSignal.timeout(30_000), // a hung connection fails instead of stalling
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username: env.sigenEmail, password: env.sigenPassword }),
@@ -112,6 +113,7 @@ async function sigenGet<T>(path: string): Promise<T | undefined> {
     let res: Response;
     try {
       res = await fetch(`${env.sigenBaseUrl}${path}`, {
+        signal: AbortSignal.timeout(30_000), // a hung connection fails instead of stalling
         headers: { authorization: `Bearer ${token}` },
       });
     } catch (err) {
