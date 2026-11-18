@@ -207,6 +207,13 @@ async function resolveCompanyId(token: string): Promise<string | undefined> {
     headers: { 'Content-Type': 'application/json', authorization: `Bearer ${token}` },
     body: '{}',
   });
+  // Only a successful answer can say "no organisation". A rate-limited or
+  // failed lookup must NOT read as that: it would leave the server on the
+  // personal-scope token (12 of the org's 61 plants) for the token's whole
+  // 30-day life — exactly what a deploy restart under load used to cause.
+  if (data.success === false || /too many/i.test(String(data.msg ?? ''))) {
+    throw new DeyeError(`deye_account_info_failed: ${data.msg || 'no organisation info returned'}`, data.code != null ? String(data.code) : undefined);
+  }
   const org = data.orgInfoList?.find((o) => o.companyId != null);
   return org?.companyId != null ? String(org.companyId) : undefined;
 }
@@ -221,7 +228,9 @@ async function authenticate(): Promise<string> {
   if (!companyId) {
     // Mint a personal token, then discover the org from /v1.0/account/info.
     const personal = await mintToken();
-    companyId = await resolveCompanyId(personal.token).catch(() => undefined);
+    // Throws when the lookup fails: the login is then retried on the next call
+    // instead of caching a wrong-scope token.
+    companyId = await resolveCompanyId(personal.token);
     if (!companyId) {
       // No org: the personal token is the right (and only) scope.
       tokenCache = { token: personal.token, expiresAt: Date.now() + personal.ttlMs };
