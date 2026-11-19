@@ -178,13 +178,22 @@ export const deyeProvider: SolarProvider = {
             lastUpdate: latest.lastUpdateTime,
           }
         : null,
-      devices: devices.map((d) => ({
-        sn: d.deviceSn || '',
-        type: d.deviceType,
+      devices: devices.map((d) => {
+        const sn = d.deviceSn || '';
         // Deye's device endpoint reports online state in `connectStatus`
         // (1 = online); `deviceState` is a fallback for other tenants.
-        online: deviceOnline(d.connectStatus ?? d.deviceState),
-      })),
+        const online = deviceOnline(d.connectStatus ?? d.deviceState);
+        // It has no alarm state, though: the Deye portal shows a device as
+        // "Alerts" when it's communicating but has an alarm still open, so
+        // derive the same from the alarm list (e.g. ERR1 meter comm fail).
+        const alarm = online && alerts.some((a) => a.deviceSn === sn && deyeAlertActive(a));
+        return {
+          sn,
+          type: d.deviceType,
+          online,
+          state: !online ? 'offline' : alarm ? 'alarm' : 'normal',
+        } satisfies import('./types.js').NormalizedDevice;
+      }),
       // alertList is a 30-day HISTORY window: cleared alarms come back too, with an
       // alertEndTime. Keep them all (the plant page shows history) but flag which
       // are still active so the monitor only alerts on live faults.
