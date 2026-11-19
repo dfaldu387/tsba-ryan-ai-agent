@@ -242,6 +242,8 @@ export interface SolarMonitorAlert {
   status?: string;
   /** When the alert monitor first saw this issue (ms) — set by /api/solar/alerts. */
   since?: number;
+  /** When the alert email for this issue went out (ms) — set by /api/solar/alerts. */
+  notifiedAt?: number;
   /** Plant coordinates (decimal degrees), when known — for per-plant quiet hours. */
   lat?: number;
   lng?: number;

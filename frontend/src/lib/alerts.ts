@@ -1,6 +1,7 @@
 // Alert triage model. The backend returns one row per raw alert (thousands, with
 // heavy repetition). The console groups them by plant + fault, and separates
 // SEVERITY (how urgent) from CATEGORY (what kind of problem).
+import { alertFaultName, alertGroupKey } from '@tsba/shared';
 import type { SolarMonitorAlert } from '../api';
 
 export type Severity = 'critical' | 'warning' | 'info';
@@ -37,6 +38,19 @@ export interface AlertGroup {
   lastSeen: number | null; // ms
   /** Open since (ms): when the monitor first saw it, else the platform's start time. */
   since: number | null;
+  /** When the alert email went out (ms), earliest across the group; null = not emailed yet. */
+  notifiedAt: number | null;
+  /** Last email of any kind (alert / reminder / escalation), ms. */
+  lastNotifiedAt: number | null;
+  /** Last time the monitor saw it in a scan, ms. */
+  lastDetected: number | null;
+  /** Most reminders sent for any incident in the group. */
+  reminders: number;
+  /** Soonest next reminder/escalation; null = none scheduled. */
+  nextReminderAt: number | null;
+  escalatedAt: number | null;
+  /** Reopened after an earlier resolution. */
+  reopened: boolean;
   detail?: string;
   solution?: string;
   providerStatus?: string;
@@ -64,14 +78,7 @@ export function classify(a: RawAlert): { severity: Severity; category: Category 
 
 /** Fault name without the plant suffix / serial so repeats group together. */
 export function faultName(a: RawAlert): string {
-  if (a.severity === 'offline') return 'Plant offline';
-  if (a.severity === 'partial') return 'Partial / fault state';
-  if (a.severity === 'device') return 'Device not communicating';
-  let t = a.title;
-  const dash = t.lastIndexOf(' — ');
-  if (dash > 0) t = t.slice(0, dash);
-  if (a.deviceSn) t = t.replace(` (${a.deviceSn})`, '');
-  return t.trim() || 'Fault';
+  return alertFaultName(a); // shared with the backend monitor (triage keys must match)
 }
 
 export function faultCode(a: RawAlert): string | undefined {
@@ -85,20 +92,33 @@ export function groupAlerts(alerts: RawAlert[]): AlertGroup[] {
   const map = new Map<string, AlertGroup>();
   for (const a of alerts) {
     const fault = faultName(a);
-    const key = `${a.provider}:${a.plantId}:${fault.toLowerCase()}`;
+    const key = alertGroupKey(a);
     const { severity, category } = classify(a);
     const at = toMs(a.at);
     let g = map.get(key);
     if (!g) {
       g = {
         key, provider: a.provider, plantId: a.plantId, plant: a.plant, fault, code: faultCode(a),
-        severity, category, count: 0, devices: [], firstSeen: at, lastSeen: at, since: null,
+        severity, category, count: 0, devices: [], firstSeen: at, lastSeen: at, since: null, notifiedAt: null,
+        lastNotifiedAt: null, lastDetected: null, reminders: 0, nextReminderAt: null, escalatedAt: null, reopened: false,
         detail: a.detail, solution: a.solution, providerStatus: a.status, items: [],
       };
       map.set(key, g);
     }
     const s = a.since ?? at;
     if (s != null) g.since = g.since == null ? s : Math.min(g.since, s);
+    if (a.notifiedAt != null) g.notifiedAt = g.notifiedAt == null ? a.notifiedAt : Math.min(g.notifiedAt, a.notifiedAt);
+    const inc = a.incident;
+    if (inc) {
+      const max = (x: number | null, y?: number) => (y == null ? x : x == null ? y : Math.max(x, y));
+      const min = (x: number | null, y?: number | null) => (y == null ? x : x == null ? y : Math.min(x, y));
+      g.lastNotifiedAt = max(g.lastNotifiedAt, inc.lastNotifiedAt);
+      g.lastDetected = max(g.lastDetected, inc.lastSeen);
+      g.reminders = Math.max(g.reminders, inc.reminders);
+      g.nextReminderAt = min(g.nextReminderAt, inc.nextReminderAt);
+      g.escalatedAt = min(g.escalatedAt, inc.escalatedAt);
+      if (inc.reopenedAfter) g.reopened = true;
+    }
     g.count += 1;
     g.items.push(a);
     if (a.deviceSn && !g.devices.includes(a.deviceSn)) g.devices.push(a.deviceSn);
@@ -145,4 +165,30 @@ export function saveTriage(t: Record<string, TriageState>): void {
 }
 export function isSnoozed(t: TriageState | undefined, now = Date.now()): boolean {
   return Boolean(t?.snoozeUntil && t.snoozeUntil > now);
+}
+
+/**
+ * Acknowledged for THIS incident. An acknowledgement made before the group's
+ * current incident opened (the fault resolved and came back) no longer counts —
+ * the backend uses the same rule, so a reopened fault is alerted afresh.
+ */
+export function isAcked(t: TriageState | undefined, g: Pick<AlertGroup, 'since'>): boolean {
+  return Boolean(t?.ack && (g.since == null || t.ack >= g.since));
+}
+
+export type Lifecycle = 'new' | 'reopened' | 'unresolved' | 'acknowledged';
+export const LIFECYCLE_LABEL: Record<Lifecycle, string> = {
+  new: 'New', reopened: 'Reopened', unresolved: 'Unresolved', acknowledged: 'Acknowledged',
+};
+
+/**
+ * Where an open group is in its lifecycle: acknowledged (this incident), else
+ * reopened (came back after a resolution), else unresolved once a reminder has
+ * gone out or it has been open more than a day, else new.
+ */
+export function lifecycleOf(g: AlertGroup, t: TriageState | undefined, now = Date.now()): Lifecycle {
+  if (isAcked(t, g)) return 'acknowledged';
+  if (g.reopened && g.reminders === 0) return 'reopened';
+  if (g.reminders > 0 || (g.since != null && now - g.since > 24 * 3_600_000)) return 'unresolved';
+  return 'new';
 }

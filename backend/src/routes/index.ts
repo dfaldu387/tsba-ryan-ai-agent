@@ -928,6 +928,27 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return { folders: await storage.folders.list() };
   });
 
+  // Which Drive files live in a knowledge folder (ids only), so pickers can
+  // filter ingested documents by folder. Membership isn't stored with the
+  // document, so it's read from Drive — cached briefly per folder.
+  app.get<{ Params: { id: string } }>('/api/drive/folders/:id/files', { preHandler: requirePermission('view') }, async (req, reply) => {
+    const storage = await getStorage();
+    const folder = (await storage.folders.list()).find((f) => f.id === req.params.id);
+    if (!folder) return reply.code(404).send({ error: 'not_found' });
+    try {
+      const { collectFiles } = await import('../google-drive.js');
+      const { cached } = await import('../providers/cache.js');
+      const ids = await cached(`drive-folder-files:${folder.id}:${folder.recursive}`, 10 * 60_000, async () =>
+        (await collectFiles(folder.id, folder.recursive)).map((f) => f.id),
+      );
+      return { fileIds: ids };
+    } catch (err) {
+      if (err instanceof DriveAuthError) return reply.code(409).send({ error: 'drive_not_connected' });
+      req.log.error({ err }, 'list folder files failed');
+      return reply.code(502).send({ error: 'folder_list_failed', message: publicMessage(err, 'Couldn’t read that folder from Drive.') });
+    }
+  });
+
   // Select a folder as a knowledge source and ingest its contents now.
   app.post<{ Body: { folderId?: string; recursive?: boolean } }>(
     '/api/drive/folders',
@@ -1166,14 +1187,35 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       const result = await getSolarAlerts();
       // Stamp each issue with when the monitor first saw it ("open 3 h"), which
       // covers plants going offline — platforms give no start time for those.
-      const { openSince } = await import('../solar-alert-monitor.js');
+      // Also when its alert email went out, so the console can show "Emailed".
+      const { openSince, notifiedAt } = await import('../solar-alert-monitor.js');
       const since = openSince();
-      return { ...result, alerts: result.alerts.map((a) => (since.has(a.id) ? { ...a, since: since.get(a.id) } : a)) };
+      const notified = notifiedAt();
+      return {
+        ...result,
+        alerts: result.alerts.map((a) =>
+          since.has(a.id) || notified.has(a.id) ? { ...a, since: since.get(a.id), notifiedAt: notified.get(a.id) } : a,
+        ),
+      };
     } catch (err) {
       req.log.error({ err }, 'solar alerts scan failed');
       console.error('[solar/alerts] scan failed:', (err as Error).stack || err);
       return reply.code(500).send({ error: 'solar_alerts_failed', detail: publicMessage(err, 'The alert scan failed. Try again in a minute.') });
     }
+  });
+
+  // Resolved issues: confirmed resolutions from the history log (newest first)
+  // plus issues that just cleared and are inside the confirmation window.
+  app.get<{ Querystring: { days?: string } }>('/api/solar/alerts/resolved', { preHandler: requirePermission('view') }, async (req) => {
+    const days = Math.min(30, Math.max(1, Number(req.query.days) || 7));
+    const [{ listResolved }, { pendingResolutions }, { getAlertSettings }] = await Promise.all([
+      import('../solar-alert-history.js'),
+      import('../solar-alert-monitor.js'),
+      import('../solar-alert-settings.js'),
+    ]);
+    const settings = await getAlertSettings();
+    const confirmed = (await listResolved(days)).map((r) => ({ ...r, confirmed: true }));
+    return { resolved: [...pendingResolutions(), ...confirmed], confirmMin: settings.recoveryConfirmMin, recoveryEmails: settings.recovery };
   });
 
   // Shared alert triage (acknowledge / snooze / assign), so the whole team sees

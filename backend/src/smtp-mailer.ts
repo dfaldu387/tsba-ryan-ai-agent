@@ -57,6 +57,7 @@ function toNodemailerAttachments(attachments?: MailAttachment[]) {
  */
 export async function sendMail(args: {
   to: string;
+  cc?: string;
   subject: string;
   text: string;
   html?: string;
@@ -66,6 +67,7 @@ export async function sendMail(args: {
     const info = await getTransport().sendMail({
       from: fromHeader(),
       to: args.to,
+      cc: args.cc || undefined,
       subject: args.subject,
       text: args.text,
       html: args.html,

@@ -8,6 +8,7 @@ import { resolveAttachment, resolveSolution } from './solar-alert-resolution.js'
 import type { SolarMonitorAlert, StationInfoItem } from './providers/types.js';
 import { env } from './env.js';
 import { getSetting, setSetting } from './settings-repo.js';
+import { recordResolved, markRecoveryEmailed, type ResolvedAlertRecord } from './solar-alert-history.js';
 
 /**
  * Background solar-alert monitor.
@@ -16,8 +17,15 @@ import { getSetting, setSetting } from './settings-repo.js';
  * same cached health scan the header panel uses — and emails the configured
  * admin recipients about issues: a plant offline/partial, an inverter (or other
  * device) offline, or a provider-reported fault. It de-dupes by the alert's
- * stable id, so an ongoing issue is emailed once, not every scan, and once the
- * issue clears a short recovery note is sent (when `recovery` is on).
+ * stable id, so an ongoing issue is emailed once, not every scan.
+ *
+ * Resolution lifecycle: open → clearing → resolved. An issue missing from a
+ * scan (whose plant WAS checked) moves to `clearing`; if it comes back inside
+ * `recoveryConfirmMin` it is the same ongoing issue. Once it has stayed clear
+ * that long it is confirmed resolved: logged to the resolved history (shown in
+ * the console) and, if the team was alerted, a "resolved" email goes out right
+ * away (instant/per-plant mode) and it is listed in the next digest. A later
+ * recurrence is a fresh alert that says it came back.
  *
  * Timing: an issue is only emailed once it has persisted at least `admin.delayMin`
  * minutes (a debounce that swallows brief blips). Customer alerts have their own
@@ -30,26 +38,49 @@ import { getSetting, setSetting } from './settings-repo.js';
  * dropped silently.
  *
  * All configuration is read live from the DB on every scan, so admin edits take
- * effect without a restart. State is in-memory: after a restart the first scan
- * treats currently-open issues as new (they are genuinely active).
+ * effect without a restart. Monitor state (open issues with snapshots, pending
+ * confirmations, owed resolved emails) is saved after every scan and restored
+ * at boot, so a restart neither re-alerts open issues nor loses a resolution.
  */
 
 interface Tracked {
   alert: SolarMonitorAlert; // most recent snapshot of this issue
   firstSeen: number; // epoch ms first observed (debounce baseline)
   adminNotified: boolean;
+  /** When the alert email went out (ms). */
+  notifiedAt?: number;
   customerNotified: boolean;
+  /** Seen at least once during the plant's daytime (or it's a fault, which has
+   *  no quiet hours). Issues that open AND clear overnight are logger sleep, not
+   *  real problems, so they never reach the resolved log. */
+  daySeen: boolean;
+  /** Set when this issue already resolved earlier today and came back (ms of that resolution). */
+  recurredAfter?: number;
+}
+
+/** An issue confirmed resolved — owed a "resolved" email and/or listed in the next digest. */
+interface Resolved {
+  alert: SolarMonitorAlert;
+  firstSeen: number;
+  resolvedAt: number;
+  emailed?: boolean;
 }
 
 // Currently-open issues, keyed by alert id.
 const active = new Map<string, Tracked>();
-// Issues that were alerted to admins and have since cleared, owed a recovery
-// email that was deferred (night) — flushed at sunrise.
-const recoveredPending = new Map<string, SolarMonitorAlert>();
-// Issues that cleared recently — if one reappears within FLAP_WINDOW_MS it is
-// the same ongoing issue (keeps its first-seen and notified state), so a
-// flapping plant isn't re-alerted every scan.
-const recentlyCleared = new Map<string, { firstSeen: number; adminNotified: boolean; clearedAt: number }>();
+// Issues that dropped out of the scan but haven't stayed clear for the
+// confirmation window yet (`recoveryConfirmMin`). If one comes back meanwhile it
+// is the SAME ongoing issue — no "resolved" email, no fresh alert.
+const clearing = new Map<string, { t: Tracked; clearedAt: number }>();
+// Confirmed resolutions owed a "resolved" email (held while it's night at the
+// plant, or until SMTP works again). Keyed `id@resolvedAt`.
+const recoveryQueue = new Map<string, Resolved>();
+// Confirmed resolutions to list in the next scheduled digest's roll-up.
+const digestResolved = new Map<string, Resolved>();
+// Recently resolved issue ids → resolution time, so a recurrence is called out.
+const lastResolved = new Map<string, number>();
+const RECUR_WINDOW_MS = 24 * 3_600_000;
+const rkey = (r: Resolved): string => `${r.alert.id}@${r.resolvedAt}`;
 
 // ─── Scheduled-digest bookkeeping (in-memory) ─────────────────────────────────
 // When schedule.enabled is on, admin alerts are not emailed per-plant; they are
@@ -71,7 +102,14 @@ interface RuntimeState {
   digestDay: string;
   slots: string[];
   sends: number;
-  open: [id: string, firstSeen: number, adminNotified: boolean][];
+  /** Legacy (pre-snapshot) shape: id, first seen, notified. Read only. */
+  open?: [id: string, firstSeen: number, adminNotified: boolean][];
+  /** Open issues WITH their alert snapshot, so an issue that clears while the
+   *  server is down is still detected as resolved (and reported) after boot. */
+  tracked?: Tracked[];
+  clearing?: { t: Tracked; clearedAt: number }[];
+  recovery?: Resolved[];
+  digestResolved?: Resolved[];
 }
 let restored = false;
 const restoredOpen = new Map<string, { firstSeen: number; adminNotified: boolean }>();
@@ -86,7 +124,16 @@ async function restoreRuntime(): Promise<void> {
     digestDay = st.digestDay ?? '';
     for (const sl of st.slots ?? []) digestSentSlots.add(sl);
     digestSends = st.sends ?? 0;
-    for (const [id, firstSeen, adminNotified] of st.open ?? []) restoredOpen.set(id, { firstSeen, adminNotified });
+    if (st.tracked) {
+      // Back into `active` directly: the first scan then refreshes what's still
+      // open and moves what cleared during the downtime into `clearing`.
+      for (const t of st.tracked) if (t?.alert?.id) active.set(t.alert.id, { ...t, customerNotified: t.customerNotified ?? false, daySeen: t.daySeen ?? true });
+    } else {
+      for (const [id, firstSeen, adminNotified] of st.open ?? []) restoredOpen.set(id, { firstSeen, adminNotified });
+    }
+    for (const c of st.clearing ?? []) if (c?.t?.alert?.id) clearing.set(c.t.alert.id, c);
+    for (const r of st.recovery ?? []) if (r?.alert?.id) recoveryQueue.set(rkey(r), r);
+    for (const r of st.digestResolved ?? []) if (r?.alert?.id) digestResolved.set(rkey(r), r);
   } catch (err) {
     console.warn('[solar-alert] could not restore monitor state:', (err as Error).message);
   }
@@ -98,7 +145,10 @@ async function saveRuntime(): Promise<void> {
     digestDay,
     slots: [...digestSentSlots],
     sends: digestSends,
-    open: [...active].map(([id, t]) => [id, t.firstSeen, t.adminNotified]),
+    tracked: [...active.values()],
+    clearing: [...clearing.values()],
+    recovery: [...recoveryQueue.values()],
+    digestResolved: [...digestResolved.values()],
   };
   await setSetting(RUNTIME_KEY, state).catch((err) => console.warn('[solar-alert] could not save monitor state:', (err as Error).message));
 }
@@ -213,7 +263,9 @@ function buildAlertEmail(
   const worst = issues[0]; // alerts arrive most-severe first
   const subject = `[Solar Alert] ${plant.plant} — ${worst.title}`;
 
+  const recurred = issues.map((i) => active.get(i.id)?.recurredAfter).find((x) => x != null);
   const issueLines = issues.map((i) => `  • ${i.title}${i.detail ? ` — ${i.detail}` : ''}`);
+  if (recurred) issueLines.push(`  (This issue was resolved ${durLabel(Date.now() - recurred)} ago and has come back.)`);
   const ownerLines = owner.length
     ? owner.map((i) => `  ${i.label}: ${i.value}`)
     : ['  (no owner/contact details available from the provider)'];
@@ -262,6 +314,11 @@ function buildAlertEmail(
         .join('\n      ')}
     </ul>
     ${
+      recurred
+        ? `<p style="margin:-8px 0 16px;color:#b45309;font-size:13px">↻ This issue was resolved ${escapeHtml(durLabel(Date.now() - recurred))} ago and has come back.</p>`
+        : ''
+    }
+    ${
       solution
         ? `<h3 style="margin:0 0 6px;font-size:14px">Suggested solution</h3>
     <div style="white-space:pre-wrap;background:#f0f9f4;border:1px solid #cdebd9;border-radius:8px;padding:12px 14px;margin-bottom:16px;font-size:13.5px;line-height:1.55">${escapeHtml(
@@ -292,34 +349,102 @@ function buildAlertEmail(
   return { subject, text, html };
 }
 
+/** "2 h 15 min", "40 min", "3 days". */
+function durLabel(ms: number): string {
+  const mins = Math.max(1, Math.round(ms / 60_000));
+  if (mins < 60) return `${mins} min`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  if (h < 48) return m ? `${h} h ${m} min` : `${h} h`;
+  return `${Math.round(h / 24)} days`;
+}
+
+/** A timestamp in the fleet's timezone, e.g. "19 Nov, 2:05 pm". */
+function fmtWhen(ms: number, tz: string): string {
+  try {
+    return new Intl.DateTimeFormat('en-AU', { timeZone: tz, day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }).format(ms);
+  } catch {
+    return new Date(ms).toUTCString();
+  }
+}
+
+/**
+ * "Resolved" email for confirmed resolutions — one plant (the usual case) or a
+ * batch across plants. Each line says when the issue opened, when it cleared
+ * and how long it lasted; anything still open on the same plant is listed so a
+ * partial recovery isn't mistaken for "all fixed".
+ */
 function buildRecoveryEmail(
-  plant: SolarMonitorAlert,
-  cleared: SolarMonitorAlert[],
+  items: Resolved[],
+  tz: string,
 ): { subject: string; text: string; html: string } {
-  const subject = `[Solar Recovered] ${plant.plant} — issue resolved`;
-  const lines = cleared.map((i) => `  • ${i.title}`);
+  const plants = groupByPlant(items.map((r) => r.alert));
+  const byId = new Map(items.map((r) => [r.alert.id, r]));
+  const first = items[0];
+  const single = plants.size === 1;
+  const subject = single
+    ? `[Solar Resolved] ${first.alert.plant} — ${items.length === 1 ? `${first.alert.title} cleared after ${durLabel(first.resolvedAt - first.firstSeen)}` : `${items.length} issues cleared`}`
+    : `[Solar Resolved] ${items.length} issue${items.length === 1 ? '' : 's'} cleared across ${plants.size} plants`;
+
+  const stillOpenFor = (k: string): Tracked[] => [...active.values()].filter((t) => plantKey(t.alert) === k);
+  const line = (r: Resolved): string =>
+    `${r.alert.title} — opened ${fmtWhen(r.firstSeen, tz)}, resolved ${fmtWhen(r.resolvedAt, tz)} (${durLabel(r.resolvedAt - r.firstSeen)})`;
+
+  const textRows: string[] = [];
+  for (const [k, alerts] of plants) {
+    textRows.push(`  • ${alerts[0].plant} (${providerName(alerts[0].provider)})`);
+    for (const a of alerts) textRows.push(`      ✓ ${line(byId.get(a.id)!)}`);
+    const open = stillOpenFor(k);
+    if (open.length) textRows.push(`      Still open on this plant: ${open.map((t) => t.alert.title).join('; ')}`);
+  }
   const text = [
-    `A previously reported issue on "${plant.plant}" (${providerName(plant.provider)}) has cleared:`,
+    single
+      ? `A previously reported issue on "${first.alert.plant}" has been resolved and has stayed clear.`
+      : `${items.length} previously reported issues have been resolved and have stayed clear.`,
     '',
-    ...lines,
+    ...textRows,
     '',
-    `Resolved as of ${new Date().toUTCString()}.`,
-    'This is an automated recovery notice from the TSBA solar monitoring system.',
+    'This is an automated notice from the TSBA solar monitoring system.',
   ].join('\n');
-  const html = `<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:620px;color:#0f172a">
+
+  const td = 'padding:7px 10px;border-bottom:1px solid #eef2f7;font-size:13px;vertical-align:top';
+  const th = 'text-align:left;padding:6px 10px;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#94a3b8;border-bottom:2px solid #e2e8f0';
+  const rows = [...plants.entries()]
+    .map(([k, alerts]) => {
+      const open = stillOpenFor(k);
+      return alerts
+        .map((a, i) => {
+          const r = byId.get(a.id)!;
+          return `<tr>
+      <td style="${td}">${i === 0 ? `<strong>${escapeHtml(a.plant)}</strong><br><span style="color:#64748b;font-size:12px">${escapeHtml(providerName(a.provider))}</span>` : ''}</td>
+      <td style="${td};color:#15803d"><strong>✓ ${escapeHtml(a.title)}</strong>${a.detail ? `<br><span style="color:#64748b">${escapeHtml(a.detail)}</span>` : ''}</td>
+      <td style="${td};color:#334155;white-space:nowrap">${escapeHtml(fmtWhen(r.firstSeen, tz))}</td>
+      <td style="${td};color:#334155;white-space:nowrap">${escapeHtml(fmtWhen(r.resolvedAt, tz))}</td>
+      <td style="${td};color:#64748b;white-space:nowrap">${escapeHtml(durLabel(r.resolvedAt - r.firstSeen))}</td>
+    </tr>`;
+        })
+        .join('\n')
+        .concat(
+          open.length
+            ? `<tr><td></td><td colspan="4" style="padding:4px 10px 10px;border-bottom:1px solid #eef2f7;font-size:12.5px;color:#b45309">⚠ Still open on this plant: ${escapeHtml(open.map((t) => t.alert.title).join('; '))}</td></tr>`
+            : '',
+        );
+    })
+    .join('\n');
+
+  const html = `<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:720px;color:#0f172a">
   <div style="background:#15803d;color:#fff;padding:14px 18px;border-radius:8px 8px 0 0;font-size:16px;font-weight:600">
-    ✓ Solar monitoring recovered
+    ✓ ${single ? `Resolved — ${escapeHtml(first.alert.plant)}` : `${items.length} issues resolved`}
   </div>
   <div style="border:1px solid #e2e8f0;border-top:none;border-radius:0 0 8px 8px;padding:18px">
-    <p style="margin:0 0 12px">A previously reported issue on <strong>${escapeHtml(
-      plant.plant,
-    )}</strong> (${escapeHtml(providerName(plant.provider))}) has cleared:</p>
-    <ul style="margin:0 0 16px;padding-left:20px">
-      ${cleared.map((i) => `<li style="margin-bottom:4px">${escapeHtml(i.title)}</li>`).join('\n      ')}
-    </ul>
-    <p style="margin:0;color:#94a3b8;font-size:12px">Resolved as of ${escapeHtml(
-      new Date().toUTCString(),
-    )} · Automated notice from the TSBA solar monitoring system.</p>
+    <p style="margin:0 0 12px">${single ? 'A previously reported issue has been resolved and has stayed clear:' : 'These previously reported issues have been resolved and have stayed clear:'}</p>
+    <table style="border-collapse:collapse;width:100%">
+      <thead><tr>
+        <th style="${th}">Plant</th><th style="${th}">Issue</th><th style="${th}">Opened</th><th style="${th}">Resolved</th><th style="${th}">Lasted</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <p style="margin:14px 0 0;color:#94a3b8;font-size:12px">Times in ${escapeHtml(tz)} · Automated notice from the TSBA solar monitoring system.</p>
   </div>
 </div>`;
   return { subject, text, html };
@@ -336,9 +461,10 @@ function buildRecoveryEmail(
 function buildDigestEmail(p: {
   due: Tracked[];
   stillOpen?: Tracked[];
-  recovered: SolarMonitorAlert[];
+  recovered: Resolved[];
   contacts: Map<string, { name?: string; phone?: string; email?: string }>;
   now: { date: string; minutes: number };
+  tz?: string;
   solutions?: Map<string, string>;
   kind?: 'digest' | 'instant';
 }): { subject: string; text: string; html: string } {
@@ -374,7 +500,11 @@ function buildDigestEmail(p: {
     if (!c) return '';
     return [c.name, c.phone, c.email].filter(Boolean).join(' · ');
   };
-  const issueLine = (t: Tracked): string => `${t.alert.title}${t.alert.detail ? ` — ${t.alert.detail}` : ''}`;
+  const issueLine = (t: Tracked): string =>
+    `${t.alert.title}${t.alert.detail ? ` — ${t.alert.detail}` : ''}${t.recurredAfter ? ' (came back after being resolved)' : ''}`;
+  const tz = p.tz ?? 'Australia/Sydney';
+  const recLabel = (r: Resolved): string =>
+    `resolved ${fmtWhen(r.resolvedAt, tz)} after ${durLabel(r.resolvedAt - r.firstSeen)}`;
 
   const subject = instant
     ? `[Solar Alert] ${plantCount} plant${plantCount === 1 ? '' : 's'} just went down or reported a fault`
@@ -382,7 +512,7 @@ function buildDigestEmail(p: {
       ? `[Solar Alert] ${plantCount} new plant issue${plantCount === 1 ? '' : 's'}${openCount ? ` · ${openCount} still open` : ''}`
       : openCount > 0
         ? `[Solar Digest] ${openCount} plant${openCount === 1 ? '' : 's'} still need attention`
-        : `[Solar Recovered] ${recovered.length} issue${recovered.length === 1 ? '' : 's'} cleared`;
+        : `[Solar Digest] ${recovered.length} issue${recovered.length === 1 ? '' : 's'} resolved — fleet clear`;
 
   // ─── Plain text ───
   const textRows: string[] = [];
@@ -399,14 +529,14 @@ function buildDigestEmail(p: {
     const worst = items[0].alert;
     return `  • ${worst.plant} (${providerName(worst.provider)}) — ${items.map((t) => t.alert.title).join('; ')} [open ${ageLabel(oldestOf(items))}]`;
   });
-  const recRows = recovered.map((a) => `  • ${a.plant} (${providerName(a.provider)}) — ${a.title}`);
+  const recRows = recovered.map((r) => `  • ${r.alert.plant} (${providerName(r.alert.provider)}) — ${r.alert.title} [${recLabel(r)}]`);
   const text = [
     instant ? `Solar monitoring — instant alert, ${stamp}.` : `Solar monitoring digest — ${stamp}.`,
     plantCount ? `\n${instant ? 'Just detected' : 'New since the last email'} — ${plantCount} plant(s):` : '',
     ...(plantCount ? textRows : []),
     openCount ? `\nStill open (already reported) — ${openCount} plant(s):` : '',
     ...(openCount ? openRows : []),
-    recovered.length ? `\nRecovered since the last digest:` : '',
+    recovered.length ? `\nResolved since the last digest — ${recovered.length}:` : '',
     ...(recovered.length ? recRows : []),
     '',
     'This is an automated email from the TSBA solar monitoring system.',
@@ -453,9 +583,9 @@ function buildDigestEmail(p: {
     : '';
 
   const recHtml = recovered.length
-    ? `<h3 style="margin:18px 0 6px;font-size:14px;color:#15803d">✓ Recovered since last digest</h3>
+    ? `<h3 style="margin:18px 0 6px;font-size:14px;color:#15803d">✓ Resolved since last digest (${recovered.length})</h3>
     <ul style="margin:0 0 8px;padding-left:20px;font-size:13px">
-      ${recovered.map((a) => `<li style="margin-bottom:3px">${escapeHtml(a.plant)} <span style="color:#94a3b8">(${escapeHtml(providerName(a.provider))})</span> — ${escapeHtml(a.title)}</li>`).join('\n      ')}
+      ${recovered.map((r) => `<li style="margin-bottom:3px">${escapeHtml(r.alert.plant)} <span style="color:#94a3b8">(${escapeHtml(providerName(r.alert.provider))})</span> — ${escapeHtml(r.alert.title)} <span style="color:#94a3b8">· ${escapeHtml(recLabel(r))}</span></li>`).join('\n      ')}
     </ul>`
     : '';
 
@@ -463,7 +593,7 @@ function buildDigestEmail(p: {
     ? `⚠ Instant alert — ${plantCount} plant${plantCount === 1 ? '' : 's'} just went down or reported a fault`
     : plantCount
       ? `⚠ Solar monitoring digest — ${plantCount} new issue${plantCount === 1 ? '' : 's'}`
-      : `Solar monitoring digest — ${openCount} still open`;
+      : openCount ? `Solar monitoring digest — ${openCount} still open` : `✓ Solar monitoring digest — ${recovered.length} resolved, nothing open`;
   const bannerBg = plantCount ? '#b91c1c' : openCount ? '#b45309' : '#15803d';
 
   const html = `<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:720px;color:#0f172a">
@@ -551,7 +681,10 @@ export interface MonitorRunResult {
   scanned: number;
   active: number;
   newIssues: number;
+  /** Issues that dropped out of this scan (now waiting out the confirmation window). */
   cleared: number;
+  /** Issues confirmed resolved this scan (stayed clear for `recoveryConfirmMin`). */
+  resolved: number;
   /** True when it is night at the fallback location (informational). */
   night: boolean;
   /** How many plants had emails held because it is night at THAT plant. */
@@ -564,10 +697,58 @@ export interface MonitorRunResult {
 // More plants than this tripping on ONE scan (e.g. a provider or regional grid
 // outage) are sent as one combined instant email rather than one email each.
 const INSTANT_BURST_PLANTS = 5;
-// An issue that clears and comes back within this window is treated as the SAME
-// ongoing issue (no new alert, no recovery note) — stops a flapping logger or a
-// borderline fault from emailing on every scan.
-const FLAP_WINDOW_MS = 60 * 60_000;
+
+/**
+ * Email confirmed resolutions owed a "resolved" note. Plants in their own night
+ * are held for the morning (an offline plant "recovering" is only meaningful in
+ * daylight). A few plants → one email each; a burst → one combined email.
+ * Stops on an SMTP failure — the queue is retried next scan.
+ */
+async function sendRecoveryEmails(
+  settings: SolarAlertSettings,
+  to: string,
+  plantNight: (a: SolarMonitorAlert) => boolean,
+): Promise<{ sent: number; deferred: number }> {
+  const queued = [...recoveryQueue.values()];
+  const deferred = new Set(queued.filter((r) => plantNight(r.alert)).map((r) => plantKey(r.alert))).size;
+  const due = queued.filter((r) => !plantNight(r.alert));
+  if (!due.length) return { sent: 0, deferred };
+
+  const tz = settings.schedule.timezone;
+  const byPlant = new Map<string, Resolved[]>();
+  for (const r of due) {
+    const k = plantKey(r.alert);
+    (byPlant.get(k) ?? byPlant.set(k, []).get(k)!).push(r);
+  }
+  const batches = byPlant.size <= INSTANT_BURST_PLANTS ? [...byPlant.values()] : [due];
+
+  let sent = 0;
+  for (const batch of batches) {
+    const { subject, text, html } = buildRecoveryEmail(batch, tz);
+    try {
+      await sendMail({ to, subject, text, html });
+    } catch (err) {
+      if (err instanceof MailSendError) {
+        console.warn('[solar-alert] SMTP send failed — resolved emails held:', err.message);
+        break;
+      }
+      console.error('[solar-alert] failed to email resolution:', (err as Error).message);
+      continue;
+    }
+    sent++;
+    const at = Date.now();
+    for (const r of batch) {
+      recoveryQueue.delete(rkey(r));
+      r.emailed = true;
+      const d = digestResolved.get(rkey(r));
+      if (d) d.emailed = true;
+    }
+    await markRecoveryEmailed(batch.map((r) => ({ id: r.alert.id, resolvedAt: r.resolvedAt })), at).catch((e) =>
+      console.warn('[solar-alert] could not update resolved log:', (e as Error).message),
+    );
+  }
+  return { sent, deferred };
+}
 
 /**
  * Email each plant's due issues as its own alert (full detail, owner info,
@@ -600,7 +781,7 @@ async function sendPlantAlerts(
       sent++;
       for (const i of issues) {
         const t = active.get(i.id);
-        if (t) t.adminNotified = true;
+        if (t) { t.adminNotified = true; t.notifiedAt = Date.now(); }
       }
     } catch (err) {
       if (err instanceof MailSendError) {
@@ -650,7 +831,7 @@ async function sendInstantAlerts(
     else console.error('[solar-alert] failed to send instant alert:', (err as Error).message);
     return { sent: 0, deferred };
   }
-  for (const t of due) t.adminNotified = true;
+  for (const t of due) { t.adminNotified = true; t.notifiedAt = Date.now(); }
   return { sent: 1, deferred };
 }
 
@@ -666,6 +847,7 @@ export async function runAlertMonitorOnce(): Promise<MonitorRunResult> {
     active: 0,
     newIssues: 0,
     cleared: 0,
+    resolved: 0,
     night: false,
     deferredPlants: 0,
     emailsSent: 0,
@@ -708,9 +890,8 @@ export async function runAlertMonitorOnce(): Promise<MonitorRunResult> {
     return detailed.has(k) || alerts.some((x) => x.severity === 'offline' && plantKey(x) === k);
   };
 
-  // Forget flap-guard entries past their window.
   const nowMs = Date.now();
-  for (const [id, c] of recentlyCleared) if (nowMs - c.clearedAt > FLAP_WINDOW_MS) recentlyCleared.delete(id);
+  for (const [id, at] of lastResolved) if (nowMs - at > RECUR_WINDOW_MS) lastResolved.delete(id);
 
   // Insert/refresh currently-open issues.
   let newIssues = 0;
@@ -720,35 +901,83 @@ export async function runAlertMonitorOnce(): Promise<MonitorRunResult> {
       t.alert = a;
       continue;
     }
-    const prev = restoredOpen.get(a.id); // still open from before a restart
-    const flap = recentlyCleared.get(a.id); // cleared moments ago — same ongoing issue
-    if (flap) {
-      recentlyCleared.delete(a.id);
-      recoveredPending.delete(a.id); // it came straight back: no "recovered" note
+    // Dropped out recently but its resolution wasn't confirmed yet: the SAME
+    // ongoing issue (keeps first-seen + notified state; no resolved email).
+    const c = clearing.get(a.id);
+    if (c) {
+      clearing.delete(a.id);
+      c.t.alert = a;
+      active.set(a.id, c.t);
+      continue;
     }
+    const prev = restoredOpen.get(a.id); // still open from before a restart (legacy state)
     active.set(a.id, {
       alert: a,
-      firstSeen: prev?.firstSeen ?? flap?.firstSeen ?? Date.now(),
-      adminNotified: prev?.adminNotified ?? flap?.adminNotified ?? false,
+      firstSeen: prev?.firstSeen ?? nowMs,
+      adminNotified: prev?.adminNotified ?? false,
+      notifiedAt: prev?.adminNotified ? nowMs : undefined,
       customerNotified: false,
+      daySeen: false,
+      // Came back after a CONFIRMED resolution → a fresh alert that says so.
+      recurredAfter: prev ? undefined : lastResolved.get(a.id),
     });
-    if (!prev && !flap) newIssues++;
+    if (!prev) newIssues++;
   }
   restoredOpen.clear(); // only the first scan after boot reconciles
+  for (const t of active.values()) if (!plantNight(t.alert)) t.daySeen = true;
 
-  // Detect cleared issues.
+  // Issues missing from this scan (and whose plant WAS checked) start clearing.
   let cleared = 0;
   for (const [id, t] of [...active]) {
     if (!seen.has(id) && checked(t.alert)) {
       active.delete(id);
+      clearing.set(id, { t, clearedAt: nowMs });
       cleared++;
-      recentlyCleared.set(id, { firstSeen: t.firstSeen, adminNotified: t.adminNotified, clearedAt: nowMs });
-      if (t.adminNotified && settings.recovery) recoveredPending.set(id, t.alert);
     }
   }
 
+  // Confirm resolutions that have stayed clear for the window — and only on a
+  // scan that actually re-checked the plant, so a provider outage can't
+  // "confirm" a fix nobody observed.
+  const confirmMs = Math.max(0, settings.recoveryConfirmMin) * 60_000;
+  const confirmed: ResolvedAlertRecord[] = [];
+  for (const [id, c] of [...clearing]) {
+    if (nowMs - c.clearedAt < confirmMs || !checked(c.t.alert)) continue;
+    clearing.delete(id);
+    lastResolved.set(id, c.clearedAt);
+    const t = c.t;
+    // Opened and cleared inside the plant's night (logger sleep) — not a real
+    // issue: never shown in the alerts, so not logged or emailed either.
+    if (!t.adminNotified && !t.daySeen) continue;
+    const r: Resolved = { alert: t.alert, firstSeen: t.firstSeen, resolvedAt: c.clearedAt };
+    confirmed.push({
+      id: t.alert.id,
+      provider: t.alert.provider,
+      plantId: t.alert.plantId,
+      plant: t.alert.plant,
+      severity: t.alert.severity,
+      title: t.alert.title,
+      detail: t.alert.detail,
+      deviceSn: t.alert.deviceSn,
+      openedAt: t.firstSeen,
+      resolvedAt: c.clearedAt,
+      confirmedAt: nowMs,
+      alerted: t.adminNotified,
+    });
+    // Only issues the team was told about get a "resolved" email / digest line.
+    if (t.adminNotified && settings.recovery) {
+      // Digest-only mode (instant off) reports resolutions in the digest alone.
+      if (!settings.schedule.enabled || settings.schedule.instant) recoveryQueue.set(rkey(r), r);
+      if (settings.schedule.enabled) digestResolved.set(rkey(r), { ...r });
+    }
+  }
+  await recordResolved(confirmed).catch((e) => console.warn('[solar-alert] could not write resolved log:', (e as Error).message));
+  if (!settings.recovery) recoveryQueue.clear();
+  if (!settings.schedule.enabled) digestResolved.clear();
+
   base.newIssues = newIssues;
   base.cleared = cleared;
+  base.resolved = confirmed.length;
   base.active = active.size;
   base.night = settings.quietNight && isNight(settings.lat, settings.lng);
 
@@ -777,35 +1006,21 @@ export async function runAlertMonitorOnce(): Promise<MonitorRunResult> {
     emailsSent += r.sent;
     deferredPlants += r.deferred;
 
-    // Recovery emails for cleared, previously-notified issues (same per-plant
-    // quiet hours — a recovery that clears overnight is sent in the morning).
-    if (recoveredPending.size) {
-      for (const [, issues] of groupByPlant([...recoveredPending.values()])) {
-        const plant = issues[0];
-        if (plantNight(plant)) {
-          deferredPlants++;
-          continue;
-        }
-        const { subject, text, html } = buildRecoveryEmail(plant, issues);
-        try {
-          await sendMail({ to, subject, text, html });
-          emailsSent++;
-          for (const i of issues) recoveredPending.delete(i.id);
-        } catch (err) {
-          if (err instanceof MailSendError) {
-            console.warn('[solar-alert] SMTP send failed — recovery emails held:', err.message);
-            break;
-          }
-          console.error(`[solar-alert] failed to email recovery for ${plant.plant}:`, (err as Error).message);
-        }
-      }
-    }
   }
 
   // Digest mode with instant alerts: outages/faults go out NOW; the digest below
   // then carries the roll-up of what's still open plus recoveries.
   if (recipients.length && settings.schedule.enabled && settings.schedule.instant) {
     const r = await sendInstantAlerts(settings, to, plantNight);
+    emailsSent += r.sent;
+    deferredPlants += r.deferred;
+  }
+
+  // "Resolved" emails as soon as a fix is confirmed — in per-plant mode and in
+  // instant mode alike (digest-only mode leaves them to the digest). Same
+  // per-plant quiet hours: a recovery confirmed overnight goes out at sunrise.
+  if (recipients.length && recoveryQueue.size) {
+    const r = await sendRecoveryEmails(settings, to, plantNight);
     emailsSent += r.sent;
     deferredPlants += r.deferred;
   }
@@ -869,17 +1084,17 @@ async function runScheduledDigest(
   );
   const dueKeys = new Set(due.map((t) => plantKey(t.alert)));
   const stillOpen = [...active.values()].filter((t) => t.adminNotified && !dueKeys.has(plantKey(t.alert)));
-  const recovered = settings.recovery ? [...recoveredPending.values()] : [];
+  const recovered = settings.recovery ? [...digestResolved.values()].sort((a, b) => a.resolvedAt - b.resolvedAt) : [];
   if (!due.length && !stillOpen.length && !recovered.length) {
     return { sent: 0, reason: 'scheduled digest due — nothing open to report' };
   }
 
   const [contacts, solutions] = await Promise.all([
-    contactsFor([...due.map((t) => t.alert), ...stillOpen.map((t) => t.alert), ...recovered]),
+    contactsFor([...due.map((t) => t.alert), ...stillOpen.map((t) => t.alert), ...recovered.map((r) => r.alert)]),
     solutionsFor(due, settings),
   ]);
 
-  const { subject, text, html } = buildDigestEmail({ due, stillOpen, recovered, contacts, now, solutions });
+  const { subject, text, html } = buildDigestEmail({ due, stillOpen, recovered, contacts, now, solutions, tz: timezone });
   try {
     await sendMail({ to: recipients.join(', '), subject, text, html });
   } catch (err) {
@@ -891,8 +1106,18 @@ async function runScheduledDigest(
   }
 
   // Mark everything reported, consume one daily send, and clear recoveries.
-  for (const t of due) t.adminNotified = true;
-  for (const a of recovered) recoveredPending.delete(a.id);
+  const at = Date.now();
+  for (const t of due) {
+    t.adminNotified = true;
+    t.notifiedAt = at;
+  }
+  // The digest is the resolution notice for anything not yet emailed on its own.
+  const firstNotice = recovered.filter((r) => !r.emailed);
+  for (const r of recovered) {
+    digestResolved.delete(rkey(r));
+    recoveryQueue.delete(rkey(r));
+  }
+  await markRecoveryEmailed(firstNotice.map((r) => ({ id: r.alert.id, resolvedAt: r.resolvedAt })), at).catch(() => {});
   digestSends++;
   return { sent: 1, reason: `digest sent — ${due.length} new, ${stillOpen.length} still open, ${recovered.length} recovered` };
 }
@@ -1014,7 +1239,7 @@ export async function sendSampleDigest(): Promise<{
     ];
   }
 
-  const due: Tracked[] = pool.map((a) => ({ alert: a, firstSeen: Date.now() - 3 * 3_600_000, adminNotified: false, customerNotified: false }));
+  const due: Tracked[] = pool.map((a) => ({ alert: a, firstSeen: Date.now() - 3 * 3_600_000, adminNotified: false, customerNotified: false, daySeen: true }));
   // Real issues get real owner details and suggested fixes (a few, to keep the
   // preview quick); synthetic rows have neither.
   const [contacts, solutions] = synthetic
@@ -1039,6 +1264,38 @@ export function openSince(): Map<string, number> {
   return m;
 }
 
+/** When each open issue's alert email went out (ms), by alert id. */
+export function notifiedAt(): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const [id, t] of active) if (t.adminNotified) m.set(id, t.notifiedAt ?? t.firstSeen);
+  return m;
+}
+
+/**
+ * Issues that have dropped out of the scan but whose resolution isn't confirmed
+ * yet (still inside the `recoveryConfirmMin` window) — shown in the console as
+ * "Confirming" so a fix is visible the moment it happens.
+ */
+export function pendingResolutions(): (ResolvedAlertRecord & { confirmed: false })[] {
+  return [...clearing.values()]
+    .filter(({ t }) => t.adminNotified || t.daySeen)
+    .map(({ t, clearedAt }) => ({
+      id: t.alert.id,
+      provider: t.alert.provider,
+      plantId: t.alert.plantId,
+      plant: t.alert.plant,
+      severity: t.alert.severity,
+      title: t.alert.title,
+      detail: t.alert.detail,
+      deviceSn: t.alert.deviceSn,
+      openedAt: t.firstSeen,
+      resolvedAt: clearedAt,
+      confirmedAt: 0,
+      alerted: t.adminNotified,
+      confirmed: false as const,
+    }));
+}
+
 /**
  * Manual "run now" (from the API): shares the scheduled scan's overlap guard, so
  * a click during a scheduled scan can't email the same issues twice.
@@ -1059,9 +1316,9 @@ async function tick(): Promise<void> {
   running = true;
   try {
     const res = await runAlertMonitorOnce();
-    if (res.emailsSent || res.newIssues || res.cleared || res.deferredPlants) {
+    if (res.emailsSent || res.newIssues || res.cleared || res.resolved || res.deferredPlants) {
       console.log(
-        `[solar-alert] scan: ${res.scanned} plants, ${res.active} open, +${res.newIssues}/-${res.cleared}, ${res.emailsSent} email(s)${res.deferredPlants ? `, ${res.deferredPlants} held (night)` : ''}`,
+        `[solar-alert] scan: ${res.scanned} plants, ${res.active} open, +${res.newIssues}/-${res.cleared}, ${res.resolved} resolved, ${res.emailsSent} email(s)${res.deferredPlants ? `, ${res.deferredPlants} held (night)` : ''}`,
       );
     }
   } catch (err) {

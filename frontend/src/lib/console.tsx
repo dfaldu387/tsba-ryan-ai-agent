@@ -19,6 +19,8 @@ import {
   patchAlertTriage,
   type TriagePatch,
   getSolarAlerts,
+  getResolvedAlerts,
+  type ResolvedAlertsResult,
   getSolarOverview,
   refreshSolarOverview,
   getSolarProviders,
@@ -28,7 +30,7 @@ import {
   type SolarProviderInfo,
   type SolarStation,
 } from '../api';
-import { groupAlerts, isSnoozed, loadTriage, TRIAGE_KEY, type AlertGroup, type TriageState } from './alerts';
+import { groupAlerts, isAcked, isSnoozed, loadTriage, TRIAGE_KEY, type AlertGroup, type TriageState } from './alerts';
 
 export type Section =
   | 'dashboard' | 'solar' | 'map' | 'energy' | 'connections' | 'knowledge'
@@ -54,6 +56,8 @@ interface ConsoleValue {
   overview: SolarOverview | null;
   stations: SolarStation[];
   alerts: SolarAlertsResult | null;
+  /** Issues resolved in the last 7 days (+ ones still confirming). */
+  resolved: ResolvedAlertsResult | null;
   groups: AlertGroup[];
   /** Groups that are not acknowledged and not snoozed. */
   openGroups: AlertGroup[];
@@ -105,6 +109,7 @@ export function ConsoleProvider({
   const [providers, setProviders] = useState<SolarProviderInfo[] | null>(null);
   const [overview, setOverview] = useState<SolarOverview | null>(null);
   const [alerts, setAlerts] = useState<SolarAlertsResult | null>(null);
+  const [resolved, setResolved] = useState<ResolvedAlertsResult | null>(null);
   const [fleetLoading, setFleetLoading] = useState(true);
   const [fleetError, setFleetError] = useState<string | null>(null);
   const [alertsLoading, setAlertsLoading] = useState(true);
@@ -155,6 +160,7 @@ export function ConsoleProvider({
       .then(setAlerts)
       .catch(handle)
       .finally(() => setAlertsLoading(false));
+    getResolvedAlerts().then(setResolved).catch(handle);
     void loadTriageFromServer();
   }, [handle, loadTriageFromServer]);
 
@@ -267,7 +273,7 @@ export function ConsoleProvider({
   const groups = useMemo(() => groupAlerts(alerts?.alerts ?? []), [alerts]);
   const openGroups = useMemo(() => {
     const now = Date.now();
-    return groups.filter((g) => !triage[g.key]?.ack && !isSnoozed(triage[g.key], now));
+    return groups.filter((g) => !isAcked(triage[g.key], g) && !isSnoozed(triage[g.key], now));
   }, [groups, triage]);
 
   const providerName = useCallback(
@@ -360,6 +366,7 @@ export function ConsoleProvider({
     overview,
     stations,
     alerts,
+    resolved,
     groups,
     openGroups,
     fleetLoading,

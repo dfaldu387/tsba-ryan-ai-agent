@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { AuthenticatedUser, SolarAlertSettings, AlertResolutionRule, IngestedDocument } from '@tsba/shared';
+import type { AuthenticatedUser, SolarAlertSettings, IngestedDocument } from '@tsba/shared';
 import { AuthError, getAlertSettings, updateAlertSettings, sendTestAlert, listDocuments } from '../api';
+import { ResolutionRuleEditor } from './ResolutionRuleEditor';
 
 /**
  * Admin-editable configuration for the solar alert monitor: who receives alerts,
@@ -114,7 +115,15 @@ function EmailChips({
 
 /** Signature for dirty-tracking. */
 const sig = (s: SolarAlertSettings, recipients: string[]): string =>
-  JSON.stringify([s.enabled, s.intervalMin, s.recovery, s.quietNight, s.lat, s.lng, s.admin.delayMin, s.customer.enabled, s.customer.delayMin, s.includeSolution, s.attachResolution, s.resolutionRules, recipients.join(','), s.schedule.enabled, s.schedule.times.join(','), s.schedule.timezone, s.schedule.maxPerDay, s.schedule.instant]);
+  JSON.stringify([s.enabled, s.intervalMin, s.recovery, s.recoveryConfirmMin, s.quietNight, s.lat, s.lng, s.admin.delayMin, s.customer.enabled, s.customer.delayMin, s.includeSolution, s.attachResolution, s.resolutionRules, recipients.join(','), s.schedule.enabled, s.schedule.times.join(','), s.schedule.timezone, s.schedule.maxPerDay, s.schedule.instant, s.reminders]);
+
+// Reminder interval presets (minutes): 1, 3, 6, 12, 24 hours.
+const REMINDER_PRESETS = [60, 180, 360, 720, 1440];
+const fmtInterval = (min: number): string => {
+  if (min % 1440 === 0) return min === 1440 ? '24 hours' : `${min / 1440} days`;
+  if (min % 60 === 0) return `${min / 60} hour${min === 60 ? '' : 's'}`;
+  return `${Math.round((min / 60) * 100) / 100} hours`;
+};
 
 export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; onAuthError: () => void }) {
   const canEdit = user.permissions.includes('manage_connections');
@@ -128,6 +137,9 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
   const [testing, setTesting] = useState(false);
   // Raw text buffer for the send-times field, so typing commas isn't fought by re-render.
   const [timesText, setTimesText] = useState('');
+  // Reminders: "Custom…" picked (keeps the hours field open) + raw escalation-contacts text.
+  const [customInterval, setCustomInterval] = useState(false);
+  const [escalationText, setEscalationText] = useState('');
 
   useEffect(() => {
     getAlertSettings()
@@ -135,6 +147,7 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
         setS(settings);
         setRecipients(settings.admin.recipients);
         setTimesText(settings.schedule.times.join(', '));
+        setEscalationText(settings.reminders.escalation.recipients.join(', '));
         setBaseline(sig(settings, settings.admin.recipients));
       })
       .catch((err) => {
@@ -161,6 +174,9 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
 
   const patch = <K extends keyof SolarAlertSettings>(k: K, v: SolarAlertSettings[K]) => setS({ ...s, [k]: v });
   const patchSchedule = (p: Partial<SolarAlertSettings['schedule']>) => setS({ ...s, schedule: { ...s.schedule, ...p } });
+  const patchReminders = (p: Partial<SolarAlertSettings['reminders']>) => setS({ ...s, reminders: { ...s.reminders, ...p } });
+  const patchEscalation = (p: Partial<SolarAlertSettings['reminders']['escalation']>) =>
+    setS({ ...s, reminders: { ...s.reminders, escalation: { ...s.reminders.escalation, ...p } } });
   const onTimesChange = (txt: string) => {
     setTimesText(txt);
     patchSchedule({ times: txt.split(',').map((t) => t.trim()).filter(Boolean) });
@@ -176,6 +192,7 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
         enabled: s.enabled,
         intervalMin: s.intervalMin,
         recovery: s.recovery,
+        recoveryConfirmMin: s.recoveryConfirmMin,
         quietNight: s.quietNight,
         lat: s.lat,
         lng: s.lng,
@@ -185,10 +202,12 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
         attachResolution: s.attachResolution,
         resolutionRules: s.resolutionRules,
         schedule: s.schedule,
+        reminders: s.reminders,
       });
       setS(settings);
       setRecipients(settings.admin.recipients);
       setTimesText(settings.schedule.times.join(', '));
+      setEscalationText(settings.reminders.escalation.recipients.join(', '));
       setBaseline(sig(settings, settings.admin.recipients));
       setStatus('Saved · applies on the next scan');
     } catch (err) {
@@ -236,9 +255,10 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
         </div>
         <div className="set-list">
           <div className="set-row"><span className="set-label">Admin recipients</span><span className="set-value">{recipients.join(', ') || '—'}</span></div>
+          <div className="set-row"><span className="set-label">Reminders</span><span className="set-value">{s.reminders.enabled ? `Every ${fmtInterval(s.reminders.intervalMin)}${s.reminders.maxCount ? `, up to ${s.reminders.maxCount}` : ''}${s.reminders.escalation.enabled ? ` · escalate after ${s.reminders.escalation.afterReminders}` : ''}` : 'Off — first alert only'}</span></div>
           <div className="set-row"><span className="set-label">Delivery schedule</span><span className="set-value">{s.schedule.enabled ? `${s.schedule.instant ? 'Instant alerts + ' : ''}Digest at ${s.schedule.times.join(', ')} (${s.schedule.timezone}) · max ${s.schedule.maxPerDay}/day` : 'One email per plant'}</span></div>
           <div className="set-row"><span className="set-label">Sunset quiet hours</span><span className="set-value">{s.quietNight ? 'On' : 'Off'}</span></div>
-          <div className="set-row"><span className="set-label">Recovery emails</span><span className="set-value">{s.recovery ? 'On' : 'Off'}</span></div>
+          <div className="set-row"><span className="set-label">Resolved emails</span><span className="set-value">{s.recovery ? `On · after ${s.recoveryConfirmMin} min clear` : 'Off'}</span></div>
           <div className="set-row"><span className="set-label">Customer alerts</span><span className="set-value">{s.customer.enabled ? `On · after ${s.customer.delayMin} min` : 'Off'}</span></div>
         </div>
         <p className="al-hint">Only managers and admins can change these.</p>
@@ -303,7 +323,15 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
             </div>
           </div>
         </div>
-        <ToggleRow checked={s.recovery} onChange={(v) => patch('recovery', v)} title="Recovery emails" desc="Send a note when a previously-reported issue clears" />
+        <ToggleRow checked={s.recovery} onChange={(v) => patch('recovery', v)} title="Resolved emails" desc="Email when a previously-reported issue is fixed — with when it opened, when it cleared and how long it lasted" />
+        <div className="field">
+          <label htmlFor="al-confirm">Count an issue as resolved after it stays clear for</label>
+          <div className="al-num">
+            <input id="al-confirm" type="number" min={0} max={720} value={s.recoveryConfirmMin} onChange={(e) => patch('recoveryConfirmMin', Number(e.target.value))} />
+            <span className="unit">min</span>
+          </div>
+          <p className="al-hint">If the issue comes back within this time it stays the same open issue, so a flapping plant doesn’t send “resolved” and then a new alert every scan. 0 resolves on the first clean scan.</p>
+        </div>
       </div>
 
       {/* Delivery schedule — batch into digests */}
@@ -419,6 +447,95 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
         )}
       </div>
 
+      {/* Reminders & escalation for issues that stay open */}
+      <div className="al-group">
+        <div className="al-group-h">Reminders &amp; escalation</div>
+        <p className="al-hint" style={{ margin: 0 }}>
+          The first alert always goes out immediately. After that, an issue that is still open and not acknowledged is
+          re-sent only on this schedule. Acknowledging or snoozing it stops reminders; resolving it cancels them.
+        </p>
+        <ToggleRow
+          checked={s.reminders.enabled}
+          onChange={(v) => patchReminders({ enabled: v })}
+          title="Send reminders for unresolved issues"
+          desc="Off: one alert per incident, then nothing until it resolves (the digests still list open issues)"
+        />
+        {s.reminders.enabled && (
+          <div className="al-indent">
+            <div className="al-fields">
+              <div className="field">
+                <label htmlFor="al-rem-every">Remind every</label>
+                <select
+                  id="al-rem-every"
+                  className="al-select"
+                  value={REMINDER_PRESETS.includes(s.reminders.intervalMin) && !customInterval ? String(s.reminders.intervalMin) : 'custom'}
+                  onChange={(e) => {
+                    if (e.target.value === 'custom') return setCustomInterval(true);
+                    setCustomInterval(false);
+                    patchReminders({ intervalMin: Number(e.target.value) });
+                  }}
+                >
+                  {REMINDER_PRESETS.map((m) => <option key={m} value={m}>{fmtInterval(m)}</option>)}
+                  <option value="custom">Custom…</option>
+                </select>
+              </div>
+              {(customInterval || !REMINDER_PRESETS.includes(s.reminders.intervalMin)) && (
+                <div className="field">
+                  <label htmlFor="al-rem-custom">Custom interval</label>
+                  <div className="al-num">
+                    <input id="al-rem-custom" type="number" min={0.25} max={168} step={0.25}
+                      value={Math.round((s.reminders.intervalMin / 60) * 100) / 100}
+                      onChange={(e) => patchReminders({ intervalMin: Math.round(Number(e.target.value) * 60) })} />
+                    <span className="unit">hours</span>
+                  </div>
+                </div>
+              )}
+              <div className="field">
+                <label htmlFor="al-rem-max">Maximum reminders</label>
+                <div className="al-num">
+                  <input id="al-rem-max" type="number" min={0} max={100} value={s.reminders.maxCount}
+                    onChange={(e) => patchReminders({ maxCount: Number(e.target.value) })} />
+                  <span className="unit">{s.reminders.maxCount === 0 ? 'no limit' : 'per issue'}</span>
+                </div>
+              </div>
+            </div>
+            <ToggleRow
+              checked={s.reminders.escalation.enabled}
+              onChange={(v) => patchEscalation({ enabled: v })}
+              title="Escalate issues nobody picks up"
+              desc="Once, after the reminders below go unanswered, email the escalation contacts (admins cc'd) instead of the next reminder"
+            />
+            {s.reminders.escalation.enabled && (
+              <div className="al-indent">
+                <div className="al-fields">
+                  <div className="field">
+                    <label htmlFor="al-esc-after">Escalate after</label>
+                    <div className="al-num">
+                      <input id="al-esc-after" type="number" min={1} max={100} value={s.reminders.escalation.afterReminders}
+                        onChange={(e) => patchEscalation({ afterReminders: Number(e.target.value) })} />
+                      <span className="unit">reminders</span>
+                    </div>
+                  </div>
+                  <div className="field">
+                    <label htmlFor="al-esc-to">Escalation contacts</label>
+                    <input id="al-esc-to" type="text" value={escalationText} placeholder="manager@example.com, owner@example.com"
+                      onChange={(e) => {
+                        setEscalationText(e.target.value);
+                        patchEscalation({ recipients: e.target.value.split(/[,;\s]+/).map((x) => x.trim()).filter(Boolean) });
+                      }} />
+                  </div>
+                </div>
+                {s.reminders.maxCount > 0 && s.reminders.maxCount < s.reminders.escalation.afterReminders && (
+                  <p className="al-hint" style={{ color: 'var(--warning)' }}>
+                    Only {s.reminders.maxCount} reminder(s) are sent, so escalating after {s.reminders.escalation.afterReminders} can never happen. Raise the maximum or lower this.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
       {/* Resolution: AI solution + attachment */}
       <div className="al-group">
         <div className="al-group-h">Resolution</div>
@@ -440,56 +557,12 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
               Rules are checked in order — the first whose keyword appears in the alert wins. If none match, the
               best-matching knowledge-base document is found automatically; if nothing is confident, no file is attached.
             </p>
-            {!docs.length && (
-              <p className="al-hint" style={{ marginBottom: 10 }}>
-                No knowledge-base documents found yet — ingest PDFs under Knowledge base first.
-              </p>
-            )}
-            {s.resolutionRules.map((rule, i) => (
-              <div className="al-rule" key={i}>
-                <input
-                  className="al-rule-kw"
-                  value={rule.keywords}
-                  placeholder="keywords e.g. offline, wifi"
-                  onChange={(e) => {
-                    const rules = [...s.resolutionRules];
-                    rules[i] = { ...rules[i], keywords: e.target.value };
-                    patch('resolutionRules', rules);
-                  }}
-                />
-                <select
-                  className="al-rule-doc"
-                  value={rule.documentId}
-                  onChange={(e) => {
-                    const doc = docs.find((d) => d.id === e.target.value);
-                    const rules = [...s.resolutionRules];
-                    rules[i] = { ...rules[i], documentId: e.target.value, documentTitle: doc?.title ?? '' };
-                    patch('resolutionRules', rules);
-                  }}
-                >
-                  <option value="">Select a document…</option>
-                  {docs.map((d) => (
-                    <option key={d.id} value={d.id}>{d.title}</option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  className="btn ghost sm"
-                  aria-label="Remove rule"
-                  onClick={() => patch('resolutionRules', s.resolutionRules.filter((_, j) => j !== i))}
-                >
-                  Remove
-                </button>
-              </div>
-            ))}
-            <button
-              type="button"
-              className="btn ghost sm"
-              style={{ marginTop: 4, alignSelf: 'flex-start' }}
-              onClick={() => patch('resolutionRules', [...s.resolutionRules, { keywords: '', documentId: '', documentTitle: '' } as AlertResolutionRule])}
-            >
-              + Add rule
-            </button>
+            <ResolutionRuleEditor
+              rules={s.resolutionRules}
+              docs={docs}
+              onChange={(rules) => patch('resolutionRules', rules)}
+              onAuthError={onAuthError}
+            />
           </div>
         )}
       </div>
