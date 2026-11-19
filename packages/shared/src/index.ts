@@ -524,6 +524,10 @@ export interface SolarAlertSettings {
   intervalMin: number;
   /** Send a recovery email when a previously-alerted issue clears. */
   recovery: boolean;
+  /** Minutes an issue must stay clear before it counts as resolved (and the
+   *  "resolved" email goes out). Stops a flapping plant sending resolved/alert
+   *  pairs every scan. 0 = resolve on the first clean scan. */
+  recoveryConfirmMin: number;
   /** Suppress all emails while it is night at the fleet location; send a morning catch-up. */
   quietNight: boolean;
   /** Fleet reference location used for the sunset/sunrise calculation. */

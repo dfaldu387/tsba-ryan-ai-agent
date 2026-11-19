@@ -1412,6 +1412,8 @@ a.icon-btn { text-decoration: none; }
 .al-rule { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
 .al-rule-kw { flex: 1 1 180px; }
 .al-rule-doc { flex: 1 1 200px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font: inherit; font-size: 14px; color: var(--ink); background: var(--sunk); }
+.al-select { width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; font: inherit; font-size: 16px; color: var(--ink); background: var(--sunk); }
+.al-select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .al-rule-doc:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .al-rule .btn.sm { flex: none; }
 

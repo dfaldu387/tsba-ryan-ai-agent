@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { getAlertSolution } from '../api';
 import { useConsole } from '../lib/console';
-import { isSnoozed, type AlertGroup, type Severity } from '../lib/alerts';
+import { isAcked, isSnoozed, type AlertGroup, type Severity } from '../lib/alerts';
 import { Icon } from '../ui';
 import './notification-bell.css';
 
@@ -106,7 +106,7 @@ export function NotificationBell() {
   }, [open, snoozeFor]);
 
   const now = Date.now();
-  const handled = (g: AlertGroup) => Boolean(triage[g.key]?.ack) || isSnoozed(triage[g.key], now);
+  const handled = (g: AlertGroup) => isAcked(triage[g.key], g) || isSnoozed(triage[g.key], now);
 
   // Plant cards from the open (not acknowledged / snoozed) groups, or from the
   // handled ones when that filter is on.

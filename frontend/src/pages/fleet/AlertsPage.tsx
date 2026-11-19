@@ -4,10 +4,12 @@
 // toolbar, saved views and an expandable timeline per group.
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { hasPermission, type Draft, type IngestedDocument, type PlantContacts } from '@tsba/shared';
-import { AuthError, createDraft, getPlantContacts, listDocuments } from '../../api';
+import { AuthError, createDraft, getAlertNotifications, getPlantContacts, listDocuments } from '../../api';
+import type { AlertNotificationRecord } from '@tsba/shared';
 import { useConsole } from '../../lib/console';
+import { fmtLasted, ResolvedAlerts } from './ResolvedAlerts';
 import {
-  CATEGORIES, CATEGORY_LABEL, isSnoozed, SEVERITY_LABEL, type AlertGroup, type Category, type Severity,
+  CATEGORIES, CATEGORY_LABEL, isAcked, isSnoozed, LIFECYCLE_LABEL, lifecycleOf, SEVERITY_LABEL, type AlertGroup, type Category, type Lifecycle, type Severity,
 } from '../../lib/alerts';
 import { brandTokens, customerEmailQuestion, fixQuestion, matchDocs } from '../../lib/aiActions';
 import { fmtAbs, fmtInt, plural } from '../../lib/format';
@@ -15,21 +17,23 @@ import {
   EmptyState, ErrorState, Icon, Menu, Pill, ProviderChip, RelTime, SearchInput, SeverityPill, SkeletonRows, usePref, usePaged, Pager,
 } from '../../ui';
 
-type ViewKey = 'open' | 'critical' | 'offline' | 'mine' | 'ack' | 'snoozed' | 'all';
+type ViewKey = 'open' | 'critical' | 'offline' | 'escalated' | 'mine' | 'ack' | 'snoozed' | 'resolved' | 'all';
 const VIEWS: { key: ViewKey; label: string }[] = [
-  { key: 'open', label: 'Open' },
+  { key: 'open', label: 'Active' },
   { key: 'critical', label: 'Critical' },
   { key: 'offline', label: 'Offline plants' },
+  { key: 'escalated', label: 'Escalated' },
   { key: 'mine', label: 'Assigned to me' },
   { key: 'ack', label: 'Acknowledged' },
   { key: 'snoozed', label: 'Snoozed' },
+  { key: 'resolved', label: 'Resolved' },
   { key: 'all', label: 'All' },
 ];
 interface SavedView { name: string; view: ViewKey; sev: Severity | 'all'; cat: Category | 'all'; provider: string; q: string }
 
 export function AlertsPage({ search }: { search: string }) {
   const {
-    user, groups, alerts, alertsLoading, providers, providerName, triage, setTriage, openPlant, toast, navigate,
+    user, groups, alerts, resolved, alertsLoading, providers, providerName, triage, setTriage, openPlant, toast, navigate,
     upsertDraft, onAuthError, refreshFleet,
   } = useConsole();
   const params = useMemo(() => new URLSearchParams(search), [search]);
@@ -71,7 +75,7 @@ export function AlertsPage({ search }: { search: string }) {
   const stateOf = (g: AlertGroup) => {
     const t = triage[g.key];
     if (isSnoozed(t, now)) return 'snoozed';
-    if (t?.ack) return 'ack';
+    if (isAcked(t, g)) return 'ack';
     return 'open';
   };
 
@@ -81,9 +85,11 @@ export function AlertsPage({ search }: { search: string }) {
       case 'open': return st === 'open';
       case 'critical': return st === 'open' && g.severity === 'critical';
       case 'offline': return st === 'open' && g.category === 'offline';
+      case 'escalated': return g.escalatedAt != null;
       case 'mine': return triage[g.key]?.assignee === me;
       case 'ack': return st === 'ack';
       case 'snoozed': return st === 'snoozed';
+      case 'resolved': return false; // its own list (ResolvedAlerts)
       default: return true;
     }
   };
@@ -91,9 +97,10 @@ export function AlertsPage({ search }: { search: string }) {
   const viewCounts = useMemo(() => {
     const c = {} as Record<ViewKey, number>;
     for (const v of VIEWS) c[v.key] = groups.filter((g) => inView(g, v.key)).length;
+    c.resolved = resolved?.resolved.length ?? 0;
     return c;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groups, triage]);
+  }, [groups, triage, resolved]);
 
   const base = useMemo(() => groups.filter((g) => inView(g, view)), [groups, triage, view]); // eslint-disable-line react-hooks/exhaustive-deps
   const sevCounts = useMemo(() => {
@@ -262,10 +269,12 @@ export function AlertsPage({ search }: { search: string }) {
         {/* ── Filters ── */}
         <div className="c-toolbar">
           <SearchInput value={q} onChange={setQ} label="Search alerts" placeholder="Plant, fault, code or serial…" />
-          <select className="c-select" value={cat} onChange={(e) => setCat(e.target.value as Category | 'all')} aria-label="Category">
-            <option value="all">All categories</option>
-            {CATEGORIES.map((c) => <option key={c} value={c}>{CATEGORY_LABEL[c]}</option>)}
-          </select>
+          {view !== 'resolved' && (
+            <select className="c-select" value={cat} onChange={(e) => setCat(e.target.value as Category | 'all')} aria-label="Category">
+              <option value="all">All categories</option>
+              {CATEGORIES.map((c) => <option key={c} value={c}>{CATEGORY_LABEL[c]}</option>)}
+            </select>
+          )}
           {configured.length > 1 && (
             <select className="c-select" value={provider} onChange={(e) => setProvider(e.target.value)} aria-label="Provider">
               <option value="all">All providers</option>
@@ -287,7 +296,9 @@ export function AlertsPage({ search }: { search: string }) {
           </div>
         )}
 
-        {alertsLoading && !alerts ? (
+        {view === 'resolved' ? (
+          <ResolvedAlerts q={q} provider={provider} />
+        ) : alertsLoading && !alerts ? (
           <SkeletonRows rows={8} cols={6} />
         ) : !alerts ? (
           <div className="c-pad"><ErrorState title="Alerts couldn’t be loaded" onRetry={() => void refreshFleet()} /></div>
@@ -309,10 +320,11 @@ export function AlertsPage({ search }: { search: string }) {
                   <th>Severity</th>
                   <th>Plant</th>
                   <th>Fault</th>
+                  <th>Status</th>
                   <th>Category</th>
                   <th className="num">Count</th>
                   <th>First seen</th>
-                  <th>Last seen</th>
+                  <th>Notifications</th>
                   <th>Owner</th>
                   <th aria-label="Actions" />
                 </tr>
@@ -343,11 +355,17 @@ export function AlertsPage({ search }: { search: string }) {
                         <td className="pg-fault">
                           <span className="c-trunc" title={g.fault}>{g.fault}</span>
                           {g.code && <code className="c-mono">{g.code}</code>}
+                          {g.notifiedAt != null && (
+                            <span className="pg-emailed" title={`Alert email sent ${fmtAbs(g.notifiedAt)} — you’ll get a resolved email when it clears`}>
+                              <Icon name="mail" size={12} /> Emailed
+                            </span>
+                          )}
                         </td>
+                        <td><LifecyclePill g={g} life={lifecycleOf(g, t, now)} /></td>
                         <td>{CATEGORY_LABEL[g.category]}</td>
                         <td className="num">{g.count > 1 ? <Pill tone="neutral">×{fmtInt(g.count)}</Pill> : '1'}</td>
                         <td>{g.firstSeen ? <RelTime t={g.firstSeen} /> : <span className="c-empty-val" title="The provider doesn’t report a start time">—</span>}</td>
-                        <td>{g.lastSeen ? <RelTime t={g.lastSeen} /> : <span className="c-muted" title="Detected in the current scan">just now</span>}</td>
+                        <td><NotifySummary g={g} acked={st === 'ack'} /></td>
                         <td>
                           {st === 'ack' ? <Pill tone="success">Acknowledged</Pill>
                             : st === 'snoozed' ? <Pill tone="neutral" title={`Until ${fmtAbs(t?.snoozeUntil)}`}>Snoozed</Pill>
@@ -365,9 +383,11 @@ export function AlertsPage({ search }: { search: string }) {
                       </tr>
                       {open && (
                         <tr className="pg-expand">
-                          <td colSpan={10}>
+                          <td colSpan={11}>
                             <AlertDetail
                               g={g}
+                              triage={t}
+                              lifecycle={lifecycleOf(g, t, now)}
                               providerName={providerName(g.provider)}
                               docs={docs}
                               ai={aiAnswers[g.key]}
@@ -389,13 +409,92 @@ export function AlertsPage({ search }: { search: string }) {
           </div>
         )}
       </section>
-      <p className="pg-footnote">Acknowledge, assign and snooze are saved in this browser.</p>
+      <p className="pg-footnote">Acknowledge, assign and snooze are shared with the whole team. Cleared issues move to <b>Resolved</b>.</p>
     </div>
   );
 }
 
-function AlertDetail({ g, providerName, docs, ai, aiBusy, canAsk, onAi, onOpenPlant, onOpenDraft }: {
-  g: AlertGroup; providerName: string; docs: IngestedDocument[] | null; ai?: Draft; aiBusy: string | null; canAsk: boolean;
+/** Future time as "in 3 h" / "in 25 min" / "due now" (RelTime is past-only). */
+function fmtIn(t: number): string {
+  const ms = t - Date.now();
+  if (ms <= 60_000) return 'due now';
+  return `in ${fmtLasted(ms)}`;
+}
+
+const LIFE_TONE: Record<Lifecycle, 'info' | 'warning' | 'danger' | 'success'> = {
+  new: 'info', reopened: 'danger', unresolved: 'warning', acknowledged: 'success',
+};
+
+/** Lifecycle status (+ escalated badge) for an open group. */
+function LifecyclePill({ g, life }: { g: AlertGroup; life: Lifecycle }) {
+  return (
+    <span className="pg-life">
+      <Pill tone={LIFE_TONE[life]} dot>{LIFECYCLE_LABEL[life]}</Pill>
+      {g.escalatedAt != null && <Pill tone="danger" title={`Escalated ${fmtAbs(g.escalatedAt)}`}>Escalated</Pill>}
+    </span>
+  );
+}
+
+/** "Reminder 2 · 3 h ago / Next in 3 h", "Alert sent · 2 h ago", "Not emailed". */
+function NotifySummary({ g, acked }: { g: AlertGroup; acked: boolean }) {
+  if (g.notifiedAt == null) return <span className="c-empty-val" title="No email yet: debounce, quiet hours or the next digest">Not emailed</span>;
+  const last = g.lastNotifiedAt ?? g.notifiedAt;
+  return (
+    <span className="pg-notify" title={`First alert ${fmtAbs(g.notifiedAt)} · last email ${fmtAbs(last)}`}>
+      <span>{g.reminders ? `Reminder ${g.reminders}` : 'Alert sent'} · <RelTime t={last} /></span>
+      <span className="c-muted">
+        {acked ? 'Reminders stopped (acknowledged)' : g.nextReminderAt ? `Next ${fmtIn(g.nextReminderAt)}` : 'No more reminders'}
+      </span>
+    </span>
+  );
+}
+
+const KIND_LABEL: Record<AlertNotificationRecord['kind'], string> = {
+  initial: 'Alert sent', reminder: 'Reminder', escalation: 'Escalated', resolved: 'Resolved note',
+};
+
+/** Email history for a group's incidents (initial, reminders, escalation, resolved). */
+function NotificationTimeline({ ids, notifiedAt }: { ids: string[]; notifiedAt: number | null }) {
+  const [rows, setRows] = useState<AlertNotificationRecord[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  const key = ids.join(',');
+  useEffect(() => {
+    let live = true;
+    getAlertNotifications(ids).then((r) => live && setRows(r.notifications)).catch(() => live && setFailed(true));
+    return () => { live = false; };
+  }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (failed) return <p className="c-muted">Email history couldn't be loaded.</p>;
+  if (!rows) return <span className="c-skel" />;
+  if (!rows.length) {
+    return (
+      <p className="c-muted">
+        {notifiedAt != null
+          ? `Alert sent ${fmtAbs(notifiedAt)}, before per-email history was recorded. Reminders from now on will be listed here.`
+          : 'No emails sent for this issue yet.'}
+      </p>
+    );
+  }
+  return (
+    <ol className="pg-timeline">
+      {rows.slice(0, 10).map((r) => (
+        <li key={r.idemKey}>
+          <span className={`pg-tl-dot ${r.status === 'failed' ? 'bad' : ''}`} />
+          <div>
+            <strong>{KIND_LABEL[r.kind]}{r.kind === 'reminder' && r.reminderNo ? ` ${r.reminderNo}` : ''}</strong>
+            <span>
+              {fmtAbs(r.sentAt ?? r.createdAt)}
+              {r.status === 'failed' ? ` · failed (attempt ${r.attempts}), retrying` : r.status === 'sending' ? ' · sending…' : ''}
+              {r.recipients.length ? ` · to ${r.recipients.join(', ')}` : ''}
+            </span>
+          </div>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function AlertDetail({ g, triage, lifecycle, providerName, docs, ai, aiBusy, canAsk, onAi, onOpenPlant, onOpenDraft }: {
+  g: AlertGroup; triage?: { ack?: number; ackBy?: string; snoozeUntil?: number }; lifecycle: Lifecycle; providerName: string; docs: IngestedDocument[] | null; ai?: Draft; aiBusy: string | null; canAsk: boolean;
   onAi: (k: 'fix' | 'email') => void; onOpenPlant: () => void; onOpenDraft: (id: number) => void;
 }) {
   const timeline = [...g.items].sort((a, b) => (b.at ?? 0) - (a.at ?? 0)).slice(0, 12);
@@ -421,9 +520,27 @@ function AlertDetail({ g, providerName, docs, ai, aiBusy, canAsk, onAi, onOpenPl
         <dl className="c-dl">
           <div><dt>Fault code</dt><dd>{g.code ? <code className="c-mono">{g.code}</code> : '—'}</dd></div>
           <div><dt>Devices</dt><dd>{g.devices.length ? g.devices.map((d) => <code key={d} className="c-mono pg-sn">{d}</code>) : '—'}</dd></div>
-          <div><dt>First seen</dt><dd>{fmtAbs(g.firstSeen)}</dd></div>
           <div><dt>Provider status</dt><dd>{g.providerStatus ?? '—'}</dd></div>
         </dl>
+        <div>
+          <h3 className="c-h3">Lifecycle · {LIFECYCLE_LABEL[lifecycle]}</h3>
+          <dl className="pg-life-dl">
+            <div><dt>First detected</dt><dd>{g.since ? fmtAbs(g.since) : fmtAbs(g.firstSeen)}</dd></div>
+            <div><dt>Last detected</dt><dd>{g.lastDetected ? <RelTime t={g.lastDetected} /> : '—'}</dd></div>
+            <div><dt>Unresolved for</dt><dd>{g.since ? fmtLasted(Date.now() - g.since) : '—'}</dd></div>
+            <div><dt>Last notified</dt><dd>{g.lastNotifiedAt ? fmtAbs(g.lastNotifiedAt) : 'Not yet'}</dd></div>
+            <div><dt>Reminders</dt><dd>{fmtInt(g.reminders)}</dd></div>
+            <div><dt>Next reminder</dt><dd>{g.nextReminderAt ? `${fmtAbs(g.nextReminderAt)} (${fmtIn(g.nextReminderAt)})` : '—'}</dd></div>
+            {g.escalatedAt != null && <div><dt>Escalated</dt><dd>{fmtAbs(g.escalatedAt)}</dd></div>}
+            {lifecycle === 'acknowledged' && triage?.ack && (
+              <div><dt>Acknowledged</dt><dd>{fmtAbs(triage.ack)}{triage.ackBy ? ` by ${triage.ackBy}` : ''}</dd></div>
+            )}
+          </dl>
+        </div>
+        <div>
+          <h3 className="c-h3">Emails</h3>
+          <NotificationTimeline ids={[...new Set(g.items.map((a) => a.id))]} notifiedAt={g.notifiedAt} />
+        </div>
         {g.solution && (
           <div className="pg-solution">
             <h3 className="c-h3">Provider guidance</h3>

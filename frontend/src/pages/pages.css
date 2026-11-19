@@ -522,3 +522,28 @@ button.pg-kb-row:focus-visible { outline: 2px solid var(--brand); }
 .pg-map-card-src.is-approx { color: var(--warning); }
 .pg-lfocus.editing::before { animation: none; transform: scale(1); opacity: .5; border-style: dashed; }
 .pg-lfocus.editing { cursor: grab; }
+
+/* ── Alerts: "Emailed" marker on open issues ── */
+.pg-emailed { display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; font-size: 11.5px; color: var(--muted); vertical-align: middle; white-space: nowrap; }
+
+/* ── Resolved issues list (own namespace: rs-) ── */
+.rs-note { display: flex; align-items: center; gap: 6px; margin: 0; padding: 10px var(--sp-3); font-size: 12.5px; color: var(--muted); border-bottom: 1px solid var(--line); }
+.rs-table tbody tr { cursor: pointer; }
+.rs-table td { vertical-align: top; }
+.rs-issue { display: block; max-width: 280px; }
+.rs-cat { display: block; font-size: 12px; }
+@media (max-width: 720px) {
+  .rs-table thead { display: none; }
+  .rs-table tbody tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; padding: 10px var(--sp-3); border-bottom: 1px solid var(--line); height: auto !important; }
+  .rs-table td { height: auto; border: 0; padding: 0; white-space: normal; }
+}
+
+/* -- Alerts: lifecycle status + notification cells -- */
+.pg-life { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.pg-notify { display: flex; flex-direction: column; gap: 1px; font-size: 12.5px; white-space: nowrap; }
+.pg-notify .c-muted { font-size: 12px; }
+.pg-life-dl { display: grid; gap: 6px; margin: 0; }
+.pg-life-dl div { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 10px; align-items: baseline; }
+.pg-life-dl dt { font-size: 12px; color: var(--muted); font-weight: 600; }
+.pg-life-dl dd { margin: 0; font-size: 13.5px; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.pg-timeline li .pg-tl-dot.bad { background: var(--danger); }

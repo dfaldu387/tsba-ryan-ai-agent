@@ -17,6 +17,8 @@ export const DEFAULT_ALERT_SETTINGS: SolarAlertSettings = {
   enabled: true,
   intervalMin: 15,
   recovery: true,
+  // Two scans at the default 15-min interval: a fix must hold before we say so.
+  recoveryConfirmMin: 30,
   quietNight: true,
   // Fleet is AU-heavy; default the sunset reference to Sydney.
   lat: -33.8688,
@@ -38,6 +40,14 @@ export const DEFAULT_ALERT_SETTINGS: SolarAlertSettings = {
     // twice-daily roll-up of what's still open.
     instant: true,
   },
+  // One follow-up a day for anything still open and unacknowledged, at most 3,
+  // so an open fault is never silently forgotten but never spams either.
+  reminders: {
+    enabled: true,
+    intervalMin: 1440,
+    maxCount: 3,
+    escalation: { enabled: false, afterReminders: 2, recipients: [] },
+  },
 };
 
 // In-memory fallback for STORAGE=memory (no database).
@@ -51,6 +61,7 @@ function withDefaults(stored: Partial<SolarAlertSettings> | null): SolarAlertSet
     enabled: stored.enabled ?? d.enabled,
     intervalMin: stored.intervalMin ?? d.intervalMin,
     recovery: stored.recovery ?? d.recovery,
+    recoveryConfirmMin: stored.recoveryConfirmMin ?? d.recoveryConfirmMin,
     quietNight: stored.quietNight ?? d.quietNight,
     lat: stored.lat ?? d.lat,
     lng: stored.lng ?? d.lng,
@@ -71,6 +82,16 @@ function withDefaults(stored: Partial<SolarAlertSettings> | null): SolarAlertSet
       timezone: stored.schedule?.timezone ?? d.schedule.timezone,
       maxPerDay: stored.schedule?.maxPerDay ?? d.schedule.maxPerDay,
       instant: stored.schedule?.instant ?? d.schedule.instant,
+    },
+    reminders: {
+      enabled: stored.reminders?.enabled ?? d.reminders.enabled,
+      intervalMin: stored.reminders?.intervalMin ?? d.reminders.intervalMin,
+      maxCount: stored.reminders?.maxCount ?? d.reminders.maxCount,
+      escalation: {
+        enabled: stored.reminders?.escalation?.enabled ?? d.reminders.escalation.enabled,
+        afterReminders: stored.reminders?.escalation?.afterReminders ?? d.reminders.escalation.afterReminders,
+        recipients: stored.reminders?.escalation?.recipients ?? d.reminders.escalation.recipients,
+      },
     },
     updatedAt: stored.updatedAt,
   };
@@ -101,6 +122,9 @@ export async function saveAlertSettings(patch: Partial<SolarAlertSettings>): Pro
     enabled: patch.enabled ?? current.enabled,
     intervalMin: patch.intervalMin != null ? clampInt(patch.intervalMin, 1, 1440, current.intervalMin) : current.intervalMin,
     recovery: patch.recovery ?? current.recovery,
+    recoveryConfirmMin: patch.recoveryConfirmMin != null
+      ? clampInt(patch.recoveryConfirmMin, 0, 720, current.recoveryConfirmMin)
+      : current.recoveryConfirmMin,
     quietNight: patch.quietNight ?? current.quietNight,
     lat: patch.lat != null ? Number(patch.lat) : current.lat,
     lng: patch.lng != null ? Number(patch.lng) : current.lng,
@@ -118,6 +142,7 @@ export async function saveAlertSettings(patch: Partial<SolarAlertSettings>): Pro
     attachResolution: patch.attachResolution ?? current.attachResolution,
     resolutionRules: patch.resolutionRules != null ? normaliseRules(patch.resolutionRules) : current.resolutionRules,
     schedule: patch.schedule != null ? normaliseSchedule(patch.schedule, current.schedule) : current.schedule,
+    reminders: patch.reminders != null ? normaliseReminders(patch.reminders, current.reminders) : current.reminders,
     updatedAt: new Date().toISOString(),
   };
 
@@ -125,6 +150,9 @@ export async function saveAlertSettings(patch: Partial<SolarAlertSettings>): Pro
   if (!Number.isFinite(next.lng) || next.lng < -180 || next.lng > 180) throw new UserError('Longitude must be between -180 and 180.');
   if (next.enabled && next.admin.recipients.length === 0) {
     throw new UserError('Add at least one admin recipient email, or turn alerts off.');
+  }
+  if (next.reminders.escalation.enabled && next.reminders.escalation.recipients.length === 0) {
+    throw new UserError('Add at least one escalation recipient, or turn escalation off.');
   }
   if (next.schedule.enabled && next.schedule.times.length === 0) {
     throw new UserError('Add at least one send time, or turn scheduled digests off.');
@@ -193,6 +221,25 @@ function normaliseSchedule(
   const maxPerDay = patch.maxPerDay != null ? clampInt(patch.maxPerDay, 1, 48, current.maxPerDay) : current.maxPerDay;
   const instant = patch.instant ?? current.instant;
   return { enabled, times, timezone, maxPerDay, instant: Boolean(instant) };
+}
+
+/** Validate + normalise the reminder/escalation config, merging over the current one. */
+function normaliseReminders(
+  patch: Partial<import('@tsba/shared').AlertReminderConfig>,
+  current: import('@tsba/shared').AlertReminderConfig,
+): import('@tsba/shared').AlertReminderConfig {
+  const esc: Partial<import('@tsba/shared').AlertReminderConfig['escalation']> = patch.escalation ?? {};
+  return {
+    enabled: Boolean(patch.enabled ?? current.enabled),
+    // 15 min floor (below the scan interval it means "every scan" = spam); 7 days ceiling.
+    intervalMin: patch.intervalMin != null ? clampInt(patch.intervalMin, 15, 10080, current.intervalMin) : current.intervalMin,
+    maxCount: patch.maxCount != null ? clampInt(patch.maxCount, 0, 100, current.maxCount) : current.maxCount,
+    escalation: {
+      enabled: Boolean(esc.enabled ?? current.escalation.enabled),
+      afterReminders: esc.afterReminders != null ? clampInt(esc.afterReminders, 1, 100, current.escalation.afterReminders) : current.escalation.afterReminders,
+      recipients: esc.recipients != null ? normaliseRecipients(esc.recipients) : current.escalation.recipients,
+    },
+  };
 }
 
 /** Trim, de-dupe and validate a recipients list; throws on a malformed address. */

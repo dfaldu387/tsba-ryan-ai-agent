@@ -18,6 +18,7 @@ import type {
   IngestedDocument,
   Role,
   SolarAlertSettings,
+  AlertNotificationRecord,
   PlantContacts,
   SourceCard,
   User,
@@ -395,6 +396,11 @@ export function listFolderSources(): Promise<{ folders: DriveFolderSource[] }> {
   return request<{ folders: DriveFolderSource[] }>('/api/drive/folders');
 }
 
+/** Drive file ids inside a knowledge folder (cached server-side ~10 min). */
+export function listFolderFileIds(folderId: string): Promise<{ fileIds: string[] }> {
+  return request<{ fileIds: string[] }>(`/api/drive/folders/${encodeURIComponent(folderId)}/files`);
+}
+
 export function addFolderSource(folderId: string, recursive: boolean): Promise<FolderSyncResult> {
   return request<FolderSyncResult>('/api/drive/folders', {
     method: 'POST',
@@ -553,6 +559,10 @@ export interface SolarMonitorAlert {
   status?: string;
   /** When the alert monitor first saw this issue (ms). */
   since?: number;
+  /** When the alert email for this issue went out (ms); absent = not emailed yet. */
+  notifiedAt?: number;
+  /** Incident lifecycle from the alert monitor (reminders, escalation, reopen). */
+  incident?: AlertIncident;
   lat?: number;
   lng?: number;
 }
@@ -684,6 +694,57 @@ export function getSolarProviders(): Promise<{ providers: SolarProviderInfo[] }>
 
 export function getSolarAlerts(): Promise<SolarAlertsResult> {
   return request<SolarAlertsResult>('/api/solar/alerts');
+}
+
+/** Lifecycle of one open incident, as tracked by the backend alert monitor. */
+export interface AlertIncident {
+  firstSeen: number;
+  lastSeen?: number;
+  notifiedAt?: number;
+  lastNotifiedAt?: number;
+  reminders: number;
+  /** Next reminder/escalation due (ms); null = none will be sent (acknowledged, off, or maxed). */
+  nextReminderAt: number | null;
+  escalatedAt?: number;
+  /** Reopened a fault resolved within the last day (ms of that resolution). */
+  reopenedAfter?: number;
+}
+
+/** Email history (initial / reminders / escalation / resolved) for some alert ids. */
+export function getAlertNotifications(ids: string[]): Promise<{ notifications: AlertNotificationRecord[] }> {
+  return request(`/api/solar/alerts/notifications?ids=${encodeURIComponent(ids.join(','))}`);
+}
+
+/** An issue that cleared: confirmed (stayed clear for the window) or still confirming. */
+export interface ResolvedAlert {
+  id: string;
+  provider: string;
+  plantId: string;
+  plant: string;
+  severity: SolarAlertSeverity;
+  title: string;
+  detail?: string;
+  deviceSn?: string;
+  openedAt: number;
+  resolvedAt: number;
+  confirmedAt: number;
+  /** An alert email went out while it was open. */
+  alerted: boolean;
+  recoveryEmailedAt?: number;
+  reminders?: number;
+  escalatedAt?: number;
+  lastNotifiedAt?: number;
+  ackAt?: number;
+  ackBy?: string;
+  confirmed: boolean;
+}
+export interface ResolvedAlertsResult {
+  resolved: ResolvedAlert[];
+  confirmMin: number;
+  recoveryEmails: boolean;
+}
+export function getResolvedAlerts(days = 7): Promise<ResolvedAlertsResult> {
+  return request<ResolvedAlertsResult>(`/api/solar/alerts/resolved?days=${days}`);
 }
 
 /** A single month's fleet production, kWh (from persisted snapshots). */
