@@ -544,8 +544,43 @@ export interface SolarAlertSettings {
   resolutionRules: AlertResolutionRule[];
   /** Scheduled digest delivery (times + daily cap). */
   schedule: AlertScheduleConfig;
+  /** Follow-up reminders for open, unacknowledged issues, plus escalation. */
+  reminders: AlertReminderConfig;
   /** ISO timestamp of the last save (server-set). */
   updatedAt?: string;
+}
+
+/** Reminder + escalation policy for issues that stay open and unacknowledged. */
+export interface AlertReminderConfig {
+  enabled: boolean;
+  /** Minutes between reminders for the same open issue. */
+  intervalMin: number;
+  /** Most reminders sent per incident (0 = none). */
+  maxCount: number;
+  escalation: {
+    enabled: boolean;
+    /** Escalate once this many reminders have gone unanswered. */
+    afterReminders: number;
+    /** Who the escalation email goes to (in addition to the admin recipients). */
+    recipients: string[];
+  };
+}
+
+/** One alert email in an issue's notification history. */
+export interface AlertNotificationRecord {
+  /** Idempotency key — one record per (incident, kind, reminder number). */
+  idemKey: string;
+  alertIds: string[];
+  kind: 'initial' | 'reminder' | 'escalation' | 'resolved';
+  /** For kind 'reminder': which reminder this was (1-based). */
+  reminderNo?: number;
+  status: 'sending' | 'sent' | 'failed';
+  attempts: number;
+  recipients: string[];
+  /** Epoch ms. */
+  createdAt: number;
+  sentAt?: number;
+  error?: string;
 }
 
 // ─── Sales follow-up agent (Keepwarm) ────────────────────────────────────────
@@ -852,4 +887,31 @@ export interface KwOptOut {
   source: string;
   createdAt: string;
   clients: { name: string; repName: string }[];
+}
+
+// ─── Alert grouping (shared by the console and the backend monitor) ─────────
+/** Minimal alert shape the grouping helpers need. */
+export interface AlertKeyInput {
+  severity: string;
+  provider: string;
+  plantId: string;
+  title: string;
+  deviceSn?: string;
+}
+
+/** Fault name without the plant suffix / serial, so repeats group together. */
+export function alertFaultName(a: AlertKeyInput): string {
+  if (a.severity === 'offline') return 'Plant offline';
+  if (a.severity === 'partial') return 'Partial / fault state';
+  if (a.severity === 'device') return 'Device not communicating';
+  let t = a.title;
+  const dash = t.lastIndexOf(' — ');
+  if (dash > 0) t = t.slice(0, dash);
+  if (a.deviceSn) t = t.replace(` (${a.deviceSn})`, '');
+  return t.trim() || 'Fault';
+}
+
+/** Triage/group key `provider:plantId:fault` — must match between console and backend. */
+export function alertGroupKey(a: AlertKeyInput): string {
+  return `${a.provider}:${a.plantId}:${alertFaultName(a).toLowerCase()}`;
 }

@@ -102,7 +102,7 @@ function DocPicker({
   const inFolder = folder === 'all' ? null : folderFiles[folder];
   const terms = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const results = useMemo(() => {
-    let list = docs.filter((d) => d.status !== 'error');
+    let list = docs.filter((d) => d.status !== 'failed');
     if (Array.isArray(inFolder)) {
       const set = new Set(inFolder);
       list = list.filter((d) => set.has(d.id));
