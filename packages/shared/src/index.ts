@@ -495,21 +495,25 @@ export interface AlertResolutionRule {
  * the inbox from filling with a separate email per plant.
  */
 export interface AlertScheduleConfig {
-  /** On → batch into scheduled digests. Off → the legacy one-email-per-plant flow. */
+  /** On → batch into one combined digest per interval. Off → the legacy one-email-per-plant flow. */
   enabled: boolean;
-  /** 24-hour "HH:MM" times (in `timezone`) at which a digest is sent. The count
-   *  of times listed is "how many times a day". */
-  times: string[];
-  /** IANA timezone the `times` are read in, e.g. "Australia/Sydney". */
-  timezone: string;
-  /** Hard cap on digests per day regardless of `times` — a safety limit. */
-  maxPerDay: number;
   /**
-   * Send new problems (plant offline/partial, device offline, inverter fault)
-   * IMMEDIATELY on the scan that detects them, with the suggested fix — instead
-   * of holding them for the next digest. The digests then act as a roll-up of
-   * what's still open plus recoveries. Quiet hours still apply.
+   * How often the single combined digest is sent, in hours, on the clock in
+   * `timezone` (1 = every hour, on the hour). Each interval sends at most one
+   * email, and only when there are new problems or recoveries to report.
    */
+  intervalHours: number;
+  /** Alert emails are only sent from this local hour (inclusive), e.g. 9 = 09:00. */
+  sendFromHour: number;
+  /** …and before this local hour (exclusive), e.g. 18 = nothing after 18:00. */
+  sendUntilHour: number;
+  /** @deprecated Ignored: digests now follow `intervalHours`. */
+  times: string[];
+  /** IANA timezone the digest clock is read in, e.g. "Australia/Sydney". */
+  timezone: string;
+  /** @deprecated Ignored: the digest cadence is `intervalHours`. */
+  maxPerDay: number;
+  /** @deprecated Ignored: scheduled mode never sends per-plant emails. */
   instant: boolean;
 }
 

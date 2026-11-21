@@ -19,7 +19,8 @@ const settings = {
   includeSolution: false,
   attachResolution: false,
   resolutionRules: [],
-  schedule: { enabled: true, times: [] as string[], timezone: 'Australia/Sydney', maxPerDay: 4, instant: true },
+  // Legacy per-plant flow: these lifecycle tests assert one email per plant as it trips.
+  schedule: { enabled: false, intervalHours: 1, sendFromHour: 9, sendUntilHour: 18, times: [] as string[], timezone: 'Australia/Sydney', maxPerDay: 24, instant: false },
 };
 
 vi.mock('../env.js', () => ({ env: { storage: 'memory' } }));
@@ -144,6 +145,70 @@ describe('solar alert lifecycle', () => {
     expect(sent).toHaveLength(3);
     expect(sent[2].subject).toContain('[Solar Alert]');
     expect(sent[2].text).toContain('has come back');
+  });
+
+  it('scheduled mode sends one combined email per hour, and only when something is new', async () => {
+    const { monitor } = await load();
+    const fault2: SolarMonitorAlert = { ...fault, id: 'deye:p2:fault:F35:SN2', plant: 'Jones Solar', plantId: 'p2', deviceSn: 'SN2' };
+    settings.schedule = { ...settings.schedule, enabled: true };
+    try {
+      // t0 is 12:00 Sydney. 12:10 → the first digest goes out (one email, not one per plant).
+      at(10);
+      scan = [fault];
+      await monitor.runAlertMonitorOnce();
+      expect(sent).toHaveLength(1);
+      expect(sent[0].subject).not.toContain('Smith Residence —');
+
+      // Same hour, nothing new → nothing sent.
+      at(20);
+      await monitor.runAlertMonitorOnce();
+      expect(sent).toHaveLength(1);
+
+      // A second plant trips at 12:40; it waits for the 13:00 digest.
+      at(40);
+      scan = [fault, fault2];
+      await monitor.runAlertMonitorOnce();
+      expect(sent).toHaveLength(1);
+
+      // 13:00 → one email covering the new plant; the still-open one is not repeated as new.
+      at(60);
+      await monitor.runAlertMonitorOnce();
+      expect(sent).toHaveLength(2);
+      expect(sent[1].text).toContain('Jones Solar');
+
+      // 13:30 → no digest slot due → silent.
+      at(90);
+      await monitor.runAlertMonitorOnce();
+      expect(sent).toHaveLength(2);
+
+      // 14:00 with nothing new, both still open → one hourly email carrying the open issues.
+      at(120);
+      await monitor.runAlertMonitorOnce();
+      expect(sent).toHaveLength(3);
+      expect(sent[2].subject).toContain('still need attention');
+    } finally {
+      settings.schedule = { ...settings.schedule, enabled: false };
+    }
+  });
+
+  it('sends nothing outside the 09:00–18:00 window; the morning digest carries what came in overnight', async () => {
+    const { monitor } = await load();
+    settings.schedule = { ...settings.schedule, enabled: true };
+    try {
+      // 19:00 Sydney (t0 is 12:00): a new fault, but outside the window → no email.
+      at(420);
+      scan = [fault];
+      await monitor.runAlertMonitorOnce();
+      expect(sent).toHaveLength(0);
+
+      // 09:00 next morning → the digest goes out with the overnight issue.
+      at(1260);
+      await monitor.runAlertMonitorOnce();
+      expect(sent).toHaveLength(1);
+      expect(sent[0].subject).toContain('[Solar Alert]');
+    } finally {
+      settings.schedule = { ...settings.schedule, enabled: false };
+    }
   });
 
   it('with resolved emails off, the fix is still logged but not emailed', async () => {

@@ -28,17 +28,18 @@ export const DEFAULT_ALERT_SETTINGS: SolarAlertSettings = {
   includeSolution: true,
   attachResolution: false,
   resolutionRules: [],
-  // Batch alerts into two combined digests a day (Sydney time) by default, so the
-  // admin inbox gets one summary email at ~9am and ~5pm instead of a stream of
-  // one-per-plant alerts. Turn `enabled` off to restore the legacy per-plant flow.
+  // One combined alert email per hour (Sydney time) instead of a stream of per-plant
+  // emails. It is sent only when something new or resolved needs reporting.
+  // Turn `enabled` off to restore the legacy per-plant flow.
   schedule: {
     enabled: true,
-    times: ['09:00', '17:00'],
+    intervalHours: 1,
+    sendFromHour: 9,
+    sendUntilHour: 18,
+    times: [],
     timezone: 'Australia/Sydney',
-    maxPerDay: 4,
-    // Outages and faults go out the moment they're detected; the digests are the
-    // twice-daily roll-up of what's still open.
-    instant: true,
+    maxPerDay: 24,
+    instant: false,
   },
   // One follow-up a day for anything still open and unacknowledged, at most 3,
   // so an open fault is never silently forgotten but never spams either.
@@ -78,6 +79,9 @@ function withDefaults(stored: Partial<SolarAlertSettings> | null): SolarAlertSet
     resolutionRules: stored.resolutionRules ?? d.resolutionRules,
     schedule: {
       enabled: stored.schedule?.enabled ?? d.schedule.enabled,
+      intervalHours: stored.schedule?.intervalHours ?? d.schedule.intervalHours,
+      sendFromHour: stored.schedule?.sendFromHour ?? d.schedule.sendFromHour,
+      sendUntilHour: stored.schedule?.sendUntilHour ?? d.schedule.sendUntilHour,
       times: stored.schedule?.times ?? d.schedule.times,
       timezone: stored.schedule?.timezone ?? d.schedule.timezone,
       maxPerDay: stored.schedule?.maxPerDay ?? d.schedule.maxPerDay,
@@ -154,9 +158,6 @@ export async function saveAlertSettings(patch: Partial<SolarAlertSettings>): Pro
   if (next.reminders.escalation.enabled && next.reminders.escalation.recipients.length === 0) {
     throw new UserError('Add at least one escalation recipient, or turn escalation off.');
   }
-  if (next.schedule.enabled && next.schedule.times.length === 0) {
-    throw new UserError('Add at least one send time, or turn scheduled digests off.');
-  }
 
   if (env.storage === 'postgres') await setSetting(KEY, next);
   else memRow = next;
@@ -186,6 +187,18 @@ function normaliseSchedule(
   current: import('@tsba/shared').AlertScheduleConfig,
 ): import('@tsba/shared').AlertScheduleConfig {
   const enabled = patch.enabled ?? current.enabled;
+  const intervalHours = patch.intervalHours != null
+    ? clampInt(patch.intervalHours, 1, 24, current.intervalHours)
+    : current.intervalHours;
+  const sendFromHour = patch.sendFromHour != null
+    ? clampInt(patch.sendFromHour, 0, 23, current.sendFromHour)
+    : current.sendFromHour;
+  const sendUntilHour = patch.sendUntilHour != null
+    ? clampInt(patch.sendUntilHour, 1, 24, current.sendUntilHour)
+    : current.sendUntilHour;
+  if (sendUntilHour <= sendFromHour) {
+    throw new UserError('The send window must end after it starts (e.g. 09:00 to 18:00).');
+  }
 
   let times = current.times;
   if (patch.times != null) {
@@ -220,7 +233,7 @@ function normaliseSchedule(
 
   const maxPerDay = patch.maxPerDay != null ? clampInt(patch.maxPerDay, 1, 48, current.maxPerDay) : current.maxPerDay;
   const instant = patch.instant ?? current.instant;
-  return { enabled, times, timezone, maxPerDay, instant: Boolean(instant) };
+  return { enabled, intervalHours, sendFromHour, sendUntilHour, times, timezone, maxPerDay, instant: Boolean(instant) };
 }
 
 /** Validate + normalise the reminder/escalation config, merging over the current one. */

@@ -135,8 +135,6 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
   const [status, setStatus] = useState('');
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
-  // Raw text buffer for the send-times field, so typing commas isn't fought by re-render.
-  const [timesText, setTimesText] = useState('');
   // Reminders: "Custom…" picked (keeps the hours field open) + raw escalation-contacts text.
   const [customInterval, setCustomInterval] = useState(false);
   const [escalationText, setEscalationText] = useState('');
@@ -146,7 +144,6 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
       .then(({ settings }) => {
         setS(settings);
         setRecipients(settings.admin.recipients);
-        setTimesText(settings.schedule.times.join(', '));
         setEscalationText(settings.reminders.escalation.recipients.join(', '));
         setBaseline(sig(settings, settings.admin.recipients));
       })
@@ -177,10 +174,6 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
   const patchReminders = (p: Partial<SolarAlertSettings['reminders']>) => setS({ ...s, reminders: { ...s.reminders, ...p } });
   const patchEscalation = (p: Partial<SolarAlertSettings['reminders']['escalation']>) =>
     setS({ ...s, reminders: { ...s.reminders, escalation: { ...s.reminders.escalation, ...p } } });
-  const onTimesChange = (txt: string) => {
-    setTimesText(txt);
-    patchSchedule({ times: txt.split(',').map((t) => t.trim()).filter(Boolean) });
-  };
 
   async function save() {
     if (!s) return;
@@ -206,7 +199,6 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
       });
       setS(settings);
       setRecipients(settings.admin.recipients);
-      setTimesText(settings.schedule.times.join(', '));
       setEscalationText(settings.reminders.escalation.recipients.join(', '));
       setBaseline(sig(settings, settings.admin.recipients));
       setStatus('Saved · applies on the next scan');
@@ -256,7 +248,7 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
         <div className="set-list">
           <div className="set-row"><span className="set-label">Admin recipients</span><span className="set-value">{recipients.join(', ') || '—'}</span></div>
           <div className="set-row"><span className="set-label">Reminders</span><span className="set-value">{s.reminders.enabled ? `Every ${fmtInterval(s.reminders.intervalMin)}${s.reminders.maxCount ? `, up to ${s.reminders.maxCount}` : ''}${s.reminders.escalation.enabled ? ` · escalate after ${s.reminders.escalation.afterReminders}` : ''}` : 'Off — first alert only'}</span></div>
-          <div className="set-row"><span className="set-label">Delivery schedule</span><span className="set-value">{s.schedule.enabled ? `${s.schedule.instant ? 'Instant alerts + ' : ''}Digest at ${s.schedule.times.join(', ')} (${s.schedule.timezone}) · max ${s.schedule.maxPerDay}/day` : 'One email per plant'}</span></div>
+          <div className="set-row"><span className="set-label">Delivery schedule</span><span className="set-value">{s.schedule.enabled ? `One email every ${s.schedule.intervalHours}h (${s.schedule.timezone})` : 'One email per plant'}</span></div>
           <div className="set-row"><span className="set-label">Sunset quiet hours</span><span className="set-value">{s.quietNight ? 'On' : 'Off'}</span></div>
           <div className="set-row"><span className="set-label">Resolved emails</span><span className="set-value">{s.recovery ? `On · after ${s.recoveryConfirmMin} min clear` : 'Off'}</span></div>
           <div className="set-row"><span className="set-label">Customer alerts</span><span className="set-value">{s.customer.enabled ? `On · after ${s.customer.delayMin} min` : 'Off'}</span></div>
@@ -285,7 +277,7 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
             <div className="al-banner-title">{s.enabled ? 'Alerts active' : 'Alerts disabled'}</div>
             <div className="al-banner-sub">
               {s.enabled
-                ? `Scanning every ${s.intervalMin} min · ${recipients.length} recipient${recipients.length === 1 ? '' : 's'} · ${s.schedule.enabled ? `${s.schedule.instant ? 'instant alerts · ' : ''}digest at ${s.schedule.times.join(', ') || '—'}` : 'per-plant emails'} · ${s.quietNight ? 'quiet hours on' : 'always on'}`
+                ? `Scanning every ${s.intervalMin} min · ${recipients.length} recipient${recipients.length === 1 ? '' : 's'} · ${s.schedule.enabled ? `one email every ${s.schedule.intervalHours}h` : 'per-plant emails'} · ${s.quietNight ? 'quiet hours on' : 'always on'}`
                 : 'No emails will be sent while disabled'}
             </div>
           </div>
@@ -341,34 +333,54 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
           checked={s.schedule.enabled}
           onChange={(v) => patchSchedule({ enabled: v })}
           title="Batch alerts into scheduled digests"
-          desc="Instead of one email per plant as issues trip, hold everything and send one combined digest at the times below"
+          desc="All alert emails go out as one combined email per interval, instead of one email per plant as issues trip"
         />
         {s.schedule.enabled && (
           <div className="al-indent">
-            <ToggleRow
-              checked={s.schedule.instant}
-              onChange={(v) => patchSchedule({ instant: v })}
-              title="Send outages & faults instantly"
-              desc="A plant going offline, an inverter dropping out or a fault code is emailed on the scan that detects it, with the suggested fix — not held for the next digest"
-            />
             <p className="al-hint" style={{ margin: '10px 0' }}>
-              {s.schedule.instant
-                ? 'At each send time you also get a roll-up: anything not yet emailed, everything still open, and what has recovered.'
-                : 'At each send time, every plant with an open issue goes into a single email.'}{' '}
-              The number of times you list is how many digests you’ll get per day (capped below). Times are read in
-              the timezone shown.
+              One email per interval lists everything: new issues, issues still open, and fixes confirmed since the last
+              email. Nothing is sent when the fleet is clear and nothing was resolved. No emails are sent outside the
+              send window; anything that came up overnight goes out in the first email of the day.
             </p>
-            <div className="field" style={{ marginBottom: 12 }}>
-              <label htmlFor="al-times">Send times <span className="al-hint">· 24-hour, comma-separated (e.g. 09:00, 17:00)</span></label>
-              <input
-                id="al-times"
-                type="text"
-                placeholder="09:00, 17:00"
-                value={timesText}
-                onChange={(e) => onTimesChange(e.target.value)}
-              />
-            </div>
             <div className="al-fields">
+              <div className="field">
+                <label htmlFor="al-every">Send every</label>
+                <div className="al-num">
+                  <input
+                    id="al-every"
+                    type="number"
+                    min={1}
+                    max={24}
+                    value={s.schedule.intervalHours}
+                    onChange={(e) => patchSchedule({ intervalHours: Number(e.target.value) })}
+                  />
+                  <span className="unit">hour(s)</span>
+                </div>
+              </div>
+              <div className="field">
+                <label htmlFor="al-from">Send between</label>
+                <div className="al-num">
+                  <input
+                    id="al-from"
+                    type="number"
+                    min={0}
+                    max={23}
+                    value={s.schedule.sendFromHour}
+                    onChange={(e) => patchSchedule({ sendFromHour: Number(e.target.value) })}
+                  />
+                  <span className="unit">:00 to</span>
+                  <input
+                    id="al-until"
+                    type="number"
+                    min={1}
+                    max={24}
+                    aria-label="Send until hour"
+                    value={s.schedule.sendUntilHour}
+                    onChange={(e) => patchSchedule({ sendUntilHour: Number(e.target.value) })}
+                  />
+                  <span className="unit">:00</span>
+                </div>
+              </div>
               <div className="field">
                 <label htmlFor="al-tz">Timezone <span className="al-hint">· IANA name</span></label>
                 <input
@@ -378,20 +390,6 @@ export function AlertSettings({ user, onAuthError }: { user: AuthenticatedUser; 
                   value={s.schedule.timezone}
                   onChange={(e) => patchSchedule({ timezone: e.target.value })}
                 />
-              </div>
-              <div className="field">
-                <label htmlFor="al-max">Max digests per day</label>
-                <div className="al-num">
-                  <input
-                    id="al-max"
-                    type="number"
-                    min={1}
-                    max={48}
-                    value={s.schedule.maxPerDay}
-                    onChange={(e) => patchSchedule({ maxPerDay: Number(e.target.value) })}
-                  />
-                  <span className="unit">/day</span>
-                </div>
               </div>
             </div>
           </div>
