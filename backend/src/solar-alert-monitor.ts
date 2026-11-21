@@ -795,47 +795,6 @@ async function sendPlantAlerts(
 }
 
 /**
- * Instant delivery (digest mode + `schedule.instant`): everything that tripped
- * and isn't yet reported goes out NOW. A handful of plants → one email each; a
- * burst → one combined email (with fixes) so an outage doesn't flood the inbox.
- */
-async function sendInstantAlerts(
-  settings: SolarAlertSettings,
-  to: string,
-  plantNight: (a: SolarMonitorAlert) => boolean,
-): Promise<{ sent: number; deferred: number }> {
-  const pending = [...active.values()].filter((t) => !t.adminNotified && ageMin(t) >= settings.admin.delayMin);
-  const deferred = new Set(pending.filter((t) => plantNight(t.alert)).map((t) => plantKey(t.alert))).size;
-  const due = pending.filter((t) => !plantNight(t.alert));
-  if (!due.length) return { sent: 0, deferred };
-
-  const plants = new Set(due.map((t) => plantKey(t.alert))).size;
-  if (plants <= INSTANT_BURST_PLANTS) {
-    const r = await sendPlantAlerts(due, settings, to, plantNight);
-    return { sent: r.sent, deferred: deferred + r.deferred };
-  }
-
-  const [contacts, solutions] = await Promise.all([contactsFor(due.map((t) => t.alert)), solutionsFor(due, settings)]);
-  const { subject, text, html } = buildDigestEmail({
-    due,
-    recovered: [],
-    contacts,
-    now: localNow(settings.schedule.timezone),
-    solutions,
-    kind: 'instant',
-  });
-  try {
-    await sendMail({ to, subject, text, html });
-  } catch (err) {
-    if (err instanceof MailSendError) console.warn('[solar-alert] SMTP send failed — instant alert held:', err.message);
-    else console.error('[solar-alert] failed to send instant alert:', (err as Error).message);
-    return { sent: 0, deferred };
-  }
-  for (const t of due) { t.adminNotified = true; t.notifiedAt = Date.now(); }
-  return { sent: 1, deferred };
-}
-
-/**
  * Run one scan + notification pass. Exported so a route can force a run. Never
  * throws: provider/email failures are logged and reflected in the result.
  */
@@ -966,8 +925,8 @@ export async function runAlertMonitorOnce(): Promise<MonitorRunResult> {
     });
     // Only issues the team was told about get a "resolved" email / digest line.
     if (t.adminNotified && settings.recovery) {
-      // Digest-only mode (instant off) reports resolutions in the digest alone.
-      if (!settings.schedule.enabled || settings.schedule.instant) recoveryQueue.set(rkey(r), r);
+      // Scheduled mode reports resolutions only in the hourly digest.
+      if (!settings.schedule.enabled) recoveryQueue.set(rkey(r), r);
       if (settings.schedule.enabled) digestResolved.set(rkey(r), { ...r });
     }
   }
@@ -1000,7 +959,9 @@ export async function runAlertMonitorOnce(): Promise<MonitorRunResult> {
 
   // Per-plant flow (scheduled digests OFF): every due issue is emailed as soon as
   // it passes the debounce, one email per plant, with recovery notes the same way.
-  if (recipients.length && !settings.schedule.enabled) {
+  // Alert emails only go out inside the send window (default 09:00–18:00 local).
+  const sendNow = inSendWindow(settings.schedule, localNow(settings.schedule.timezone).minutes);
+  if (recipients.length && sendNow && !settings.schedule.enabled) {
     const due = [...active.values()].filter((t) => !t.adminNotified && ageMin(t) >= settings.admin.delayMin);
     const r = await sendPlantAlerts(due, settings, to, plantNight);
     emailsSent += r.sent;
@@ -1008,26 +969,18 @@ export async function runAlertMonitorOnce(): Promise<MonitorRunResult> {
 
   }
 
-  // Digest mode with instant alerts: outages/faults go out NOW; the digest below
-  // then carries the roll-up of what's still open plus recoveries.
-  if (recipients.length && settings.schedule.enabled && settings.schedule.instant) {
-    const r = await sendInstantAlerts(settings, to, plantNight);
-    emailsSent += r.sent;
-    deferredPlants += r.deferred;
-  }
-
-  // "Resolved" emails as soon as a fix is confirmed — in per-plant mode and in
-  // instant mode alike (digest-only mode leaves them to the digest). Same
-  // per-plant quiet hours: a recovery confirmed overnight goes out at sunrise.
-  if (recipients.length && recoveryQueue.size) {
+  // "Resolved" emails as soon as a fix is confirmed — legacy per-plant mode only
+  // (in scheduled mode the recovery queue stays empty). Same per-plant quiet
+  // hours: a recovery confirmed overnight goes out at sunrise.
+  if (recipients.length && sendNow && recoveryQueue.size) {
     const r = await sendRecoveryEmails(settings, to, plantNight);
     emailsSent += r.sent;
     deferredPlants += r.deferred;
   }
 
-  // Scheduled-digest flow: ONE combined email at the configured clock times
-  // (capped per day) — new issues not yet emailed, still-open ones, recoveries.
-  if (recipients.length && settings.schedule.enabled) {
+  // Scheduled-digest flow: ONE combined email per interval (hourly by default),
+  // sent only when there are new issues or recoveries to report.
+  if (recipients.length && sendNow && settings.schedule.enabled) {
     const digest = await runScheduledDigest(settings, recipients, plantNight);
     emailsSent += digest.sent;
     if (digest.reason) base.reason = digest.reason;
@@ -1037,6 +990,19 @@ export async function runAlertMonitorOnce(): Promise<MonitorRunResult> {
   base.deferredPlants = deferredPlants;
   if (deferredPlants) base.reason = `${deferredPlants} plant(s) held — night at their location`;
   return base;
+}
+
+/** True when the local minute-of-day is inside [sendFromHour, sendUntilHour). */
+function inSendWindow(s: { sendFromHour: number; sendUntilHour: number }, minutes: number): boolean {
+  return minutes >= s.sendFromHour * 60 && minutes < s.sendUntilHour * 60;
+}
+
+/** Digest clock slots ("HH:00") every `intervalHours` inside the send window: 9→18 hourly = 09:00 … 17:00. */
+function digestSlots(s: { intervalHours: number; sendFromHour: number; sendUntilHour: number }): string[] {
+  const step = Math.min(24, Math.max(1, Math.round(s.intervalHours) || 1));
+  const out: string[] = [];
+  for (let h = s.sendFromHour; h < s.sendUntilHour; h += step) out.push(`${String(h).padStart(2, '0')}:00`);
+  return out;
 }
 
 /**
@@ -1050,10 +1016,10 @@ async function runScheduledDigest(
   recipients: string[],
   plantNight: (a: SolarMonitorAlert) => boolean,
 ): Promise<{ sent: number; reason?: string }> {
-  const { times, timezone, maxPerDay } = settings.schedule;
-  if (!times.length) return { sent: 0, reason: 'scheduled digests on but no send times configured' };
+  const { timezone } = settings.schedule;
+  const times = digestSlots(settings.schedule);
 
-  // Roll over to a new local day → reset the per-day slot/cap bookkeeping.
+  // Roll over to a new local day → reset the per-day slot bookkeeping.
   const now = localNow(timezone);
   if (now.date !== digestDay) {
     digestDay = now.date;
@@ -1061,7 +1027,7 @@ async function runScheduledDigest(
     digestSends = 0;
   }
 
-  // Which configured times are due (reached today) but not yet consumed?
+  // Which digest slots are due (reached today) but not yet consumed?
   const dueSlots = times.filter((t) => slotMinutes(t) <= now.minutes && !digestSentSlots.has(t));
   if (!dueSlots.length) {
     const next = times.find((t) => slotMinutes(t) > now.minutes);
@@ -1069,15 +1035,11 @@ async function runScheduledDigest(
   }
 
   // Consume the due slots regardless of whether we end up sending, so we don't
-  // re-evaluate them every scan for the rest of the day.
+  // re-evaluate them every scan for the rest of the hour.
   for (const s of dueSlots) digestSentSlots.add(s);
 
-  if (digestSends >= maxPerDay) {
-    return { sent: 0, reason: `daily digest cap reached (${maxPerDay}/day)` };
-  }
-
   // New: open issues past the debounce, not yet emailed, not in their own night.
-  // Still open: already emailed (instantly or in an earlier digest), still active.
+  // Still open: already emailed in an earlier digest, still active (context only).
   // Plus any pending recoveries.
   const due = [...active.values()].filter(
     (t) => !t.adminNotified && ageMin(t) >= settings.admin.delayMin && !plantNight(t.alert),
@@ -1085,13 +1047,17 @@ async function runScheduledDigest(
   const dueKeys = new Set(due.map((t) => plantKey(t.alert)));
   const stillOpen = [...active.values()].filter((t) => t.adminNotified && !dueKeys.has(plantKey(t.alert)));
   const recovered = settings.recovery ? [...digestResolved.values()].sort((a, b) => a.resolvedAt - b.resolvedAt) : [];
+  // Every hour: one email with whatever is new, still open, or resolved. Only a
+  // completely clear fleet with nothing to say gets no email.
   if (!due.length && !stillOpen.length && !recovered.length) {
-    return { sent: 0, reason: 'scheduled digest due — nothing open to report' };
+    return { sent: 0, reason: 'hourly digest due — nothing open or resolved to report' };
   }
 
   const [contacts, solutions] = await Promise.all([
     contactsFor([...due.map((t) => t.alert), ...stillOpen.map((t) => t.alert), ...recovered.map((r) => r.alert)]),
-    solutionsFor(due, settings),
+    // Still-open issues need their fix too, or it vanishes after the first email.
+    // Solutions are cached per fault, so repeating them each hour is cheap.
+    solutionsFor([...due, ...stillOpen], settings),
   ]);
 
   const { subject, text, html } = buildDigestEmail({ due, stillOpen, recovered, contacts, now, solutions, tz: timezone });
